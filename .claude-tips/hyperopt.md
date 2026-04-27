@@ -24,16 +24,41 @@ Pour la méthodologie staged, voir [HYPEROPT_PLAYBOOK.md](../HYPEROPT_PLAYBOOK.m
 
 ## Loss function — choix par stratégie
 
+### Loss functions custom du fork
+
+| Comportement stratégie | Loss function | Métriques clés |
+|---|---|---|
+| **DCA / mean-reversion** | `MoutonMeanRevHyperOptLoss` | 8 métriques additives: CAGR (22%), K-ratio (22%), PF (12%), quarterly (14%), payoff (8%), diversité corr-daily (8%), TUW santé (8%), confiance sqrt (6%). Gates multiplicatives: concentration sigmoid + exp DD (×8). Hard filters avec gradient: profit, trades, WR≥55%, DD≤45%, pairs≥5 |
+| **Momentum / trend-following** | `MoutonMomentumHyperOptLoss` | 9 métriques additives: Sharpe (18%), payoff (18%), tail (14%), CAGR (13%), PF (9%), quarterly (9%), diversité corr-daily (7%), TUW santé (7%), confiance sqrt (5%). Gates multiplicatives: consec losses sigmoid + exp DD (×10). Hard filters avec gradient: profit, trades, DD≤40%, payoff≥0.5, pairs≥5 |
+| Diversifié multi-pair | `Mouton2HyperOptLoss` | Analyse trimestrielle pondérée + multi-metric + per-pair scoring (75% global / 25% par paire) |
+
+### Loss functions standard freqtrade
+
 | Comportement stratégie | Use | Do NOT use |
 |---|---|---|
 | Patient (attend jours/semaines) | `CalmarHyperOptLoss` | `SharpeHyperOptLossDaily` (pénalise inactivité) |
 | Fréquente (trades chaque jour) | `SharpeHyperOptLossDaily` | `CalmarHyperOptLoss` (ignore consistance) |
 | Safety-first (DD = mort) | `MaxDrawDownHyperOptLoss` | Raw profit losses |
-| Diversifié multi-pair | `Mouton2HyperOptLoss` | Anything sans pair diversity penalty |
 
-**Calmar = profit / max drawdown.** Best pour DCA qui doit sit out les bear markets. Un bot qui ne trade pas pendant 2 semaines mais évite un crash -50% score mieux qu'un bot qui trade quotidiennement à travers le crash.
+### Pourquoi MoutonMeanRev et pas Calmar ?
 
-**Sharpe pénalise les jours à rendement zéro.** Pousse l'optimizer vers des params qui entrent chaque jour — exactement faux pour une stratégie mean-reversion qui doit attendre des setups extrêmes.
+**Calmar** = profit / max drawdown, point. `MoutonMeanRevHyperOptLoss` utilise 8 métriques additives à poids honnêtes (ce que le poids dit = ce que la métrique pèse réellement) + 2 gates multiplicatives intentionnellement dominantes (concentration, DD exp). Architecture:
+
+- **Additif (discrimine entre bonnes stratégies)**: CAGR 22%, K-ratio Kestner 22%, PF 12%, quarterly consistance+magnitude 14%, payoff 8%, diversité daily-corr 8%, TUW santé 8%, confiance sqrt 6%
+- **Gates (élimine les mauvaises)**: concentration sigmoid centrée 0.4, exp(8×DD)
+- **Hard filters avec gradient TPE**: WR≥55% (DCA doit reverter), DD≤45%, trades≥60, pairs≥5
+
+Pas d'expectancy (redondant avec PF+payoff — 3 métriques pour la même info). Quarterly inclut maintenant la magnitude (pire trimestre vs moyenne), pas juste binaire profitable/pas. Diversité utilise des buckets journaliers pour la corrélation (le timestamp exact produisait une matrice creuse inutile).
+
+### Pourquoi MoutonMomentum et pas Sharpe ?
+
+**Sharpe** = return / volatilité, point. `MoutonMomentumHyperOptLoss` utilise 9 métriques additives + 2 gates multiplicatives. Architecture:
+
+- **Additif**: Sharpe 18%, payoff 18%, tail ratio 14%, CAGR 13%, PF 9%, quarterly+magnitude 9%, diversité daily-corr 7%, TUW santé 7%, confiance sqrt 5%
+- **Gates**: consec losses sigmoid centrée 12, exp(10×DD) — plus strict que MeanRev
+- **Hard filters avec gradient TPE**: payoff≥0.5 (let profits run obligatoire), DD≤40%, trades≥40, pairs≥5
+
+TUW et confiance sont additives (poids honnêtes), pas multiplicatives stackées. Seules les gates (consec losses, DD) sont multiplicatives — c'est voulu et documenté.
 
 ## Common traps (retour d'expérience)
 
