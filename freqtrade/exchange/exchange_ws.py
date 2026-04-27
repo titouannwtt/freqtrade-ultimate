@@ -121,9 +121,12 @@ class ExchangeWS:
 
     async def _schedule_while_true(self) -> None:
         # For the ones we should be watching
+        new_count = 0
         for p in self._klines_watching:
             # Check if they're already scheduled
             if p not in self._klines_scheduled:
+                if new_count > 0:
+                    await asyncio.sleep(0.1)
                 self._klines_scheduled.add(p)
                 pair, timeframe, candle_type = p
                 task = asyncio.create_task(
@@ -138,6 +141,9 @@ class ExchangeWS:
                         candle_type=candle_type,
                     )
                 )
+                new_count += 1
+        if new_count > 1:
+            logger.debug(f"Staggered subscription of {new_count} pairs (100ms apart)")
 
     async def _unwatch_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         try:
@@ -170,21 +176,36 @@ class ExchangeWS:
     async def _continuously_async_watch_ohlcv(
         self, pair: str, timeframe: str, candle_type: CandleType
     ) -> None:
-        try:
-            while (pair, timeframe, candle_type) in self._klines_watching:
-                start = dt_ts()
-                data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
-                self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
-                logger.debug(
-                    f"watch done {pair}, {timeframe}, data {len(data)} "
-                    f"in {(dt_ts() - start) / 1000:.3f}s"
+        max_retries = 5
+        retry_count = 0
+        while (pair, timeframe, candle_type) in self._klines_watching:
+            try:
+                while (pair, timeframe, candle_type) in self._klines_watching:
+                    start = dt_ts()
+                    data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
+                    self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
+                    retry_count = 0
+                    logger.debug(
+                        f"watch done {pair}, {timeframe}, data {len(data)} "
+                        f"in {(dt_ts() - start) / 1000:.3f}s"
+                    )
+            except ccxt.ExchangeClosedByUser:
+                logger.debug("Exchange connection closed by user")
+                break
+            except ccxt.BaseError:
+                retry_count += 1
+                if retry_count > max_retries:
+                    logger.warning(
+                        f"WS watch for {pair}, {timeframe} failed {max_retries} times, giving up"
+                    )
+                    break
+                delay = min(2**retry_count, 30)
+                logger.info(
+                    f"WS watch for {pair}, {timeframe} failed "
+                    f"(attempt {retry_count}/{max_retries}), retrying in {delay}s"
                 )
-        except ccxt.ExchangeClosedByUser:
-            logger.debug("Exchange connection closed by user")
-        except ccxt.BaseError:
-            logger.exception(f"Exception in continuously_async_watch_ohlcv for {pair}, {timeframe}")
-        finally:
-            self._klines_watching.discard((pair, timeframe, candle_type))
+                await asyncio.sleep(delay)
+        self._klines_watching.discard((pair, timeframe, candle_type))
 
     def schedule_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         """
