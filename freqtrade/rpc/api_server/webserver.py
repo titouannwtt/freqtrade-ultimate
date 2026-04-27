@@ -1,4 +1,5 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
 from typing import Any
@@ -193,8 +194,15 @@ class ApiServer(RPCHandler):
         if ApiServer._message_stream:
             ApiServer._message_stream.publish(msg)
 
+    _last_rpc_error: dict[str, float] = {}
+
     def handle_rpc_exception(self, request, exc):
-        logger.error(f"API Error calling: {exc}")
+        now = time.monotonic()
+        key = str(exc)
+        last = self._last_rpc_error.get(key, 0)
+        if now - last > 300:
+            logger.error(f"API Error calling: {exc}")
+            self._last_rpc_error[key] = now
         return JSONResponse(
             status_code=502, content={"error": f"Error querying {request.url.path}: {exc.message}"}
         )
