@@ -7,7 +7,7 @@ I've been running Freqtrade in production for **four years now**. Over that time
 - I can iterate freely on the parts that matter to my stack (Hyperliquid, DCA, fleet monitoring) without waiting for upstream review.
 - Anyone who finds one of these changes useful can **cherry-pick it into their own setup** — or use this whole fork as a drop-in replacement. Everything here is GPL-3.0, just like upstream.
 
-Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, a custom hyperopt loss, a more ergonomic hyperopt CLI, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
+Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, custom hyperopt losses (one for DCA/mean-reversion, one for momentum/trend-following), a more ergonomic hyperopt CLI, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
 
 <p align="center">
   <img src=".readme_illustrations/frequi-dashboard-overview.png" alt="FreqUI fork dashboard — pulled automatically by 'freqtrade install-ui' in this fork" width="900">
@@ -32,13 +32,13 @@ Five concrete motivations on top of the rationale above:
 
 1. **Hyperliquid-grade resiliency.** On DEXes (and sometimes on CEXes too) a position can disappear from under you — ADL, manual close from the web UI, liquidation. Vanilla Freqtrade loses sync in those cases and keeps looping. This fork detects all three cases and closes the trade cleanly in the DB.
 2. **A complete FreqUI overhaul.** The stock FreqUI is functional but minimal. I wanted fleet-level monitoring, rich popovers with market context (BTC/ETH benchmarks, Fear & Greed index), per-bot alerts, drag-and-drop dashboard layout, and full i18n. So I built [titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork) — a near-complete rewrite of the UI. In this fork, `freqtrade install-ui` pulls it automatically, no extra setup needed.
-3. **Short-DCA friendly tools.** A pairlist filter that excludes pairs with a strong linear uptrend (high R² on price regression), a custom hyperopt loss tuned for DCA strategies, and a hyperopt CLI that lets you swap Optuna samplers without touching your strategy file.
+3. **Short-DCA friendly tools.** A pairlist filter that excludes pairs with a strong linear uptrend (high R² on price regression), custom hyperopt losses tuned for DCA and momentum strategies, and a hyperopt CLI that lets you swap Optuna samplers without touching your strategy file.
 4. **A more powerful hyperopt CLI.** Vanilla Freqtrade hardcodes the Optuna sampler. This fork adds a `--sampler` flag that lets you pick from six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) without editing your strategy — useful for A/B testing convergence approaches across different loss functions.
 5. **Sensible defaults for a full stack.** Launch scripts with auto-restart, a download script for recent data, ready-to-use backtest configs for 6 exchanges, and live config templates with API key placeholders.
 
 ### What's added on top of upstream freqtrade/stable
 
-Concrete list of fork-only changes (17 code files, +600 / -8 lines vs. `upstream/stable`, plus documentation and config templates):
+Concrete list of fork-only changes (19 code files, +1280 / -8 lines vs. `upstream/stable`, plus documentation and config templates):
 
 #### Trading engine
 
@@ -65,6 +65,8 @@ Concrete list of fork-only changes (17 code files, +600 / -8 lines vs. `upstream
 | File | Added | Purpose |
 |------|-------|---------|
 | `freqtrade/optimize/hyperopt_loss/hyperopt_loss_my_profit_drawdown.py` | +54 lines | **New hyperopt loss** — profit × drawdown-penalty with a configurable `DRAWDOWN_MULT`. Used as a baseline when tuning DCA strategies. |
+| `freqtrade/optimize/hyperopt_loss/hyperopt_loss_mouton_meanrev.py` | +338 lines | **New hyperopt loss for DCA / mean-reversion** — 8 additive metrics (CAGR 22%, K-ratio 22%, PF 12%, quarterly consistency 14%, payoff 8%, pair diversity 8%, TUW health 8%, confidence 6%) + 2 multiplicative gates (concentration sigmoid, exp drawdown). Hard filters with TPE gradient: WR ≥ 55%, DD ≤ 45%, trades ≥ 60, pairs ≥ 5. Doesn't penalize inactivity, uses daily-bucketed correlation for diversity. |
+| `freqtrade/optimize/hyperopt_loss/hyperopt_loss_mouton_momentum.py` | +340 lines | **New hyperopt loss for momentum / trend-following** — 9 additive metrics (Sharpe 18%, payoff 18%, tail ratio 14%, CAGR 13%, PF 9%, quarterly 9%, diversity 7%, TUW 7%, confidence 5%) + 2 multiplicative gates (consecutive losses sigmoid, exp drawdown). Hard filters: DD ≤ 40%, payoff ≥ 0.5, trades ≥ 40, pairs ≥ 5. Rewards right-skew and "let profits run". |
 | `freqtrade/commands/cli_options.py` | +21 lines | **New `--sampler` CLI option** for `freqtrade hyperopt`. Choices: `NSGAIIISampler` (default, genetic multi-objective — good Pareto diversity), `NSGAIISampler` (older variant), `TPESampler` (Bayesian, fast convergence on single-objective losses), `CmaEsSampler` (gradient-free for continuous spaces), `GPSampler` (Gaussian-Process Bayesian), `QMCSampler` (Quasi-Monte Carlo — pure exploration). Overrides whatever `HyperOpt.generate_estimator()` returns, so you can A/B samplers without editing the strategy. |
 | `freqtrade/commands/arguments.py` | +1 line | Wires `--sampler` into `ARGS_HYPEROPT`. |
 | `freqtrade/configuration/configuration.py` | +1 line | Logs the selected sampler when `--sampler` is used. |
@@ -233,13 +235,13 @@ Au-delà de ça, cinq motivations concrètes :
 
 1. **Résilience type Hyperliquid.** Sur les DEX (et parfois sur CEX aussi), une position peut disparaître sous tes pieds — ADL, fermeture manuelle depuis l'UI de l'exchange, liquidation. Freqtrade vanilla perd la sync dans ces cas-là et boucle indéfiniment. Ce fork détecte les trois cas et ferme proprement le trade dans la DB.
 2. **Une refonte complète de FreqUI.** L'interface stock de FreqUI est fonctionnelle mais minimaliste. Je voulais du monitoring de flotte, des popovers riches avec contexte de marché (benchmarks BTC/ETH, indice Fear & Greed), des alertes par bot, un dashboard drag-and-drop, et une i18n complète. J'ai donc construit [titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork) — une réécriture quasi-totale de l'UI. Dans ce fork, `freqtrade install-ui` la récupère automatiquement, aucun setup supplémentaire.
-3. **Outils pensés pour le DCA short.** Un filtre de pairlist qui exclut les paires en tendance haussière régulière (R² élevé sur régression linéaire du prix), une loss hyperopt custom calibrée pour les stratégies DCA, et une CLI hyperopt qui permet de changer de sampler Optuna sans toucher au fichier de stratégie.
+3. **Outils pensés pour le DCA short.** Un filtre de pairlist qui exclut les paires en tendance haussière régulière (R² élevé sur régression linéaire du prix), des losses hyperopt custom calibrées pour les stratégies DCA et momentum, et une CLI hyperopt qui permet de changer de sampler Optuna sans toucher au fichier de stratégie.
 4. **Un CLI hyperopt plus puissant.** Freqtrade vanilla hardcode le sampler Optuna. Ce fork ajoute un flag `--sampler` qui permet de choisir parmi six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) sans éditer la stratégie — utile pour A/B tester les approches de convergence selon la loss function utilisée.
 5. **Stack complet utilisable d'emblée.** Scripts de lancement avec auto-restart, script de téléchargement des données récentes, configs de backtest prêtes à l'emploi pour 6 exchanges, et templates de configs live avec placeholders pour les clés API.
 
 ### Ce que ce fork apporte vs. upstream freqtrade/stable
 
-Liste concrète des changements (17 fichiers de code, +600 / -8 lignes vs. `upstream/stable`, plus documentation et templates de config) :
+Liste concrète des changements (19 fichiers de code, +1280 / -8 lignes vs. `upstream/stable`, plus documentation et templates de config) :
 
 #### Moteur de trading
 
@@ -266,6 +268,8 @@ Liste concrète des changements (17 fichiers de code, +600 / -8 lignes vs. `upst
 | Fichier | Ajouté | Rôle |
 |---------|--------|------|
 | `freqtrade/optimize/hyperopt_loss/hyperopt_loss_my_profit_drawdown.py` | +54 lignes | **Nouvelle loss hyperopt** — profit × pénalité drawdown avec `DRAWDOWN_MULT` configurable. Utilisée comme baseline pour tuner les stratégies DCA. |
+| `freqtrade/optimize/hyperopt_loss/hyperopt_loss_mouton_meanrev.py` | +338 lignes | **Nouvelle loss pour DCA / mean-reversion** — 8 métriques additives (CAGR 22%, K-ratio 22%, PF 12%, quarterly 14%, payoff 8%, diversité pairs 8%, TUW santé 8%, confiance 6%) + 2 gates multiplicatives (concentration sigmoid, exp DD). Hard filters avec gradient TPE : WR ≥ 55%, DD ≤ 45%, trades ≥ 60, pairs ≥ 5. Ne pénalise pas l'inactivité, corrélation par buckets journaliers. |
+| `freqtrade/optimize/hyperopt_loss/hyperopt_loss_mouton_momentum.py` | +340 lignes | **Nouvelle loss pour momentum / trend-following** — 9 métriques additives (Sharpe 18%, payoff 18%, tail ratio 14%, CAGR 13%, PF 9%, quarterly 9%, diversité 7%, TUW 7%, confiance 5%) + 2 gates multiplicatives (consec losses sigmoid, exp DD). Hard filters : DD ≤ 40%, payoff ≥ 0.5, trades ≥ 40, pairs ≥ 5. Récompense le skew droit et le "let profits run". |
 | `freqtrade/commands/cli_options.py` | +21 lignes | **Nouvelle option `--sampler`** pour `freqtrade hyperopt`. Choix : `NSGAIIISampler` (défaut, génétique multi-objectif — bonne diversité Pareto), `NSGAIISampler` (variante plus ancienne), `TPESampler` (bayésien, convergence rapide sur losses mono-objectif), `CmaEsSampler` (sans gradient, pour espaces continus), `GPSampler` (bayésien à processus gaussien), `QMCSampler` (Quasi-Monte Carlo — exploration pure). Écrase ce que retourne `HyperOpt.generate_estimator()`, donc tu peux A/B tester les samplers sans éditer la stratégie. |
 | `freqtrade/commands/arguments.py` | +1 ligne | Branche `--sampler` dans `ARGS_HYPEROPT`. |
 | `freqtrade/configuration/configuration.py` | +1 ligne | Log du sampler choisi quand `--sampler` est utilisé. |
