@@ -149,7 +149,10 @@ def _quarterly_consistency(results: DataFrame, max_date: datetime) -> float:
     dates = pd.to_datetime(results["close_date"], utc=True)
     results = results.copy()
     results["_q"] = dates.dt.to_period("Q")
-    now_q = pd.Timestamp(max_date, tz="UTC").to_period("Q")
+    ts = pd.Timestamp(max_date)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    now_q = ts.to_period("Q")
 
     quarters = results.groupby("_q")["profit_abs"].sum()
     if len(quarters) < 2:
