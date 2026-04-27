@@ -1,6 +1,6 @@
 # Mean Reversion (incl. DCA) — Tips et garde-fous
 
-> **Notre cas par défaut** : DCA mean-reversion (long oversold + short overbought) sur Hyperliquid USDC perps en 15m. Lire ce fichier avant toute discussion sur nos stratégies actives.
+> Couvre les stratégies DCA mean-reversion (long oversold + short overbought) sur perps ou spot. Lire ce fichier avant toute discussion sur des stratégies mean-reversion.
 
 ## Règles strictes (ne jamais enfreindre)
 
@@ -13,7 +13,7 @@
 ## Bonnes pratiques (toujours suivre sauf justification explicite)
 
 - ✅ **ROCP (Rate of Change Percentage) = indicateur le plus polyvalent pour le mean-reversion**. Mesure le retracement en % depuis un point de référence. Utilisable comme entrée (retracement > X% = oversold), sortie (rebond > Y% depuis creux), filtre tendance. Un seul indicateur, trois usages. (tips.txt #41, communauté)
-- ✅ **Short-term mean-reversion offre plus d'opportunités consistantes que le trend-following pour les petits comptes TF courts**. SR plus élevé, plus accessible. Trend-following nécessite beaucoup de diversification (= capital). Justifie directement notre focus Freqtrade sur DCA oversold/short en 15m. (tips.txt #70, Chan)
+- ✅ **Short-term mean-reversion offre plus d'opportunités consistantes que le trend-following pour les petits comptes TF courts**. SR plus élevé, plus accessible. Trend-following nécessite beaucoup de diversification (= capital). Justifie le focus sur DCA oversold/short en timeframes courts (5m-15m). (tips.txt #70, Chan)
 
 ## Conseils avancés (à appliquer selon le contexte)
 

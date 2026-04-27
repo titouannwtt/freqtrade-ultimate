@@ -1,6 +1,6 @@
 # .claude-tips/ — Routing table
 
-Ce répertoire contient les règles de trading algorithmique distillées dans `tips.txt` (199 tips, sources : Carver, Clenow, Chan, Lopez de Prado, communauté Freqtrade France), organisées par catégorie pour consultation rapide.
+Ce répertoire contient les règles de trading algorithmique distillées dans `tips.txt` (199 tips, sources : Carver, Clenow, Chan, Lopez de Prado, communauté Freqtrade), organisées par catégorie pour consultation rapide.
 
 ## Comment utiliser (pour Claude)
 
@@ -27,10 +27,8 @@ Ce répertoire contient les règles de trading algorithmique distillées dans `t
 | Discussion ML / FreqAI | `machine_learning.md`, `data_quality.md` |
 | Question conceptuelle | `psychology.md` + fichier thématique |
 
-## Contexte par défaut
-
-DCA mean-reversion (long oversold + short overbought) sur Hyperliquid USDC perps en 15m. En cas de doute : `mean_reversion.md` > `trend_following.md`.
-
 ## Source de vérité
 
 `tips.txt` à la racine du repo. Les fichiers `.claude-tips/` sont des index actionnables. En cas de divergence, `tips.txt` prime.
+
+En cas de doute sur le type de stratégie : consulter `CLAUDE.local.md` (si présent) pour le contexte utilisateur, sinon demander.

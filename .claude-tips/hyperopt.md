@@ -1,8 +1,5 @@
 # Hyperopt — Tips et garde-fous
 
-Pour le journal d'optimisation HippoDCA v5, voir [HIPPODCA_V4_STUDY.md](../HIPPODCA_V4_STUDY.md).
-Pour la méthodologie staged, voir [HYPEROPT_PLAYBOOK.md](../HYPEROPT_PLAYBOOK.md).
-
 ## Règles strictes (ne jamais enfreindre)
 
 - 🚫 **Cap 200-300 epochs maximum**. Au-delà, sur-optimisation quasi garantie. Alternative robuste: 10-20 hyperopts de 200 epochs avec seeds différents et moyenner les JSON résultants. (tips.txt #14)
@@ -108,7 +105,7 @@ screen -S <session> -X stuff $'.venv/bin/freqtrade hyperopt \
   --spaces buy sell \
   --sampler TPESampler \
   -j 28 \
-  && /home/moutonneux/.config/claude-notify/send.sh "Hyperopt <label> TERMINE"\n'
+  && echo "Hyperopt <label> TERMINE"\n'
 ```
 
 To check progress: `screen -S <session> -X hardcopy -h /tmp/out.txt && tail -20 /tmp/out.txt`

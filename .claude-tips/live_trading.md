@@ -5,7 +5,7 @@
 - 🚫 **Dry-run obligatoire avant tout passage en live**. Durée minimale selon fréquence: 2-4 semaines pour HF (10+ trades/semaine, type DCA 15m), 3 mois minimum pour LF (c'est le NOMBRE DE TRADES qui donne la significance statistique, pas la durée calendrier). Idéalement même capital que prévu en live. Comparer systématiquement BT vs dry-run sur la même période. (tips.txt #28, communauté)
 - 🚫 **Override OK pour ajuster la VITESSE, JAMAIS pour inverser le SIGNE**. Seule bonne décision discrétionnaire de Carver (COVID mars 2020): accélérer ce que le modèle faisait déjà. Tu peux changer la taille, jamais le sens. (tips.txt #114, Carver)
 - 🚫 **Paper trading multi-jours = 3 MOIS minimum**. Un dry-run de 2 semaines sur une stratégie DCA qui fait 10 trades/semaine n'est pas probant. (tips.txt #154, Chan)
-- 🚫 **Ne pas descendre sous 5m pour Freqtrade**. Sous cette TF, les frais Hyperliquid (0.02% maker / 0.05% taker) deviennent prohibitifs sur signaux faibles. 15m est un bon compromis signal/coûts. (tips.txt #155, Chan)
+- 🚫 **Ne pas descendre sous 5m pour Freqtrade**. Sous cette TF, les frais exchange (ex: 0.02% maker / 0.05% taker sur Hyperliquid) deviennent prohibitifs sur signaux faibles. 15m est un bon compromis signal/coûts. (tips.txt #155, Chan)
 - 🚫 **Le programme de BACKTEST et d'EXÉCUTION DOIT être le MÊME**. Sinon bugs introduits en exécution. Le programme ne doit pas pouvoir distinguer data live vs historique. Freqtrade respecte déjà ce principe — ne jamais implémenter d'optimisations qui divergent live vs BT. (tips.txt #167, Chan)
 
 ## process_throttle_secs — guide de choix
@@ -25,7 +25,7 @@
 | `process_open_trade_positions()` | `get_rates()` via tickers | ✅ Oui |
 | `enter_positions()` | `create_order()` × N signaux | ❌ Non, 1 appel/entrée |
 
-**Avec ftcache actif, la charge non-cachée par cycle ≈ nombre d'ordres ouverts + ordres créés/annulés.** C'est très faible — typiquement 0 à 5 appels/cycle pour un bot DCA avec MOT ≤ 5.
+**Avec ftcache actif, la charge non-cachée par cycle ≈ nombre d'ordres ouverts + ordres créés/annulés.** Typiquement 0 à 5 appels/cycle pour un bot DCA avec MOT ≤ 5.
 
 ### Impact du throttle
 
@@ -39,13 +39,13 @@
 
 ### ✅ Recommandations par contexte
 
-**Avec ftcache (notre fork) :**
+**Avec ftcache (ce fork) :**
 
-La charge API est quasi-nulle quel que soit le throttle. Le seul facteur est la **latence acceptable** pour votre stratégie :
+La charge API est quasi-nulle quel que soit le throttle. Le seul facteur est la **latence acceptable** pour la stratégie :
 
 | Contexte | Valeur | Justification |
 |---|---|---|
-| DCA mean-reversion 15m (notre cas) | **15s** | Un DCA n'est pas à 15s près. Détection fill en 7.5s moyen = acceptable |
+| DCA mean-reversion 15m | **15s** | Un DCA n'est pas à 15s près. Détection fill en 7.5s moyen = acceptable |
 | DCA mean-reversion 1h+ | **30s** | Bougie horaire → 30s de latence est négligeable |
 | Stratégie à signaux rapides (5m, scalping) | **5-10s** | Besoin de réagir vite aux signaux intra-bougie |
 | Dry-run / test | **15s** | Même valeur que live, pas besoin de speed |
@@ -76,7 +76,7 @@ Le sizing en mode `stake_amount: "unlimited"` repose sur une formule dynamique q
 
 ### La formule centrale (wallets.py)
 
-**Avec `available_capital` configuré (notre cas) :**
+**Avec `available_capital` configuré (recommandé) :**
 ```
 available_amount = available_capital - capital_withdrawal + total_closed_profit
 proposed_stake  = available_amount / max_open_trades
@@ -177,11 +177,11 @@ Mélange le prix bid/ask avec le dernier prix échangé :
 
 | Contexte | `price_side` | `price_last_balance` | `use_order_book` | Justification |
 |---|---|---|---|---|
-| DCA mean-reversion (notre cas) | `"same"` | `0.0` | `true` | Maximise maker fills (0.02% vs 0.05%) |
+| DCA mean-reversion | `"same"` | `0.0` | `true` | Maximise maker fills (réduit les frais) |
 | Scalping (remplissage prioritaire) | `"same"` | `1.0` | `true` | Remplissage garanti, accepte taker |
 | Entrée agressive (signal fort) | `"other"` | `0.0` | `true` | Traverse le spread, remplissage immédiat |
 
-**Notre config actuelle** (`_default_spot_usdc.json`) : `price_side: "same"`, `price_last_balance: 1.0`, `use_order_book: true`. C'est très conservateur — le blend total vers le last price fait que les ordres sont quasi-taker. Pour des DCA avec ordres limit, baisser `price_last_balance` à 0.0 serait plus cohérent.
+**Exemple** : `price_side: "same"`, `price_last_balance: 1.0`, `use_order_book: true` est très conservateur — le blend total vers le last price fait que les ordres sont quasi-taker. Pour des DCA avec ordres limit, `price_last_balance: 0.0` serait plus cohérent.
 
 ### 💡 Impact sur le backtest
 
@@ -200,7 +200,7 @@ Générateur (1er handler) → Filtre 1 → Filtre 2 → ... → Blacklist
 - **La blacklist est appliquée en dernier**, après tous les filtres
 - L'ordre des filtres compte : un filtre ne peut agir que sur les paires qui lui sont passées
 
-### Notre chaîne standard : VolumePairList(80) → PerformanceFilter → VolumePairList(40)
+### Exemple de chaîne : VolumePairList(80) → PerformanceFilter → VolumePairList(40)
 
 | Étage | Rôle | Détail |
 |---|---|---|
@@ -275,12 +275,12 @@ Le timeout est vérifié à chaque cycle bot dans `manage_open_orders()`.
 
 | Contexte | Entry timeout | Exit timeout | exit_timeout_count | Justification |
 |---|---|---|---|---|
-| DCA mean-reversion 15m (notre cas) | **10 min** | **10 min** | **0** | Les DCA limit orders attendent un dip — 10 min laisse le temps au prix de revenir |
+| DCA mean-reversion 15m | **10 min** | **10 min** | **0** | Les DCA limit orders attendent un dip — 10 min laisse le temps au prix de revenir |
 | DCA agressif (6+ safety orders) | **15-20 min** | **10 min** | **0** | Plus de temps pour que les grilles se remplissent |
 | Scalping 5m | **3-5 min** | **3-5 min** | **2** | Pas de patience, si ça ne fill pas → move on |
 | Stratégie patiente 1h+ | **30-60 min** | **15 min** | **0** | Signaux rares, patience nécessaire |
 
-**Notre config actuelle** (`_default_spot_usdc.json`) : entry=10min, exit=10min, exit_timeout_count=0. C'est raisonnable pour du DCA 15m.
+**Exemple** : entry=10min, exit=10min, exit_timeout_count=0 est raisonnable pour du DCA 15m.
 
 ### 💡 Pièges à éviter
 
@@ -297,7 +297,7 @@ Le timeout est vérifié à chaque cycle bot dans `manage_open_orders()`.
 
 ## Bonnes pratiques (toujours suivre sauf justification explicite)
 
-- ✅ **Hyperliquid: préférer les ordres makers** (0.02% vs 0.05% taker). Rate limit = 1200 req/min par wallet. Solution si problème: Producer-Consumer mode, JAMAIS de sub-accounts. Si rate-limit persiste: VPN IP-level, jamais wallet-level. (tips.txt #27)
+- ✅ **Préférer les ordres makers** pour réduire les frais (ex: Hyperliquid 0.02% maker vs 0.05% taker). Si problème de rate-limit multi-bots: Producer-Consumer mode ou ftcache. (tips.txt #27)
 - ✅ **La vraie complexité du trading systématique est dans l'opérationnel, pas dans les règles**. En production il faut redondance, fail-safes, gestion d'erreurs. La différence livre/prod n'est pas "5 jours au lieu de 7", c'est l'infrastructure. (tips.txt #103, Clenow)
 - ✅ **Diagnostiquer une dégradation = comprendre le changement de structure du marché**. Exemple: explosion options 0DTE par retail. Lire Bloomberg/FT pour identifier les structural shifts qui expliquent un drawdown, pas pour trader. (tips.txt #159, Chan)
 - ✅ **Monitor le VaR en live, pas seulement au BT**. Risque théorique BT ≠ risque live. Surveiller VaR quotidien et comparer à l'estimation BT. Si drift > X sigma, stopper et réinvestiguer. (tips.txt #190, Quant 1B)

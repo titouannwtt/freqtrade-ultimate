@@ -2,34 +2,28 @@
 
 ## What is this repo
 
-Fork of [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) (v2026.3) focused on **Hyperliquid futures trading** with aggressive DCA short strategies. The fork adds liquidation/ADL detection, external position close handling, and a custom pairlist filter.
+Fork of [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) — open-source crypto trading bot. This fork adds **Hyperliquid-specific features** (liquidation/ADL detection, external position close handling) and a **trading co-pilot system** with 199 curated guardrails from Carver, Clenow, Chan, and Lopez de Prado.
 
-**Owner:** titouannwtt (private repo)
-**Upstream:** `upstream` remote → `https://github.com/freqtrade/freqtrade.git`
+If a `CLAUDE.local.md` file exists at the repo root, read it — it contains user-specific config (exchange, strategies, bots, personal constraints).
 
 ## Trading guardrails — co-pilot posture
 
-Claude agit comme un **co-pilote critique**, pas un exécutant passif. Argent réel et mois de travail en jeu.
+Claude acts as a **critical co-pilot**, not a passive executor. Real money is at stake.
 
-**Avant toute action trading** (stratégie, hyperopt, config, sizing, pairlist, deployment) :
-1. Lire `.claude-tips/README.md` → identifier les fichiers pertinents → les lire
-2. Vérifier que la demande ne contredit aucune règle stricte (🚫). Si conflit : bloquer, citer le tip, proposer une alternative
-3. Donner des avis tranchés, pas des listes de pour/contre. Aller à contre-courant si justifié
-4. Accepter d'avoir tort si l'utilisateur argumente solidement. Proposer d'enrichir les tips si idée originale crédible
-5. Prendre en compte le contexte réel : infrastructure (ftcache, bots en live), config (sizing, MOT, throttle), cohérence portfolio (exposition, corrélation)
+**Before any trading action** (strategy, hyperopt, config, sizing, pairlist, deployment):
+1. Read `.claude-tips/README.md` → identify relevant files → read them
+2. Check that the request doesn't violate any strict rule (🚫). If conflict: block, cite the tip, propose an alternative
+3. Give opinionated advice, not pros/cons lists. Push back when justified
+4. Accept being wrong if the user argues with solid reasoning. Propose enriching the tips if a credible original idea comes up
+5. Factor in the user's real context: infrastructure, config, portfolio coherence
 
-**Contexte par défaut** : DCA mean-reversion sur Hyperliquid USDC perps en 15m. Prioriser `mean_reversion.md` et `risk_management.md`.
-
-**Source de verite** : `tips.txt` a la racine (199 tips). Les fichiers `.claude-tips/*.md` sont des index actionnables. En cas de divergence, `tips.txt` prime.
+**Source of truth**: `tips.txt` at the repo root (199 tips). The `.claude-tips/*.md` files are actionable indexes. If divergence, `tips.txt` takes precedence.
 
 ## Common commands
 
 ```bash
 # Install / update after merge
-.venv/bin/pip install -e .
-
-# Run a bot (inside a screen session)
-./launch_bot.sh hyperliquid_hippo_dynv1_short_sharpe.json
+pip install -e .
 
 # Run tests
 pytest --random-order -n auto
@@ -44,7 +38,7 @@ ruff format freqtrade/
 # Type check
 mypy freqtrade/
 
-# Query a trade database (no sqlite3 binary, use python)
+# Query a trade database (use python, not sqlite3 CLI)
 python3 -c "import sqlite3; c=sqlite3.connect('database/xxx.sqlite').cursor(); ..."
 ```
 
@@ -72,13 +66,13 @@ strategy:   custom_stake = (proposed_stake / max_so_multiplier * overbuy_factor)
 strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 ```
 
-**Critical:** `total_closed_profit` is cumulative from the DB — stake grows with profits (silent compounding). See `.claude-tips/live_trading.md` § "Capital & sizing" for the full analysis.
+**Critical:** `total_closed_profit` is cumulative from the DB — stake grows with profits (silent compounding). See `.claude-tips/live_trading.md` § "Capital & sizing".
 
-## Custom modifications (fork-specific)
+## Fork-specific modifications
 
 1. **External close handler** (`freqtradebot.py:_handle_external_close`) — Detects positions closed externally (Hyperliquid ADL, manual close). Closes trade at market with `exit_reason="external_close"`.
 2. **Liquidation detection** (`exchange/hyperliquid.py:fetch_liquidation_fills`) — Checks `liquidationMarkPx` field in user trades.
-3. **TrendRegularityFilter** (`plugins/pairlist/TrendRegularityFilter.py`) — Excludes pairs with strong linear uptrends (high R²). For short-only strategies. Registered in `constants.py`.
+3. **TrendRegularityFilter** (`plugins/pairlist/TrendRegularityFilter.py`) — Excludes pairs with strong linear uptrends (high R²). Useful for short-only strategies. Registered in `constants.py`.
 
 ## File layout
 
@@ -86,19 +80,21 @@ strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 |------|---------|
 | `live_configs/` | **Live-only** bot JSON configs (one per bot instance) — never use for hyperopt/backtest |
 | `backtest_configs/` | Configs for hyperopt and backtesting (pair lists, MOT variants) |
-| `live_configs/_hyperliquid_freqtrade_access.json` | API keys (**gitignored, never commit**) |
-| `user_data/strategies/` | All custom strategies (.py) + hyperopt params (.json) |
+| `user_data/strategies/` | Strategies (.py) + hyperopt params (.json) |
 | `database/` | SQLite trade databases (one per bot) |
-| `launch_bot.sh` | Bot launcher with auto-restart loop (60s grace period) |
-| `freqtrade/freqtradebot.py` | Core bot logic (custom: `_handle_external_close`) |
-| `freqtrade/exchange/hyperliquid.py` | Hyperliquid adapter (custom: liquidation detection) |
+| `launch_bot.sh` | Bot launcher with auto-restart loop |
+| `freqtrade/freqtradebot.py` | Core bot logic (+ `_handle_external_close`) |
+| `freqtrade/exchange/hyperliquid.py` | Hyperliquid adapter (+ liquidation detection) |
 | `freqtrade/plugins/pairlist/TrendRegularityFilter.py` | Custom pairlist filter |
+| `tips.txt` | 199 trading tips — source of truth |
+| `.claude-tips/` | Actionable tip files by category |
 
-## Bots currently running
+## Hard constraints
 
-Bots run in `screen` sessions. List with `screen -ls`. Each bot has a config in `live_configs/`, a database in `database/`, a strategy in `user_data/strategies/`.
-
-To check a bot's logs: `screen -S <session> -X hardcopy -h /tmp/out.txt && tail -50 /tmp/out.txt`
+- **API keys** must be configured in your bot config and gitignored. Never commit credentials.
+- When fixing trade DB issues, use `python3` with `sqlite3` module (no `sqlite3` CLI binary).
+- Strategies using `"stake_amount": "unlimited"` handle sizing in `custom_stake_amount()`.
+- **Never use `pkill`/`kill -9` on hyperopt** — leaves orphaned workers. Use `screen -S <session> -X stuff $'\003'` (Ctrl+C).
 
 ## Updating from upstream
 
@@ -107,16 +103,15 @@ git fetch upstream --tags
 git merge upstream/stable --no-edit
 # Resolve conflicts (usually .github/ CI files → accept theirs)
 # Verify custom code preserved: grep _handle_external_close freqtrade/freqtradebot.py
-.venv/bin/pip install -e .
+pip install -e .
 ```
 
-## FreqUI fork (`../frequi`)
+## FreqUI fork
 
-The custom FreqUI lives in `../frequi` (repo: `titouannwtt/frequi-fork`). The built UI is served via `freqtrade install-ui` which downloads the latest release artifact from GitHub.
+If you maintain a custom FreqUI (separate repo), users update it via `freqtrade install-ui` which downloads the latest release artifact (`frequi-dist.tar.gz`) from the FreqUI repo's GitHub releases.
 
 ### How users update FreqUI
 
-`freqtrade install-ui` downloads the latest `frequi-dist.tar.gz` from `titouannwtt/frequi-fork/releases`. Users just need to update freqtrade-fork and run install-ui:
 ```bash
 cd freqtrade
 git pull origin main
@@ -124,39 +119,25 @@ freqtrade install-ui
 # Restart bot(s) to serve the new UI
 ```
 
-### Release checklist
+### Release checklist (FreqUI maintainer)
 
-1. **Bump `package.json` version** in `../frequi` before building (`"version": "X.Y.Z"`). This is the source of truth for the version badge in the navbar.
-2. `cd ../frequi && npm run build`
-3. `cp -r dist/* freqtrade/rpc/api_server/ui/installed/` (local deploy)
-4. Commit, push, create GitHub release with `frequi-dist.tar.gz` artifact
-5. Every release description must include the "How to update" instructions block
+1. Bump `package.json` version before building (`"version": "X.Y.Z"`) — source of truth for the navbar version badge.
+2. `cd <frequi> && npm run build`
+3. Commit, push, create GitHub release with `frequi-dist.tar.gz` artifact attached.
+4. Every release description should include the "How to update" instructions block.
 
 ### Deploy locally (no release)
 
 ```bash
-cd ../frequi && npm run build
+cd <frequi> && npm run build
 cp -r dist/* freqtrade/rpc/api_server/ui/installed/
 # Restart bot(s) to serve the new UI
 ```
 
-## Hard constraints
+## Personal config
 
-- **Never suggest backtests.** Strategy testing is done live with small capital.
-- **API keys** are in `_hyperliquid_freqtrade_access.json` — gitignored. If missing, bot won't start.
-- **Never use Hyperliquid sub-accounts.** Single wallet `0xC234...` for all volume. Rate-limit fix = VPN/proxy, never wallet-level.
-- When fixing trade DB issues, use `python3` with `sqlite3` module (no `sqlite3` CLI).
-- Strategies use `"stake_amount": "unlimited"` — sizing is in `custom_stake_amount()`.
-- **Bot restart procedure** (always follow this exact sequence):
-  1. `screen -x <nom_du_bot>` — attach to the existing screen session
-  2. Stop the `launch_bot.sh` script entirely (Ctrl+C during the countdown, then Ctrl+C again to kill freqtrade if still running) — the bot stops and the auto-restart loop is interrupted
-  3. Relaunch manually: `./launch_bot.sh <config>.json`
-  Never use `kill <pid>` from outside the screen — always attach and stop interactively.
-- **Bot launch procedure** (new bot):
-  1. `screen -S <nom_du_bot>` — create a new named screen session
-  2. `cd freqtrade && source ./.venv/bin/activate`
-  3. `./launch_bot.sh hyperliquid_hippo_dynv1_short_sharpe.json` (example)
-- **Never use `pkill`/`kill -9` on hyperopt** — leaves orphaned workers. Use `screen -S <session> -X stuff $'\003'` (Ctrl+C).
+User-specific constraints (exchange-specific procedures, account constraints, deployed bot list, paths) belong in `CLAUDE.local.md` (gitignored). See `CLAUDE.local.md.template` for a starter template.
+
 
 ## Detailed guides (loaded on demand)
 
@@ -175,6 +156,6 @@ These `.claude-tips/` files contain in-depth reference for specific topics. **Do
 | `psychology.md` | Behavioral biases, emotional discipline |
 | `market_analysis.md` | Regime detection, S1-S4 stages, macro filters |
 | `data_quality.md` | Feature selection, causal inference |
-| `machine_learning.md` | ML reference (not used on 15m, kept for future) |
-| `trend_following.md` | Momentum/trend reference (not our default) |
+| `machine_learning.md` | ML / FreqAI reference |
+| `trend_following.md` | Momentum / trend strategies |
 | `strategy_bugs_reference.md` | Known strategy bugs: generated_strategy* template issues, trailing stop, future-looking, startup_candle_count |
