@@ -278,6 +278,29 @@ ARGS_LOOKAHEAD_ANALYSIS = [
 
 ARGS_RECURSIVE_ANALYSIS = ["timeframe", "timerange", "dataformat_ohlcv", "pairs", "startup_candle"]
 
+ARGS_WALK_FORWARD = [
+    *ARGS_COMMON_OPTIMIZE,
+    "hyperopt_path",
+    "position_stacking",
+    "enable_protections",
+    "dry_run_wallet",
+    "timeframe_detail",
+    "epochs",
+    "spaces",
+    "hyperopt_jobs",
+    "hyperopt_random_state",
+    "hyperopt_min_trades",
+    "hyperopt_loss",
+    "hyperopt_sampler",
+    "early_stop",
+    # Walk-forward specific
+    "wf_windows",
+    "wf_train_ratio",
+    "wf_embargo_days",
+    "wf_holdout_months",
+    "wf_min_test_trades",
+]
+
 # Command level configs - keep at the bottom of the above definitions
 NO_CONF_REQURIED = [
     "backtest-filter",
@@ -415,6 +438,7 @@ class Arguments:
             start_strategy_update,
             start_test_pairlist,
             start_trading,
+            start_walk_forward,
             start_webserver,
         )
 
@@ -717,3 +741,12 @@ class Arguments:
         recursive_analayis_cmd.set_defaults(func=start_recursive_analysis)
 
         self._build_args(optionlist=ARGS_RECURSIVE_ANALYSIS, parser=recursive_analayis_cmd)
+
+        # Add walk-forward subcommand
+        walk_forward_cmd = subparsers.add_parser(
+            "walk-forward",
+            help="Walk-forward analysis module.",
+            parents=[_common_parser, _strategy_parser],
+        )
+        walk_forward_cmd.set_defaults(func=start_walk_forward)
+        self._build_args(optionlist=ARGS_WALK_FORWARD, parser=walk_forward_cmd)

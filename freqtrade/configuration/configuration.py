@@ -394,6 +394,16 @@ class Configuration:
 
         self._args_to_config_loop(config, configurations)
 
+        # Walk-forward section
+        configurations = [
+            ("wf_windows", "Parameter --wf-windows detected: {}"),
+            ("wf_train_ratio", "Parameter --wf-train-ratio detected: {}"),
+            ("wf_embargo_days", "Parameter --wf-embargo-days detected: {}"),
+            ("wf_holdout_months", "Parameter --wf-holdout-months detected: {}"),
+            ("wf_min_test_trades", "Parameter --wf-min-test-trades detected: {}"),
+        ]
+        self._args_to_config_loop(config, configurations)
+
     def _process_plot_options(self, config: Config) -> None:
         configurations = [
             ("pairs", "Using pairs {}"),
