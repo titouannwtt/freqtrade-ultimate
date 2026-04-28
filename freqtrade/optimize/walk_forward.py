@@ -5,8 +5,9 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from math import erf, log, sqrt
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import rapidjson
@@ -16,11 +17,16 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.hyperopt_tools import HyperoptTools, hyperopt_serializer
 
 
+if TYPE_CHECKING:
+    from freqtrade.optimize.wfa_output import WFADashboard
+
+
 logger = logging.getLogger(__name__)
 
 HYPER_PARAMS_FILE_FORMAT = rapidjson.NM_NATIVE | rapidjson.NM_NAN
 PARAM_STABILITY_STABLE = 0.15
 PARAM_STABILITY_UNSTABLE = 0.30
+EULER_MASCHERONI = 0.5772156649
 
 
 @dataclass
@@ -62,6 +68,7 @@ class WalkForward:
         self.embargo_days: int = config.get("wf_embargo_days", 7)
         self.holdout_months: int = config.get("wf_holdout_months", 0)
         self.min_test_trades: int = config.get("wf_min_test_trades", 30)
+        self.wf_mode: str = config.get("wf_mode", "rolling")
         self.strategy_name: str = config["strategy"]
 
         self.results: list[WindowResult] = []
@@ -95,6 +102,11 @@ class WalkForward:
         return start, end
 
     def _compute_windows(self) -> list[WalkForwardWindow]:
+        if self.wf_mode == "anchored":
+            return self._compute_windows_anchored()
+        return self._compute_windows_rolling()
+
+    def _compute_windows_rolling(self) -> list[WalkForwardWindow]:
         full_start, full_end = self._parse_timerange()
         holdout_delta = timedelta(days=self.holdout_months * 30)
         usable_end = full_end - holdout_delta
@@ -128,10 +140,10 @@ class WalkForward:
                 f"Need at least 60 days. Reduce --wf-windows or "
                 f"expand --timerange."
             )
-        if test_days < 30:
+        if test_days < 20:
             raise OperationalException(
                 f"Test window too short ({test_days:.0f} days). "
-                f"Need at least 30 days. Reduce --wf-windows or "
+                f"Need at least 20 days. Reduce --wf-windows or "
                 f"expand --timerange."
             )
 
@@ -156,6 +168,63 @@ class WalkForward:
                     index=i,
                     train_start=t_start,
                     train_end=t_end,
+                    test_start=test_start,
+                    test_end=test_end,
+                )
+            )
+
+        return windows
+
+    def _compute_windows_anchored(self) -> list[WalkForwardWindow]:
+        """Anchored mode: train always starts at the beginning, growing
+        for each subsequent window. Test windows are sequential."""
+        full_start, full_end = self._parse_timerange()
+        holdout_delta = timedelta(days=self.holdout_months * 30)
+        usable_end = full_end - holdout_delta
+        total_days = (usable_end - full_start).days
+
+        if total_days <= 0:
+            raise OperationalException(
+                f"Not enough data after reserving {self.holdout_months} "
+                f"months holdout. Total range: "
+                f"{full_start:%Y-%m-%d} to {full_end:%Y-%m-%d}."
+            )
+
+        r = self.train_ratio
+        n = self.n_windows
+
+        step = total_days * (1 - r) / (r + n * (1 - r))
+        test_days = step - self.embargo_days
+        train_initial = total_days - n * step
+
+        if train_initial < 60:
+            raise OperationalException(
+                f"Initial train window too short ({train_initial:.0f} days). "
+                f"Need at least 60 days. Reduce --wf-windows or "
+                f"expand --timerange."
+            )
+        if test_days < 20:
+            raise OperationalException(
+                f"Test window too short ({test_days:.0f} days). "
+                f"Need at least 20 days. Reduce --wf-windows or "
+                f"expand --timerange."
+            )
+
+        embargo = timedelta(days=self.embargo_days)
+        windows = []
+        for i in range(n):
+            train_end = full_start + timedelta(days=train_initial + i * step)
+            test_start = train_end + embargo
+            test_end = test_start + timedelta(days=test_days)
+
+            if test_end > usable_end + timedelta(days=1):
+                test_end = usable_end
+
+            windows.append(
+                WalkForwardWindow(
+                    index=i,
+                    train_start=full_start,
+                    train_end=train_end,
                     test_start=test_start,
                     test_end=test_end,
                 )
@@ -222,7 +291,7 @@ class WalkForward:
         logger.info(f"Walk-Forward Analysis Plan — {self.strategy_name}")
         logger.info(
             f"Loss: {self.config.get('hyperopt_loss', 'default')} | "
-            f"{self.n_windows} windows | "
+            f"{self.n_windows} windows ({self.wf_mode}) | "
             f"{self.config.get('epochs', 150)} epochs/window"
         )
         logger.info("=" * 70)
@@ -304,18 +373,24 @@ class WalkForward:
     # ------------------------------------------------------------------
 
     def _run_hyperopt_window(
-        self, window: WalkForwardWindow, base_seed: int | None
+        self,
+        window: WalkForwardWindow,
+        base_seed: int | None,
+        dashboard: WFADashboard | None = None,
     ) -> dict[str, Any]:
         from freqtrade.optimize.hyperopt import Hyperopt
 
         cfg = deepcopy(self.config)
         cfg["timerange"] = window.train_timerange_str()
         cfg["runmode"] = "hyperopt"
+        cfg["wfa_silent"] = True
 
         if base_seed is not None:
             cfg["hyperopt_random_state"] = base_seed + window.index
 
         hyperopt = Hyperopt(cfg)
+        if dashboard:
+            hyperopt._epoch_callback = dashboard.on_epoch
         hyperopt.start()
 
         best = hyperopt.current_best_epoch
@@ -335,15 +410,21 @@ class WalkForward:
         cfg["timerange"] = timerange_str
         cfg["runmode"] = "backtest"
         cfg["export"] = "none"
+        cfg["wfa_silent"] = True
         cfg.pop("backtest_cache", None)
 
         bt = Backtesting(cfg)
         bt.start()
 
-        strat_results = {}
+        strat_results: dict[str, Any] = {}
         if bt.results and "strategy" in bt.results:
             strat_data = bt.results["strategy"].get(self.strategy_name, {})
             strat_results = self._extract_metrics(strat_data)
+
+            trades = strat_data.get("trades", [])
+            if trades:
+                profits = [t.get("profit_abs", 0) for t in trades]
+                strat_results.update(self._compute_concentration(profits))
 
         Backtesting.cleanup()
         return strat_results
@@ -360,6 +441,94 @@ class WalkForward:
             "profit_factor": strat_data.get("profit_factor", 0),
             "win_rate": strat_data.get("winrate", 0),
             "avg_duration": strat_data.get("holding_avg", ""),
+        }
+
+    # ------------------------------------------------------------------
+    # Market context (Improvement #2)
+    # ------------------------------------------------------------------
+
+    def _compute_market_context(
+        self, test_start: datetime, test_end: datetime
+    ) -> dict[str, float]:
+        """Load BTC data for the test period and compute context metrics."""
+        try:
+            from freqtrade.configuration.timerange import TimeRange
+            from freqtrade.data.history import load_pair_history
+            from freqtrade.enums import CandleType
+
+            tr_str = (
+                f"{test_start.strftime('%Y%m%d')}-"
+                f"{test_end.strftime('%Y%m%d')}"
+            )
+            tr = TimeRange.parse_timerange(tr_str)
+            trading_mode = self.config.get("trading_mode", "spot")
+            candle_type = (
+                CandleType.FUTURES if trading_mode == "futures"
+                else CandleType.SPOT
+            )
+            stake = self.config.get("stake_currency", "USDT")
+            if candle_type == CandleType.FUTURES:
+                btc_pair = f"BTC/{stake}:{stake}"
+            else:
+                btc_pair = f"BTC/{stake}"
+
+            df = load_pair_history(
+                pair=btc_pair,
+                timeframe="1d",
+                datadir=self.config["datadir"],
+                timerange=tr,
+                fill_up_missing=False,
+                candle_type=candle_type,
+            )
+            if df.empty or len(df) < 2:
+                return {}
+
+            btc_change = (df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100
+            atr = (df["high"] - df["low"]).mean() / df["close"].mean() * 100
+            daily_returns = df["close"].pct_change().dropna()
+            vol_ann = float(daily_returns.std() * np.sqrt(365) * 100)
+
+            cum_ret = (df["close"].iloc[-1] / df["close"].iloc[0]) - 1
+            if cum_ret > 0.10:
+                regime = "bull"
+            elif cum_ret < -0.10:
+                regime = "bear"
+            else:
+                regime = "range"
+
+            return {
+                "btc_change_pct": round(float(btc_change), 1),
+                "atr_pct": round(float(atr), 1),
+                "volatility_ann_pct": round(vol_ann, 1),
+                "regime": regime,
+            }
+        except Exception:
+            return {}
+
+    # ------------------------------------------------------------------
+    # Concentrated profit check (Improvement #3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_concentration(profits: list[float]) -> dict[str, float]:
+        """HHI and top-1 trade concentration from per-trade profits."""
+        if not profits:
+            return {"hhi": 0.0, "top1_pct": 0.0}
+
+        total_abs = sum(abs(p) for p in profits)
+        if total_abs < 1e-8:
+            return {"hhi": 0.0, "top1_pct": 0.0}
+
+        shares = [abs(p) / total_abs for p in profits]
+        hhi = sum(s**2 for s in shares)
+
+        pos_profits = [p for p in profits if p > 0]
+        total_pos = sum(pos_profits) if pos_profits else 0
+        top1 = max(pos_profits) / total_pos * 100 if total_pos > 0 else 0
+
+        return {
+            "hhi": round(hhi, 4),
+            "top1_pct": round(top1, 1),
         }
 
     # ------------------------------------------------------------------
@@ -431,10 +600,47 @@ class WalkForward:
         return stability
 
     @staticmethod
+    def _weighted_median(
+        values: list[float], weights: list[float]
+    ) -> float:
+        """Weighted median: value where cumulative weight reaches 50%."""
+        arr = np.array(values)
+        w = np.array(weights)
+        idx = np.argsort(arr)
+        sorted_vals = arr[idx]
+        cum_w = np.cumsum(w[idx])
+        cutoff = cum_w[-1] / 2.0
+        return float(sorted_vals[cum_w >= cutoff][0])
+
+    @staticmethod
+    def _resolve_consensus_value(
+        values: list[Any],
+        weights: list[float] | None,
+        w_list: list[float],
+    ) -> Any:
+        """Resolve a single parameter's consensus value."""
+        if all(isinstance(v, int | float) for v in values):
+            if weights is not None and len(w_list) == len(values):
+                med = WalkForward._weighted_median(
+                    [float(v) for v in values], w_list
+                )
+            else:
+                med = float(np.median(values))
+            if all(isinstance(v, int) for v in values):
+                return round(med)
+            return round(med, 6)
+
+        from collections import Counter
+
+        return Counter(values).most_common(1)[0][0]
+
+    @staticmethod
     def _compute_consensus_params(
         all_params: list[dict[str, Any]],
+        weights: list[float] | None = None,
     ) -> dict[str, Any]:
-        """Compute median per parameter across all windows."""
+        """Compute (weighted) median per parameter across all windows.
+        When weights are provided, uses weighted median (by test Calmar)."""
         consensus: dict[str, Any] = {}
 
         spaces: set[str] = set()
@@ -450,24 +656,58 @@ class WalkForward:
 
             for key in sorted(keys):
                 values = []
-                for p in all_params:
+                w_list: list[float] = []
+                for i, p in enumerate(all_params):
                     if space in p and isinstance(p[space], dict) and key in p[space]:
                         values.append(p[space][key])
+                        if weights is not None and i < len(weights):
+                            w_list.append(weights[i])
 
-                if not values:
-                    continue
-                if all(isinstance(v, int | float) for v in values):
-                    med = float(np.median(values))
-                    if all(isinstance(v, int) for v in values):
-                        consensus[space][key] = int(round(med))
-                    else:
-                        consensus[space][key] = round(med, 6)
-                else:
-                    from collections import Counter
-
-                    consensus[space][key] = Counter(values).most_common(1)[0][0]
+                if values:
+                    consensus[space][key] = WalkForward._resolve_consensus_value(
+                        values, weights, w_list
+                    )
 
         return consensus
+
+    # ------------------------------------------------------------------
+    # Deflated Sharpe Ratio (Improvement #5)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _norm_cdf(z: float) -> float:
+        return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+
+    @staticmethod
+    def _deflated_sharpe_ratio(
+        sr_observed: float,
+        n_trials: int,
+        n_obs: int,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> float:
+        """Bailey & Lopez de Prado (2014) Deflated Sharpe Ratio.
+        Returns probability that observed SR is statistically significant
+        given n_trials independent tests."""
+        if n_trials < 2 or n_obs < 2:
+            return 0.0
+
+        ln_n = log(max(n_trials, 2))
+        sr_benchmark = sqrt(2.0 * ln_n) * (
+            1.0 - EULER_MASCHERONI / (2.0 * ln_n)
+        )
+
+        se_sr = sqrt(
+            (1.0 - skewness * sr_observed
+             + ((kurtosis - 1.0) / 4.0) * sr_observed**2)
+            / max(n_obs - 1, 1)
+        )
+
+        if se_sr < 1e-10:
+            return 0.0
+
+        z = (sr_observed - sr_benchmark) / se_sr
+        return WalkForward._norm_cdf(z)
 
     @staticmethod
     def _compute_degradation(train: dict[str, Any], test: dict[str, Any]) -> dict[str, float]:
@@ -485,7 +725,7 @@ class WalkForward:
     # Export
     # ------------------------------------------------------------------
 
-    def _export_consensus_json(self, consensus: dict[str, Any], json_path: Path | None) -> Path:
+    def _export_consensus_json(self, consensus: dict[str, Any]) -> Path:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = self._wfa_dir / (f"{self.strategy_name}_consensus_{ts}.json")
         export_data = {
@@ -503,20 +743,10 @@ class WalkForward:
                 number_mode=HYPER_PARAMS_FILE_FORMAT,
             )
         logger.info(f"Consensus params exported to {filename}")
-
-        if json_path:
-            with json_path.open("w") as f:
-                rapidjson.dump(
-                    export_data,
-                    f,
-                    indent=2,
-                    default=hyperopt_serializer,
-                    number_mode=HYPER_PARAMS_FILE_FORMAT,
-                )
-            logger.info(
-                f"Consensus params also written to {json_path} " f"(strategy co-located JSON)."
-            )
-
+        logger.info(
+            "To apply consensus params to the live strategy, copy this file to "
+            "the strategy's co-located JSON path."
+        )
         return filename
 
     def _export_results_json(
@@ -524,18 +754,21 @@ class WalkForward:
         all_results: list[WindowResult],
         stability: dict[str, dict[str, Any]],
         consensus: dict[str, Any],
+        dsr: float | None = None,
     ) -> Path:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = self._wfa_dir / (f"{self.strategy_name}_wfa_results_{ts}.json")
 
-        data = {
+        data: dict[str, Any] = {
             "strategy": self.strategy_name,
             "hyperopt_loss": self.config.get("hyperopt_loss", ""),
             "epochs_per_window": self.config.get("epochs", 150),
             "n_windows": self.n_windows,
+            "wf_mode": self.wf_mode,
             "train_ratio": self.train_ratio,
             "embargo_days": self.embargo_days,
             "timestamp": datetime.now(UTC).isoformat(),
+            "deflated_sharpe_ratio": dsr,
             "windows": [],
             "holdout": None,
             "param_stability": stability,
@@ -633,6 +866,18 @@ class WalkForward:
                     f"({r.test_trade_count}) < minimum "
                     f"({self.min_test_trades})"
                 )
+            top1 = r.test_metrics.get("top1_pct", 0)
+            if top1 > 50:
+                warnings.append(
+                    f"Window {r.window.index + 1}: top-1 trade = "
+                    f"{top1:.0f}% of profit — concentrated"
+                )
+            hhi = r.test_metrics.get("hhi", 0)
+            if hhi > 0.15:
+                warnings.append(
+                    f"Window {r.window.index + 1}: HHI = "
+                    f"{hhi:.3f} — profit depends on few trades"
+                )
 
         unstable = [k for k, v in stability.items() if v.get("unstable", False)]
         if unstable:
@@ -660,13 +905,18 @@ class WalkForward:
 
     @staticmethod
     def _log_metrics_line(label: str, m: dict[str, Any]) -> None:
-        logger.info(
+        line = (
             f"  {label} | "
             f"Profit: {m.get('profit_pct', 0):+.1f}% | "
             f"Calmar: {m.get('calmar', 0):.2f} | "
             f"DD: {m.get('max_dd_pct', 0):.1f}% | "
             f"Trades: {m.get('trades', 0)}"
         )
+        if m.get("hhi"):
+            line += f" | HHI: {m['hhi']:.3f}"
+        if m.get("top1_pct"):
+            line += f" | Top1: {m['top1_pct']:.0f}%"
+        logger.info(line)
 
     def _log_window_result(self, r: WindowResult) -> None:
         w = r.window
@@ -681,9 +931,12 @@ class WalkForward:
 
         ctx = r.market_context
         if ctx:
+            regime = ctx.get("regime", "?")
             logger.info(
-                f"  Market: ATR {ctx.get('atr_pct', 0):.1f}% | "
-                f"BTC {ctx.get('btc_change_pct', 0):+.1f}%"
+                f"  Market: {regime} | "
+                f"BTC {ctx.get('btc_change_pct', 0):+.1f}% | "
+                f"ATR {ctx.get('atr_pct', 0):.1f}% | "
+                f"Vol {ctx.get('volatility_ann_pct', 0):.0f}%"
             )
 
         for label, m in [
@@ -746,15 +999,17 @@ class WalkForward:
         stability: dict[str, dict[str, Any]],
         consensus: dict[str, Any],
         warnings: list[str],
+        dsr: float | None = None,
     ) -> None:
         sep = "=" * 70
 
         logger.info("")
         logger.info(sep)
         logger.info(f"Walk-Forward Analysis Results - {self.strategy_name}")
+        mode = self.wf_mode
         logger.info(
             f"Loss: {self.config.get('hyperopt_loss', 'N/A')} | "
-            f"{len(all_results)} windows | "
+            f"{len(all_results)} windows ({mode}) | "
             f"{self.config.get('epochs', 150)} epochs/window"
         )
         logger.info(sep)
@@ -766,10 +1021,21 @@ class WalkForward:
 
         logger.info("")
         logger.info(f"{'=' * 25} CONSENSUS PARAMS " f"{'=' * 28}")
+        logger.info("  (weighted by test-period Calmar ratio)")
         for space, params in consensus.items():
             if isinstance(params, dict) and params:
                 parts = [f"{k}={v}" for k, v in params.items()]
                 logger.info(f"  {space}: {', '.join(parts)}")
+
+        if dsr is not None:
+            logger.info("")
+            logger.info(f"{'=' * 25} DEFLATED SHARPE " f"{'=' * 29}")
+            logger.info(
+                f"  DSR p-value: {dsr:.3f} "
+                f"({'significant' if dsr > 0.95 else 'weak' if dsr > 0.5 else 'not significant'})"
+            )
+            n_trials = self.config.get("epochs", 150) * len(all_results)
+            logger.info(f"  Corrected for {n_trials} total trials")
 
         self._log_holdout()
 
@@ -787,10 +1053,56 @@ class WalkForward:
         logger.info(sep)
 
     # ------------------------------------------------------------------
+    # Holdout
+    # ------------------------------------------------------------------
+
+    def _run_holdout(
+        self,
+        consensus: dict[str, Any],
+        default_params: dict[str, Any],
+        strategy_json: Path | None,
+        original_json_bytes: bytes | None,
+    ) -> None:
+        _, full_end = self._parse_timerange()
+        holdout_window = self._compute_holdout_window(full_end)
+        if not holdout_window or not consensus:
+            return
+
+        logger.info("")
+        logger.info("Running holdout backtest with consensus params...")
+        self._restore_params(consensus, strategy_json)
+        ho_test = self._run_backtest(holdout_window.test_timerange_str())
+
+        ho_baseline: dict[str, Any] = {}
+        if default_params:
+            self._restore_params(default_params, strategy_json)
+            ho_baseline = self._run_backtest(holdout_window.test_timerange_str())
+
+        self.holdout_result = WindowResult(
+            window=holdout_window,
+            test_metrics=ho_test,
+            baseline_metrics=ho_baseline,
+            test_trade_count=ho_test.get("trades", 0),
+        )
+
+        self._restore_original_json(strategy_json, original_json_bytes)
+
+    @staticmethod
+    def _restore_original_json(
+        strategy_json: Path | None, original_json_bytes: bytes | None
+    ) -> None:
+        if strategy_json and original_json_bytes is not None:
+            strategy_json.write_bytes(original_json_bytes)
+        elif strategy_json and strategy_json.exists():
+            strategy_json.unlink()
+
+    # ------------------------------------------------------------------
     # Main orchestration
     # ------------------------------------------------------------------
 
     def start(self) -> None:
+        from freqtrade.optimize.wfa_output import WFADashboard
+
         windows = self._compute_windows()
         self._validate(windows)
         self._print_plan(windows)
@@ -798,57 +1110,76 @@ class WalkForward:
         strategy_json = self._get_strategy_json_path()
         base_seed = self.config.get("hyperopt_random_state")
 
-        # Save default params for baseline backtests
-        default_params: dict[str, Any] = {}
+        original_json_bytes: bytes | None = None
         if strategy_json and strategy_json.exists():
-            with strategy_json.open("r") as f:
-                raw = rapidjson.load(f, number_mode=HYPER_PARAMS_FILE_FORMAT)
-                default_params = raw.get("params", {})
+            original_json_bytes = strategy_json.read_bytes()
+            backup_path = self._wfa_dir / f"{strategy_json.name}.backup"
+            backup_path.write_bytes(original_json_bytes)
+            logger.info(f"Backed up live strategy JSON to {backup_path}")
+
+        default_params: dict[str, Any] = {}
+        if original_json_bytes is not None:
+            raw = rapidjson.loads(
+                original_json_bytes.decode(), number_mode=HYPER_PARAMS_FILE_FORMAT
+            )
+            default_params = raw.get("params", {})
 
         all_params: list[dict[str, Any]] = []
+        dashboard = WFADashboard(
+            windows=windows,
+            strategy=self.strategy_name,
+            epochs_per_window=self.config.get("epochs", 150),
+            stake_currency=self.config.get("stake_currency", "USDT"),
+        )
 
         try:
-            for window in windows:
-                logger.info("")
-                logger.info(f"{'=' * 20} Window {window.index + 1}/" f"{len(windows)} {'=' * 20}")
+            with dashboard:
+                for window in windows:
+                    dashboard.set_window(window)
 
-                # 1. Delete co-located JSON (tip #21)
-                self._delete_strategy_json(strategy_json)
+                    self._delete_strategy_json(strategy_json)
 
-                # 2. Hyperopt on train
-                logger.info(f"Hyperopt: {window.train_timerange_str()}")
-                ho_result = self._run_hyperopt_window(window, base_seed)
-                train_metrics = ho_result.get("metrics", {})
+                    dashboard.set_phase("hyperopt")
+                    ho_result = self._run_hyperopt_window(window, base_seed, dashboard)
+                    train_metrics = ho_result.get("metrics", {})
 
-                # 3. Save params
-                params = self._save_window_params(window.index, strategy_json)
-                all_params.append(ho_result.get("params", {}))
+                    params = self._save_window_params(window.index, strategy_json)
+                    all_params.append(ho_result.get("params", {}))
 
-                # 4. Backtest on test with optimized params
-                logger.info(f"Backtest (optimized): " f"{window.test_timerange_str()}")
-                test_metrics = self._run_backtest(window.test_timerange_str())
+                    dashboard.set_phase("backtest_optimized")
+                    test_metrics = self._run_backtest(window.test_timerange_str())
 
-                # 5. Baseline backtest (default params)
-                baseline_metrics: dict[str, Any] = {}
-                if default_params:
-                    self._restore_params(default_params, strategy_json)
-                    logger.info(f"Backtest (baseline): " f"{window.test_timerange_str()}")
-                    baseline_metrics = self._run_backtest(window.test_timerange_str())
+                    baseline_metrics: dict[str, Any] = {}
+                    if default_params:
+                        self._restore_params(default_params, strategy_json)
+                        dashboard.set_phase("backtest_baseline")
+                        baseline_metrics = self._run_backtest(window.test_timerange_str())
 
-                result = WindowResult(
-                    window=window,
-                    train_metrics=train_metrics,
-                    test_metrics=test_metrics,
-                    baseline_metrics=baseline_metrics,
-                    params=params,
-                    test_trade_count=test_metrics.get("trades", 0),
-                )
-                self.results.append(result)
+                    market_ctx = self._compute_market_context(
+                        window.test_start, window.test_end
+                    )
 
-                gc.collect()
+                    result = WindowResult(
+                        window=window,
+                        train_metrics=train_metrics,
+                        test_metrics=test_metrics,
+                        baseline_metrics=baseline_metrics,
+                        market_context=market_ctx,
+                        params=params,
+                        test_trade_count=test_metrics.get("trades", 0),
+                    )
+                    self.results.append(result)
+                    dashboard.complete_window(result)
+
+                    gc.collect()
 
         except KeyboardInterrupt:
             logger.info(f"Interrupted. Partial results for " f"{len(self.results)} window(s).")
+
+        finally:
+            self._restore_original_json(strategy_json, original_json_bytes)
+            if strategy_json:
+                logger.info(f"Restored original strategy JSON: {strategy_json}")
 
         if not self.results:
             logger.warning("No windows completed. Nothing to report.")
@@ -858,35 +1189,33 @@ class WalkForward:
         search_ranges = self._get_search_ranges()
         stability = self._analyze_param_stability(all_params[: len(self.results)], search_ranges)
 
-        # Consensus params
-        consensus = self._compute_consensus_params(all_params[: len(self.results)])
+        # Weighted consensus: weight by test-period Calmar
+        calmar_weights = [
+            max(r.test_metrics.get("calmar", 0), 0.01)
+            for r in self.results
+        ]
+        consensus = self._compute_consensus_params(
+            all_params[: len(self.results)], weights=calmar_weights
+        )
 
-        # Holdout
-        _, full_end = self._parse_timerange()
-        holdout_window = self._compute_holdout_window(full_end)
-        if holdout_window and consensus:
-            logger.info("")
-            logger.info("Running holdout backtest with consensus params...")
-            self._restore_params(consensus, strategy_json)
-            ho_test = self._run_backtest(holdout_window.test_timerange_str())
+        # Deflated Sharpe Ratio
+        sharpes = [r.test_metrics.get("sharpe", 0) for r in self.results]
+        avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
+        n_trials = self.config.get("epochs", 150) * len(self.results)
+        avg_trades = int(np.mean([
+            r.test_metrics.get("trades", 0) for r in self.results
+        ])) if self.results else 0
+        dsr = self._deflated_sharpe_ratio(
+            avg_sharpe, n_trials, max(avg_trades, 2)
+        )
 
-            ho_baseline: dict[str, Any] = {}
-            if default_params:
-                self._restore_params(default_params, strategy_json)
-                ho_baseline = self._run_backtest(holdout_window.test_timerange_str())
+        self._run_holdout(consensus, default_params, strategy_json, original_json_bytes)
 
-            self.holdout_result = WindowResult(
-                window=holdout_window,
-                test_metrics=ho_test,
-                baseline_metrics=ho_baseline,
-                test_trade_count=ho_test.get("trades", 0),
-            )
-
-        # Export consensus JSON
-        self._export_consensus_json(consensus, strategy_json)
+        # Export consensus JSON (to wfa_dir only, never overwrites live JSON)
+        self._export_consensus_json(consensus)
 
         # Export full results
-        self._export_results_json(self.results, stability, consensus)
+        self._export_results_json(self.results, stability, consensus, dsr=dsr)
 
         # Log and get run count
         run_count = self._log_wfa_run(self.results, stability)
@@ -895,4 +1224,4 @@ class WalkForward:
         warnings = self._generate_warning_flags(self.results, stability, run_count)
 
         # Report
-        self._format_report(self.results, stability, consensus, warnings)
+        self._format_report(self.results, stability, consensus, warnings, dsr=dsr)

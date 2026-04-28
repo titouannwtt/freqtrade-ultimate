@@ -507,7 +507,7 @@ class TestExport:
             "buy": {"rsi": 35, "adx": 25},
             "sell": {"profit": 0.02},
         }
-        path = wf._export_consensus_json(consensus, None)
+        path = wf._export_consensus_json(consensus)
         assert path.exists()
 
         with path.open("r") as f:
@@ -515,16 +515,13 @@ class TestExport:
         assert data["strategy_name"] == "HyperoptableStrategy"
         assert data["params"]["buy"]["rsi"] == 35
 
-    def test_export_consensus_to_strategy_json(self, walkforward_conf, tmp_path):
+    def test_export_consensus_does_not_write_strategy_json(self, walkforward_conf, tmp_path):
         strategy_json = tmp_path / "HyperoptableStrategy.json"
         wf = WalkForward(walkforward_conf)
         consensus = {"buy": {"rsi": 35}}
-        wf._export_consensus_json(consensus, strategy_json)
+        wf._export_consensus_json(consensus)
 
-        assert strategy_json.exists()
-        with strategy_json.open("r") as f:
-            data = rapidjson.load(f)
-        assert data["params"]["buy"]["rsi"] == 35
+        assert not strategy_json.exists()
 
     def test_export_results_json(self, walkforward_conf, tmp_path):
         wf = WalkForward(walkforward_conf)
@@ -631,6 +628,22 @@ class TestStrategyJsonHelpers:
             data = rapidjson.load(f)
         assert data["params"]["buy"]["rsi"] == 30
         assert data["strategy_name"] == "HyperoptableStrategy"
+
+    def test_restore_original_json_restores_content(self, tmp_path):
+        json_path = tmp_path / "strategy.json"
+        original = b'{"original": true}'
+        json_path.write_text("overwritten")
+        WalkForward._restore_original_json(json_path, original)
+        assert json_path.read_bytes() == original
+
+    def test_restore_original_json_removes_if_none_existed(self, tmp_path):
+        json_path = tmp_path / "strategy.json"
+        json_path.write_text("should be removed")
+        WalkForward._restore_original_json(json_path, None)
+        assert not json_path.exists()
+
+    def test_restore_original_json_noop_if_no_path(self):
+        WalkForward._restore_original_json(None, None)
 
 
 # ------------------------------------------------------------------
@@ -804,3 +817,409 @@ class TestInit:
         assert wf.holdout_months == 0
         assert wf.min_test_trades == 30
         assert wf.strategy_name == "HyperoptableStrategy"
+
+
+# ------------------------------------------------------------------
+# WFA Dashboard
+# ------------------------------------------------------------------
+
+
+class TestWFADashboard:
+    @staticmethod
+    def _make_windows():
+        return [
+            WalkForwardWindow(
+                index=0,
+                train_start=datetime(2025, 1, 1, tzinfo=UTC),
+                train_end=datetime(2025, 4, 1, tzinfo=UTC),
+                test_start=datetime(2025, 4, 8, tzinfo=UTC),
+                test_end=datetime(2025, 5, 8, tzinfo=UTC),
+            ),
+            WalkForwardWindow(
+                index=1,
+                train_start=datetime(2025, 2, 8, tzinfo=UTC),
+                train_end=datetime(2025, 5, 8, tzinfo=UTC),
+                test_start=datetime(2025, 5, 15, tzinfo=UTC),
+                test_end=datetime(2025, 6, 15, tzinfo=UTC),
+            ),
+        ]
+
+    def test_dashboard_init(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        assert dash._n_windows == 2
+        assert dash._strategy == "TestStrat"
+        assert dash._epochs == 200
+
+    def test_set_window_resets_state(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash._ho_epoch = 50
+        dash._ho_best = {"loss": 0.5}
+        dash.set_window(windows[1])
+        assert dash._current_idx == 1
+        assert dash._ho_epoch == 0
+        assert dash._ho_best is None
+        assert dash._phase_log[1]["hyperopt"] == "active"
+
+    def test_set_phase_transitions(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        dash.set_phase("backtest_optimized")
+        assert dash._phase_log[0]["hyperopt"] == "done"
+        assert dash._phase_log[0]["backtest_optimized"] == "active"
+
+    def test_on_epoch_updates_best(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.on_epoch({"current_epoch": 10, "is_best": False, "loss": 0.5})
+        assert dash._ho_epoch == 10
+        assert dash._ho_best is None
+
+        dash.on_epoch({"current_epoch": 15, "is_best": True, "loss": 0.3})
+        assert dash._ho_epoch == 15
+        assert dash._ho_best["loss"] == 0.3
+
+    def test_complete_window(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        result = WindowResult(
+            window=windows[0],
+            test_metrics={"profit_pct": 12.5, "trades": 100},
+        )
+        dash.complete_window(result)
+        assert len(dash._completed) == 1
+        assert all(v == "done" for v in dash._phase_log[0].values())
+
+    def test_build_renders_without_error(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        dash.on_epoch({
+            "current_epoch": 50,
+            "is_best": True,
+            "loss": -0.95,
+            "results_metrics": {
+                "profit_total": 0.25,
+                "total_trades": 150,
+                "max_drawdown_account": 0.05,
+            },
+        })
+        panel = dash._build()
+        assert panel is not None
+
+    def test_build_with_completed_windows(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        dash.complete_window(WindowResult(
+            window=windows[0],
+            test_metrics={"profit_pct": 10, "trades": 80, "calmar": 1.5, "max_dd_pct": 5},
+            baseline_metrics={"profit_pct": 5},
+        ))
+        dash.set_window(windows[1])
+        dash.set_phase("backtest_optimized")
+        panel = dash._build()
+        assert panel is not None
+
+    def test_build_with_market_context_and_hhi(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        dash.complete_window(WindowResult(
+            window=windows[0],
+            test_metrics={
+                "profit_pct": 10, "trades": 80,
+                "calmar": 1.5, "max_dd_pct": 5,
+                "hhi": 0.12, "top1_pct": 30,
+            },
+            baseline_metrics={"profit_pct": 5},
+            market_context={
+                "btc_change_pct": 15.2,
+                "atr_pct": 3.1,
+                "volatility_ann_pct": 60,
+                "regime": "bull",
+            },
+        ))
+        panel = dash._build()
+        assert panel is not None
+
+    def test_insights_panel_renders(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        for i, w in enumerate(windows):
+            dash.set_window(w)
+            dash.complete_window(WindowResult(
+                window=w,
+                test_metrics={
+                    "profit_pct": 5 + i * 3, "trades": 60 + i * 10,
+                    "calmar": 1.0 + i * 0.5, "max_dd_pct": 8 - i,
+                    "hhi": 0.05, "top1_pct": 15,
+                },
+                baseline_metrics={"profit_pct": 2},
+                market_context={"regime": "range"},
+                params={"buy": {"rsi_low": 25 + i, "vol_mult": 1.5 + i * 0.1}},
+            ))
+        panel = dash._build()
+        assert panel is not None
+        insights = dash._build_insights()
+        assert insights is not None
+
+    def test_insights_with_one_window(self):
+        from freqtrade.optimize.wfa_output import WFADashboard
+
+        windows = self._make_windows()
+        dash = WFADashboard(windows, "TestStrat", 200, "USDC")
+        dash.set_window(windows[0])
+        dash.complete_window(WindowResult(
+            window=windows[0],
+            test_metrics={"profit_pct": -5, "trades": 30, "calmar": -0.5,
+                          "max_dd_pct": 15, "hhi": 0.25},
+            baseline_metrics={"profit_pct": 2},
+            params={"buy": {"rsi_low": 30}},
+        ))
+        insights = dash._build_insights()
+        assert insights is not None
+
+
+# ------------------------------------------------------------------
+# Anchored window mode (Improvement #1)
+# ------------------------------------------------------------------
+
+
+class TestAnchoredWindows:
+    def test_anchored_windows_basic(self, walkforward_conf):
+        walkforward_conf["wf_mode"] = "anchored"
+        wf = WalkForward(walkforward_conf)
+        windows = wf._compute_windows()
+
+        assert len(windows) == 3
+        for w in windows:
+            assert w.train_start == windows[0].train_start
+        for w in windows:
+            assert w.train_start < w.train_end
+            assert w.test_start < w.test_end
+
+    def test_anchored_train_grows(self, walkforward_conf):
+        walkforward_conf["wf_mode"] = "anchored"
+        wf = WalkForward(walkforward_conf)
+        windows = wf._compute_windows()
+
+        for i in range(len(windows) - 1):
+            days_i = (windows[i].train_end - windows[i].train_start).days
+            days_j = (windows[i + 1].train_end - windows[i + 1].train_start).days
+            assert days_j > days_i
+
+    def test_anchored_disjoint_tests(self, walkforward_conf):
+        walkforward_conf["wf_mode"] = "anchored"
+        wf = WalkForward(walkforward_conf)
+        windows = wf._compute_windows()
+
+        for i in range(len(windows) - 1):
+            assert windows[i].test_end <= windows[i + 1].test_start
+
+    def test_anchored_embargo(self, walkforward_conf):
+        walkforward_conf["wf_mode"] = "anchored"
+        wf = WalkForward(walkforward_conf)
+        windows = wf._compute_windows()
+
+        for w in windows:
+            gap = (w.test_start - w.train_end).days
+            assert gap == walkforward_conf["wf_embargo_days"]
+
+    def test_anchored_too_many_windows_raises(self, walkforward_conf):
+        walkforward_conf["wf_mode"] = "anchored"
+        walkforward_conf["wf_windows"] = 50
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match=r"window too short"):
+            wf._compute_windows()
+
+    def test_rolling_mode_is_default(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        assert wf.wf_mode == "rolling"
+
+
+# ------------------------------------------------------------------
+# Concentrated profit check (Improvement #3)
+# ------------------------------------------------------------------
+
+
+class TestConcentration:
+    def test_compute_concentration_basic(self):
+        profits = [100, 50, 30, 20]
+        result = WalkForward._compute_concentration(profits)
+        assert "hhi" in result
+        assert "top1_pct" in result
+        assert result["hhi"] > 0
+        assert result["top1_pct"] == 50.0
+
+    def test_compute_concentration_single_trade(self):
+        result = WalkForward._compute_concentration([100.0])
+        assert result["hhi"] == 1.0
+        assert result["top1_pct"] == 100.0
+
+    def test_compute_concentration_empty(self):
+        result = WalkForward._compute_concentration([])
+        assert result["hhi"] == 0.0
+        assert result["top1_pct"] == 0.0
+
+    def test_compute_concentration_mixed_signs(self):
+        profits = [100, -50, 30, -20]
+        result = WalkForward._compute_concentration(profits)
+        assert result["hhi"] > 0
+        assert result["top1_pct"] > 0
+
+    def test_hhi_perfectly_diversified(self):
+        profits = [10.0] * 100
+        result = WalkForward._compute_concentration(profits)
+        assert result["hhi"] == pytest.approx(0.01, abs=0.001)
+
+
+# ------------------------------------------------------------------
+# Weighted consensus (Improvement #4)
+# ------------------------------------------------------------------
+
+
+class TestWeightedConsensus:
+    def test_unweighted_consensus(self):
+        params = [
+            {"buy": {"a": 10, "b": 1.0}},
+            {"buy": {"a": 20, "b": 2.0}},
+            {"buy": {"a": 30, "b": 3.0}},
+        ]
+        c = WalkForward._compute_consensus_params(params)
+        assert c["buy"]["a"] == 20
+        assert c["buy"]["b"] == 2.0
+
+    def test_weighted_consensus_skews(self):
+        params = [
+            {"buy": {"a": 10}},
+            {"buy": {"a": 20}},
+            {"buy": {"a": 30}},
+        ]
+        weights = [0.1, 0.1, 10.0]
+        c = WalkForward._compute_consensus_params(params, weights=weights)
+        assert c["buy"]["a"] == 30
+
+    def test_weighted_consensus_equal_weights(self):
+        params = [
+            {"buy": {"a": 10.0}},
+            {"buy": {"a": 20.0}},
+            {"buy": {"a": 30.0}},
+        ]
+        weights = [1.0, 1.0, 1.0]
+        c = WalkForward._compute_consensus_params(params, weights=weights)
+        assert c["buy"]["a"] == 20.0
+
+    def test_weighted_median_basic(self):
+        med = WalkForward._weighted_median(
+            [1.0, 2.0, 3.0], [1.0, 1.0, 1.0]
+        )
+        assert med == 2.0
+
+    def test_weighted_median_heavy_last(self):
+        med = WalkForward._weighted_median(
+            [1.0, 2.0, 3.0], [0.1, 0.1, 10.0]
+        )
+        assert med == 3.0
+
+
+# ------------------------------------------------------------------
+# Deflated Sharpe Ratio (Improvement #5)
+# ------------------------------------------------------------------
+
+
+class TestDeflatedSharpe:
+    def test_dsr_high_sr_few_trials(self):
+        dsr = WalkForward._deflated_sharpe_ratio(
+            sr_observed=3.0, n_trials=10, n_obs=252
+        )
+        assert 0 < dsr <= 1
+
+    def test_dsr_low_sr_many_trials(self):
+        dsr = WalkForward._deflated_sharpe_ratio(
+            sr_observed=0.5, n_trials=1000, n_obs=100
+        )
+        assert dsr < 0.5
+
+    def test_dsr_zero_sr(self):
+        dsr = WalkForward._deflated_sharpe_ratio(
+            sr_observed=0.0, n_trials=100, n_obs=252
+        )
+        assert dsr < 0.5
+
+    def test_dsr_edge_cases(self):
+        assert WalkForward._deflated_sharpe_ratio(1.0, 1, 100) == 0.0
+        assert WalkForward._deflated_sharpe_ratio(1.0, 10, 1) == 0.0
+
+    def test_dsr_increases_with_sr(self):
+        dsr_low = WalkForward._deflated_sharpe_ratio(0.5, 100, 252)
+        dsr_high = WalkForward._deflated_sharpe_ratio(3.0, 100, 252)
+        assert dsr_high > dsr_low
+
+    def test_dsr_decreases_with_more_trials(self):
+        dsr_few = WalkForward._deflated_sharpe_ratio(2.0, 10, 252)
+        dsr_many = WalkForward._deflated_sharpe_ratio(2.0, 10000, 252)
+        assert dsr_few > dsr_many
+
+    def test_norm_cdf_basic(self):
+        assert WalkForward._norm_cdf(0) == pytest.approx(0.5, abs=0.001)
+        assert WalkForward._norm_cdf(10) > 0.99
+        assert WalkForward._norm_cdf(-10) < 0.01
+
+
+# ------------------------------------------------------------------
+# Market context (Improvement #2)
+# ------------------------------------------------------------------
+
+
+class TestMarketContext:
+    def test_market_context_graceful_failure(self, walkforward_conf):
+        """Should return empty dict if BTC data not available."""
+        wf = WalkForward(walkforward_conf)
+        ctx = wf._compute_market_context(
+            datetime(2019, 1, 1, tzinfo=UTC),
+            datetime(2019, 3, 1, tzinfo=UTC),
+        )
+        assert isinstance(ctx, dict)
+
+    def test_concentration_in_warning_flags(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = [
+            WindowResult(
+                window=WalkForwardWindow(
+                    index=0,
+                    train_start=datetime(2018, 1, 1, tzinfo=UTC),
+                    train_end=datetime(2018, 6, 1, tzinfo=UTC),
+                    test_start=datetime(2018, 6, 8, tzinfo=UTC),
+                    test_end=datetime(2018, 8, 1, tzinfo=UTC),
+                ),
+                test_metrics={
+                    "trades": 50, "top1_pct": 60, "hhi": 0.2,
+                },
+                test_trade_count=50,
+            ),
+        ]
+        warnings = wf._generate_warning_flags(results, {}, 1)
+        assert any("top-1" in w for w in warnings)
+        assert any("HHI" in w for w in warnings)

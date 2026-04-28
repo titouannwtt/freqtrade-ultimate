@@ -299,6 +299,7 @@ ARGS_WALK_FORWARD = [
     "wf_embargo_days",
     "wf_holdout_months",
     "wf_min_test_trades",
+    "wf_mode",
 ]
 
 # Command level configs - keep at the bottom of the above definitions

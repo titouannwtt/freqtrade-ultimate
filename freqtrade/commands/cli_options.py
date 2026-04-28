@@ -909,4 +909,12 @@ AVAILABLE_CLI_OPTIONS = {
         metavar="INT",
         default=30,
     ),
+    "wf_mode": Arg(
+        "--wf-mode",
+        help="Window mode: rolling (fixed-size sliding) or "
+        "anchored (train grows from start). Default: %(default)s.",
+        type=str,
+        choices=["rolling", "anchored"],
+        default="rolling",
+    ),
 }

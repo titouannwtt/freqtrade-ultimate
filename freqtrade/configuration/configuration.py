@@ -401,6 +401,7 @@ class Configuration:
             ("wf_embargo_days", "Parameter --wf-embargo-days detected: {}"),
             ("wf_holdout_months", "Parameter --wf-holdout-months detected: {}"),
             ("wf_min_test_trades", "Parameter --wf-min-test-trades detected: {}"),
+            ("wf_mode", "Parameter --wf-mode detected: {}"),
         ]
         self._args_to_config_loop(config, configurations)
 
