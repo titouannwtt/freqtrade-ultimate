@@ -7,7 +7,7 @@ I've been running Freqtrade in production for **four years now**. Over that time
 - I can iterate freely on the parts that matter to my stack (Hyperliquid, DCA, fleet monitoring) without waiting for upstream review.
 - Anyone who finds one of these changes useful can **cherry-pick it into their own setup** — or use this whole fork as a drop-in replacement. Everything here is GPL-3.0, just like upstream.
 
-Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, custom hyperopt losses (one for DCA/mean-reversion, one for momentum/trend-following), a more ergonomic hyperopt CLI, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
+Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: a **shared cache daemon (`ftcache`) that eliminates rate-limit cascades** when multiple bots share the same exchange wallet, a **shared pairlist daemon (`ftpairlists`)** that deduplicates filter computations across bots, **position guard and leverage sync** for multi-bot safety on a single wallet, automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, custom hyperopt losses (one for DCA/mean-reversion, one for momentum/trend-following), a more ergonomic hyperopt CLI, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
 
 <p align="center">
   <img src=".readme_illustrations/frequi-dashboard-overview.png" alt="FreqUI fork dashboard — pulled automatically by 'freqtrade install-ui' in this fork" width="900">
@@ -28,17 +28,18 @@ Upstream Freqtrade is already excellent as a general-purpose trading framework. 
 
 ### Why this fork?
 
-Five concrete motivations on top of the rationale above:
+Six concrete motivations on top of the rationale above:
 
 1. **Hyperliquid-grade resiliency.** On DEXes (and sometimes on CEXes too) a position can disappear from under you — ADL, manual close from the web UI, liquidation. Vanilla Freqtrade loses sync in those cases and keeps looping. This fork detects all three cases and closes the trade cleanly in the DB.
 2. **A complete FreqUI overhaul.** The stock FreqUI is functional but minimal. I wanted fleet-level monitoring, rich popovers with market context (BTC/ETH benchmarks, Fear & Greed index), per-bot alerts, drag-and-drop dashboard layout, and full i18n. So I built [titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork) — a near-complete rewrite of the UI. In this fork, `freqtrade install-ui` pulls it automatically, no extra setup needed.
 3. **Short-DCA friendly tools.** A pairlist filter that excludes pairs with a strong linear uptrend (high R² on price regression), custom hyperopt losses tuned for DCA and momentum strategies, and a hyperopt CLI that lets you swap Optuna samplers without touching your strategy file.
 4. **A more powerful hyperopt CLI.** Vanilla Freqtrade hardcodes the Optuna sampler. This fork adds a `--sampler` flag that lets you pick from six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) without editing your strategy — useful for A/B testing convergence approaches across different loss functions.
 5. **Sensible defaults for a full stack.** Launch scripts with auto-restart, a download script for recent data, ready-to-use backtest configs for 6 exchanges, and live config templates with API key placeholders.
+6. **Multi-bot infrastructure (`ftcache` + `ftpairlists`).** Running N bots on the same wallet means N × 40+ pairs × multiple timeframes = hundreds of competing API calls per cycle. The exchange sees them all as one user and rate-limits aggressively, causing cascading 429 failures. This fork solves it with two shared daemons: **`ftcache`** serializes all exchange traffic through a single rate-limited connection (priority queue, shared tickers/positions caches, token-bucket rate limiter, Feather persistence), and **`ftpairlists`** deduplicates pairlist filter computations across bots. Result on a 4-bot production setup: 429 errors dropped from ~50/hour to 0, pairlist refresh from 15 min to 3 min, total API calls reduced by ~75%. Comes with **position guard** (blocks conflicting entries across bots) and **leverage sync** (detects cross-bot leverage changes).
 
 ### What's added on top of upstream freqtrade/stable
 
-Concrete list of fork-only changes (19 code files, +1280 / -8 lines vs. `upstream/stable`, plus documentation and config templates):
+Concrete list of fork-only changes (48 code files, +6500 / -30 lines vs. `upstream/stable`, plus documentation and config templates):
 
 #### Trading engine
 
@@ -52,6 +53,47 @@ Concrete list of fork-only changes (19 code files, +1280 / -8 lines vs. `upstrea
 | `freqtrade/rpc/api_server/api_schemas.py` | +2 lines | Schema additions for the new exit reasons. |
 | `freqtrade/exchange/exchange.py` | +12 lines | Hook points consumed by `hyperliquid.py`. |
 | `freqtrade/data/metrics.py` | +7 lines | Small adjustments consumed by the custom hyperopt loss. |
+
+#### Multi-bot infrastructure: `ftcache` + `ftpairlists`
+
+```
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Bot #1    │  │   Bot #2    │  │   Bot #3    │
+│  (short)    │  │  (long)     │  │  (dry_run)  │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │  Unix socket (JSON-newline)
+                        ▼
+              ┌─────────────────┐
+              │  ftcache daemon │
+              │                 │
+              │  TokenBucket    │  ← priority queue (heap)
+              │  OHLCV store    │  ← Feather persistence
+              │  Tickers cache  │  ← 5s TTL, coalesced fetches
+              │  Positions cache│  ← push/pull model
+              └────────┬────────┘
+                       │  single ccxt connection
+                       ▼
+              ┌─────────────────┐
+              │   Exchange API  │
+              └─────────────────┘
+```
+
+| File | Added | Purpose |
+|------|-------|---------|
+| `freqtrade/ohlcv_cache/` | ~2400 lines | **Shared OHLCV cache daemon** — full package: `daemon.py` (token-bucket rate limiter, priority queue, shared tickers/positions cache), `client.py` (Unix socket IPC), `mixin.py` (intercepts 20+ exchange methods), `store.py` (in-memory OHLCV with gap tracking), `coordinator.py` (inflight coalescing), `persistence.py` (Feather files — survives daemon restarts), `healthcheck.py` (CLI monitoring). |
+| `freqtrade/pairlist_cache/` | ~520 lines | **Shared pairlist daemon** — deduplicates filter computations (TrendRegularityFilter, VolatilityFilter, VolumePairList) across bots. With 5 bots × 60 pairs, pairlist refresh drops from 300 to 60 OHLCV fetches. Deterministic params hashing for config-matching between bots. |
+| `freqtrade/exchange/cached_hyperliquid.py` | +41 lines | Hyperliquid subclass with rate-limited liquidation/init calls routed through the daemon. |
+| `freqtrade/exchange/cached_subclasses.py` | +90 lines | Auto-generated `Cached*` subclasses for all exchanges — enables `ftcache` on any exchange, not just Hyperliquid. |
+| `freqtrade/freqtradebot.py` | +144 lines | **Position guard** (blocks entry if another bot has an opposite-side position or different leverage on the same pair), **leverage sync** (detects cross-bot leverage changes and updates the DB), **early API server** (FreqUI shows "starting" during 2-20 min init). |
+| `freqtrade/rpc/api_server/api_v1.py` | +84 lines | **`GET /api/v1/cache_status`** — live stats from both daemons (hit rates, queue depth, errors). `GET /api/v1/ping` returns `{"status": "starting"}` during init. |
+
+**Key design decisions:**
+- **Why a daemon?** N bots = N processes. In-process caching gives each bot its own view. A daemon gives a single source of truth with one rate-limited connection.
+- **Why Unix socket?** Sub-ms latency (vs 10ms+ TCP), no port conflicts, file-system permissions, auto-cleanup.
+- **Why NOT fall back on rate-limit?** When the daemon reports `CacheRateLimited`, falling back to direct ccxt bypasses the centralized rate limiter and doubles the pressure. The bot skips the cycle and retries next time.
+- **Priority queue:** CRITICAL (open positions) > HIGH (live orders) > NORMAL (warmup) > LOW (dry_run). Within a level, higher-capital bots go first.
 
 #### Pairlist filters
 
@@ -180,6 +222,52 @@ In your config's `pairlists` section:
 
 Pairs whose 30-day price regression has an R² above `0.85` and a positive slope get filtered out — good hygiene for short-only strategies.
 
+#### Using `ftcache` (shared OHLCV cache daemon)
+
+If you run multiple bots on the same exchange wallet, `ftcache` eliminates rate-limit cascades by routing all API traffic through a single daemon.
+
+**1. Enable it in your bot config:**
+
+```json
+{
+  "shared_ohlcv_cache": {
+    "enabled": true,
+    "socket_path": "/tmp/ftcache.sock",
+    "bot_id": "my_bot_short",
+    "capital": 1000
+  }
+}
+```
+
+**2. Start the daemon before your bots:**
+
+```bash
+python -m freqtrade.ohlcv_cache.daemon --config live_configs/my_bot.json
+```
+
+**3. Start your bots normally** — the `CachedExchangeMixin` automatically intercepts exchange calls and routes them through the daemon.
+
+**4. Monitor via API or CLI:**
+
+```bash
+# CLI healthcheck
+python -m freqtrade.ohlcv_cache.healthcheck
+
+# API endpoint (from any running bot)
+curl http://localhost:8080/api/v1/cache_status
+```
+
+#### Using `ftpairlists` (shared pairlist cache daemon)
+
+Deduplicates pairlist filter computations across bots sharing similar configs. Especially useful when multiple bots use heavy filters like `TrendRegularityFilter` or `VolatilityFilter`.
+
+```bash
+# Start the pairlist cache daemon
+python -m freqtrade.pairlist_cache.daemon
+```
+
+Integration is automatic — when the daemon is running, bots with matching filter parameters share cached results instead of each computing their own.
+
 ### Companion repos
 
 - **[titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork)** — my FreqUI fork. Fleet monitoring, rich popovers, market context (BTC/ETH benchmarks, Fear & Greed), per-bot alerts, drag-and-drop dashboard, full i18n. `freqtrade install-ui` in this fork already points here.
@@ -231,17 +319,18 @@ J'utilise Freqtrade en production depuis **quatre ans**. Au fil du temps, j'ai a
 - Je puisse itérer librement sur les parties qui comptent pour ma stack (Hyperliquid, DCA, monitoring multi-bots) sans attendre de review upstream.
 - N'importe qui qui trouve une de ces modifs utile puisse **la reprendre dans son propre setup** — ou utiliser ce fork entier comme remplacement direct. Tout est sous GPL-3.0, comme l'upstream.
 
-Au-delà de ça, cinq motivations concrètes :
+Au-delà de ça, six motivations concrètes :
 
 1. **Résilience type Hyperliquid.** Sur les DEX (et parfois sur CEX aussi), une position peut disparaître sous tes pieds — ADL, fermeture manuelle depuis l'UI de l'exchange, liquidation. Freqtrade vanilla perd la sync dans ces cas-là et boucle indéfiniment. Ce fork détecte les trois cas et ferme proprement le trade dans la DB.
 2. **Une refonte complète de FreqUI.** L'interface stock de FreqUI est fonctionnelle mais minimaliste. Je voulais du monitoring de flotte, des popovers riches avec contexte de marché (benchmarks BTC/ETH, indice Fear & Greed), des alertes par bot, un dashboard drag-and-drop, et une i18n complète. J'ai donc construit [titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork) — une réécriture quasi-totale de l'UI. Dans ce fork, `freqtrade install-ui` la récupère automatiquement, aucun setup supplémentaire.
 3. **Outils pensés pour le DCA short.** Un filtre de pairlist qui exclut les paires en tendance haussière régulière (R² élevé sur régression linéaire du prix), des losses hyperopt custom calibrées pour les stratégies DCA et momentum, et une CLI hyperopt qui permet de changer de sampler Optuna sans toucher au fichier de stratégie.
 4. **Un CLI hyperopt plus puissant.** Freqtrade vanilla hardcode le sampler Optuna. Ce fork ajoute un flag `--sampler` qui permet de choisir parmi six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) sans éditer la stratégie — utile pour A/B tester les approches de convergence selon la loss function utilisée.
 5. **Stack complet utilisable d'emblée.** Scripts de lancement avec auto-restart, script de téléchargement des données récentes, configs de backtest prêtes à l'emploi pour 6 exchanges, et templates de configs live avec placeholders pour les clés API.
+6. **Infrastructure multi-bots (`ftcache` + `ftpairlists`).** Quand tu fais tourner N bots sur le même wallet, c'est N × 40+ paires × plusieurs timeframes = des centaines d'appels API concurrents par cycle. L'exchange voit tout comme un seul utilisateur et rate-limit agressivement, provoquant des cascades d'erreurs 429. Ce fork résout ça avec deux daemons partagés : **`ftcache`** sérialise tout le trafic exchange via une seule connexion rate-limitée (file de priorité, caches tickers/positions partagés, token-bucket, persistance Feather), et **`ftpairlists`** déduplique les calculs de filtres pairlist entre bots. Résultat sur un setup de production à 4 bots : erreurs 429 passées de ~50/h à 0, refresh pairlist de 15 min à 3 min, appels API totaux réduits de ~75%. Livré avec un **position guard** (bloque les entrées conflictuelles entre bots) et un **leverage sync** (détecte les changements de levier cross-bots).
 
 ### Ce que ce fork apporte vs. upstream freqtrade/stable
 
-Liste concrète des changements (19 fichiers de code, +1280 / -8 lignes vs. `upstream/stable`, plus documentation et templates de config) :
+Liste concrète des changements (48 fichiers de code, +6500 / -30 lignes vs. `upstream/stable`, plus documentation et templates de config) :
 
 #### Moteur de trading
 
@@ -255,6 +344,47 @@ Liste concrète des changements (19 fichiers de code, +1280 / -8 lignes vs. `ups
 | `freqtrade/rpc/api_server/api_schemas.py` | +2 lignes | Schemas pour les nouveaux exit reasons. |
 | `freqtrade/exchange/exchange.py` | +12 lignes | Hooks utilisés par `hyperliquid.py`. |
 | `freqtrade/data/metrics.py` | +7 lignes | Petits ajustements utilisés par la loss hyperopt custom. |
+
+#### Infrastructure multi-bots : `ftcache` + `ftpairlists`
+
+```
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Bot #1    │  │   Bot #2    │  │   Bot #3    │
+│  (short)    │  │  (long)     │  │  (dry_run)  │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │  Unix socket (JSON-newline)
+                        ▼
+              ┌─────────────────┐
+              │  ftcache daemon │
+              │                 │
+              │  TokenBucket    │  ← file de priorité (heap)
+              │  OHLCV store    │  ← persistance Feather
+              │  Tickers cache  │  ← TTL 5s, coalescing
+              │  Positions cache│  ← modèle push/pull
+              └────────┬────────┘
+                       │  connexion ccxt unique
+                       ▼
+              ┌─────────────────┐
+              │   API Exchange  │
+              └─────────────────┘
+```
+
+| Fichier | Ajouté | Rôle |
+|---------|--------|------|
+| `freqtrade/ohlcv_cache/` | ~2400 lignes | **Daemon OHLCV partagé** — package complet : `daemon.py` (token-bucket, file de priorité, caches tickers/positions partagés), `client.py` (IPC Unix socket), `mixin.py` (intercepte 20+ méthodes exchange), `store.py` (OHLCV mémoire avec suivi de gaps), `coordinator.py` (coalescing des requêtes en vol), `persistence.py` (fichiers Feather — survit aux restarts), `healthcheck.py` (monitoring CLI). |
+| `freqtrade/pairlist_cache/` | ~520 lignes | **Daemon pairlist partagé** — déduplique les calculs de filtres (TrendRegularityFilter, VolatilityFilter, VolumePairList) entre bots. Avec 5 bots × 60 paires, le refresh pairlist passe de 300 à 60 fetches OHLCV. Hash déterministe des paramètres pour matcher les configs entre bots. |
+| `freqtrade/exchange/cached_hyperliquid.py` | +41 lignes | Sous-classe Hyperliquid avec appels liquidation/init routés via le daemon. |
+| `freqtrade/exchange/cached_subclasses.py` | +90 lignes | Sous-classes `Cached*` auto-générées pour tous les exchanges — active `ftcache` sur n'importe quel exchange, pas seulement Hyperliquid. |
+| `freqtrade/freqtradebot.py` | +144 lignes | **Position guard** (bloque l'entrée si un autre bot a une position opposée ou un levier différent sur la même paire), **leverage sync** (détecte les changements de levier cross-bots et met à jour la DB), **API server précoce** (FreqUI affiche "starting" pendant les 2-20 min d'init). |
+| `freqtrade/rpc/api_server/api_v1.py` | +84 lignes | **`GET /api/v1/cache_status`** — stats live des deux daemons (taux de hit, profondeur de queue, erreurs). `GET /api/v1/ping` renvoie `{"status": "starting"}` pendant l'init. |
+
+**Décisions de design clés :**
+- **Pourquoi un daemon ?** N bots = N processus. Un cache in-process donne à chaque bot sa propre vue. Un daemon donne une source de vérité unique avec une seule connexion rate-limitée.
+- **Pourquoi un socket Unix ?** Latence sub-ms (vs 10ms+ TCP), pas de conflit de ports, permissions filesystem, nettoyage automatique.
+- **Pourquoi ne PAS fallback en cas de rate-limit ?** Quand le daemon renvoie `CacheRateLimited`, retomber sur ccxt direct contourne le rate-limiter centralisé et double la pression. Le bot saute le cycle et retente au suivant.
+- **File de priorité :** CRITICAL (positions ouvertes) > HIGH (ordres live) > NORMAL (warmup) > LOW (dry_run). À niveau égal, les bots avec plus de capital passent en premier.
 
 #### Filtres de pairlist
 
@@ -360,6 +490,52 @@ Dans la section `pairlists` de ta config :
 ```
 
 Les paires dont la régression linéaire sur 30 jours a un R² au-dessus de `0.85` et une pente positive sont filtrées — hygiène utile pour les stratégies short only.
+
+#### Utiliser `ftcache` (daemon OHLCV partagé)
+
+Si tu fais tourner plusieurs bots sur le même wallet, `ftcache` élimine les cascades de rate-limit en routant tout le trafic API via un seul daemon.
+
+**1. Active-le dans la config de chaque bot :**
+
+```json
+{
+  "shared_ohlcv_cache": {
+    "enabled": true,
+    "socket_path": "/tmp/ftcache.sock",
+    "bot_id": "mon_bot_short",
+    "capital": 1000
+  }
+}
+```
+
+**2. Lance le daemon avant tes bots :**
+
+```bash
+python -m freqtrade.ohlcv_cache.daemon --config live_configs/mon_bot.json
+```
+
+**3. Lance tes bots normalement** — le `CachedExchangeMixin` intercepte automatiquement les appels exchange et les route via le daemon.
+
+**4. Monitoring via API ou CLI :**
+
+```bash
+# Healthcheck CLI
+python -m freqtrade.ohlcv_cache.healthcheck
+
+# Endpoint API (depuis n'importe quel bot en marche)
+curl http://localhost:8080/api/v1/cache_status
+```
+
+#### Utiliser `ftpairlists` (daemon pairlist partagé)
+
+Déduplique les calculs de filtres pairlist entre bots qui partagent des configs similaires. Particulièrement utile quand plusieurs bots utilisent des filtres lourds comme `TrendRegularityFilter` ou `VolatilityFilter`.
+
+```bash
+# Lance le daemon pairlist cache
+python -m freqtrade.pairlist_cache.daemon
+```
+
+L'intégration est automatique — quand le daemon tourne, les bots ayant des paramètres de filtres identiques partagent les résultats en cache au lieu de les calculer chacun de leur côté.
 
 ### Autres repos associés
 
