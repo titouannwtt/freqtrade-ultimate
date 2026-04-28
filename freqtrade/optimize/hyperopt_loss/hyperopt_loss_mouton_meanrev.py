@@ -150,7 +150,7 @@ def _quarterly_consistency(results: DataFrame, max_date: datetime) -> float:
     """60% weighted binary (profitable or not) + 40% magnitude regularity."""
     dates = pd.to_datetime(results["close_date"], utc=True)
     results = results.copy()
-    results["_q"] = dates.dt.to_period("Q")
+    results["_q"] = dates.dt.tz_localize(None).dt.to_period("Q")
     ts = pd.Timestamp(max_date)
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
