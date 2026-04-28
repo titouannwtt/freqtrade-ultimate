@@ -11,6 +11,7 @@ class RunMode(StrEnum):
     DRY_RUN = "dry_run"
     BACKTEST = "backtest"
     HYPEROPT = "hyperopt"
+    WALKFORWARD = "walk_forward"
     UTIL_EXCHANGE = "util_exchange"
     UTIL_NO_EXCHANGE = "util_no_exchange"
     PLOT = "plot"
@@ -19,5 +20,5 @@ class RunMode(StrEnum):
 
 
 TRADE_MODES = [RunMode.LIVE, RunMode.DRY_RUN]
-OPTIMIZE_MODES = [RunMode.BACKTEST, RunMode.HYPEROPT]
+OPTIMIZE_MODES = [RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.WALKFORWARD]
 NON_UTIL_MODES = TRADE_MODES + OPTIMIZE_MODES

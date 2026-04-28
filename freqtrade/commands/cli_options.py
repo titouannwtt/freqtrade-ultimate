@@ -869,4 +869,52 @@ AVAILABLE_CLI_OPTIONS = {
         action="store_true",
         default=False,
     ),
+    # Walk-forward analysis
+    "wf_windows": Arg(
+        "--wf-windows",
+        help="Number of walk-forward windows (default: %(default)d).",
+        type=check_int_positive,
+        metavar="INT",
+        default=5,
+    ),
+    "wf_train_ratio": Arg(
+        "--wf-train-ratio",
+        help="Ratio of training data per window, range 0.5-0.9 "
+        "(default: %(default)s).",
+        type=float,
+        metavar="FLOAT",
+        default=0.75,
+    ),
+    "wf_embargo_days": Arg(
+        "--wf-embargo-days",
+        help="Embargo days between train and test windows for purging "
+        "(default: %(default)d).",
+        type=int,
+        metavar="INT",
+        default=7,
+    ),
+    "wf_holdout_months": Arg(
+        "--wf-holdout-months",
+        help="Reserve N months at end as final holdout. "
+        "0 = no holdout (default: %(default)d).",
+        type=int,
+        metavar="INT",
+        default=0,
+    ),
+    "wf_min_test_trades": Arg(
+        "--wf-min-test-trades",
+        help="Minimum trades per test window for significance "
+        "(default: %(default)d).",
+        type=check_int_positive,
+        metavar="INT",
+        default=30,
+    ),
+    "wf_mode": Arg(
+        "--wf-mode",
+        help="Window mode: rolling (fixed-size sliding) or "
+        "anchored (train grows from start). Default: %(default)s.",
+        type=str,
+        choices=["rolling", "anchored"],
+        default="rolling",
+    ),
 }

@@ -45,4 +45,5 @@ from freqtrade.commands.pairlist_commands import start_test_pairlist
 from freqtrade.commands.plot_commands import start_plot_dataframe, start_plot_profit
 from freqtrade.commands.strategy_utils_commands import start_strategy_update
 from freqtrade.commands.trade_commands import start_trading
+from freqtrade.commands.walk_forward_commands import start_walk_forward
 from freqtrade.commands.webserver_commands import start_webserver

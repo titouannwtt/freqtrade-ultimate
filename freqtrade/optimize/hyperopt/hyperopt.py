@@ -43,6 +43,7 @@ class Hyperopt:
 
     def __init__(self, config: Config) -> None:
         self._hyper_out: HyperoptOutput = HyperoptOutput(streaming=True)
+        self._epoch_callback: Any | None = None
 
         self.config = config
 
@@ -216,6 +217,9 @@ class Hyperopt:
 
         self._save_result(val)
 
+        if self._epoch_callback:
+            self._epoch_callback(val)
+
     def start(self) -> None:
         self.random_state = self._set_random_state(self.config.get("hyperopt_random_state"))
         logger.info(f"Using optimizer random state: {self.random_state}")
@@ -234,7 +238,10 @@ class Hyperopt:
                 logger.info(f"Effective number of parallel workers used: {jobs}")
 
                 # Define progressbar
-                with get_progress_tracker(cust_callables=[self._hyper_out]) as pbar:
+                with get_progress_tracker(
+                    cust_callables=[self._hyper_out],
+                    disable=self.config.get("wfa_silent", False),
+                ) as pbar:
                     task = pbar.add_task("Epochs", total=self.total_epochs)
 
                     start = 0
@@ -308,9 +315,10 @@ class Hyperopt:
                 self.current_best_epoch,
             )
 
-            HyperoptTools.show_epoch_details(
-                self.current_best_epoch, self.total_epochs, self.print_json
-            )
+            if not self.config.get("wfa_silent"):
+                HyperoptTools.show_epoch_details(
+                    self.current_best_epoch, self.total_epochs, self.print_json
+                )
         elif self.num_epochs_saved > 0:
             print(
                 f"No good result found for given optimization function in {self.num_epochs_saved} "

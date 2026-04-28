@@ -1883,6 +1883,5 @@ class Backtesting:
                 )
             )
 
-        if len(self.strategylist) > 0:
-            # Show backtest results
+        if len(self.strategylist) > 0 and not self.config.get("wfa_silent"):
             show_backtest_results(self.config, self.results)
