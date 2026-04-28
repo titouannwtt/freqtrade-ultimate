@@ -2675,7 +2675,8 @@ class Exchange:
                 logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
 
                 return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
-            logger.info(
+            log = logger.debug if last_refresh_time == 0 else logger.info
+            log(
                 f"Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
                 f"{candle_ts < last_refresh_time}, {candle_ts}, {last_refresh_time}, "
                 f"{format_ms_time(candle_ts)}, {format_ms_time(last_refresh_time)} "
@@ -4030,9 +4031,7 @@ class Exchange:
         else:
             return None
 
-    def fetch_liquidation_fills(
-        self, pair: str, since: datetime
-    ) -> list[dict]:
+    def fetch_liquidation_fills(self, pair: str, since: datetime) -> list[dict]:
         """
         Fetch user fills for a pair and return only liquidation fills.
         Override in exchange-specific subclasses that support liquidation detection.

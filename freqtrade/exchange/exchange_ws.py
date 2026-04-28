@@ -200,7 +200,8 @@ class ExchangeWS:
                     )
                     break
                 delay = min(2**retry_count, 30)
-                logger.info(
+                log = logger.debug if retry_count == 1 else logger.info
+                log(
                     f"WS watch for {pair}, {timeframe} failed "
                     f"(attempt {retry_count}/{max_retries}), retrying in {delay}s"
                 )
