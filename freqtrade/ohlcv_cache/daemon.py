@@ -334,6 +334,32 @@ class Daemon:
             self.budgets[exchange] = b
         return b
 
+    def _collect_budget_stats(self) -> dict:
+        """Aggregate token bucket state across all exchanges for stats op."""
+        result: dict = {}
+        for exchange, bucket in self.budgets.items():
+            now = time.monotonic()
+            backoff_remaining = max(0.0, bucket._backoff_until - now)
+            q_depths = {"critical": 0, "high": 0, "normal": 0, "low": 0}
+            prio_names = {0: "critical", 1: "high", 2: "normal", 3: "low"}
+            for waiter in bucket._waiters:
+                prio_name = prio_names.get(waiter[0], "low")
+                q_depths[prio_name] += 1
+            result[f"budget_{exchange}"] = {
+                "tokens_available": round(bucket.tokens, 2),
+                "tokens_max": bucket.burst,
+                "refill_rate": bucket.rate_per_s,
+                "backoff_active": bucket._backoff_factor > 1.0,
+                "backoff_factor": round(bucket._backoff_factor, 2),
+                "backoff_remaining_s": round(backoff_remaining, 1),
+                "queue_depths": q_depths,
+            }
+        if len(self.budgets) == 1:
+            only_key = next(iter(result))
+            for k, v in result[only_key].items():
+                result[k] = v
+        return result
+
     def _get_fetcher(self, exchange: str, trading_mode: str) -> ExchangeFetcher:
         k = (exchange, trading_mode)
         f = self.fetchers.get(k)
@@ -694,6 +720,7 @@ class Daemon:
                 "uptime_s": self.stats.uptime_s(),
             }
         if op == "stats":
+            budget_stats = self._collect_budget_stats()
             return {
                 "req_id": req.get("req_id", ""),
                 "ok": True,
@@ -715,6 +742,7 @@ class Daemon:
                 "positions_puts": self.stats.positions_puts,
                 "positions_gets": self.stats.positions_gets,
                 "positions_cache_hits": self.stats.positions_cache_hits,
+                **budget_stats,
             }
         if op == "acquire":
             return await self._handle_acquire(req)

@@ -1845,6 +1845,65 @@ class RPC:
 
         return res
 
+    def _rpc_rate_metrics(
+        self, window: int = 3600, bucket_s: int = 10,
+    ) -> dict[str, Any]:
+        exchange = self._freqtrade.exchange
+        metrics = exchange.api_metrics
+
+        result: dict[str, Any] = {
+            "exchange": exchange.name,
+            "timeline": metrics.get_timeline(since_s=window, bucket_s=bucket_s),
+            "recent_429s": metrics.get_recent_429s(limit=50),
+            "summary": metrics.get_summary(window_s=window),
+            "current": {},
+            "ftcache_extended": {},
+        }
+
+        try:
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            sock = default_socket_path()
+            stats = _query_unix(sock, {"op": "stats", "req_id": "rate-metrics"})
+            if stats.get("ok"):
+                result["current"] = {
+                    "tokens_available": stats.get("tokens_available", 0),
+                    "tokens_max": stats.get("tokens_max", 0),
+                    "refill_rate": stats.get("refill_rate", 0),
+                    "backoff_active": stats.get("backoff_active", False),
+                    "backoff_factor": stats.get("backoff_factor", 1.0),
+                    "backoff_remaining_s": stats.get("backoff_remaining_s", 0),
+                    "queue_depths": stats.get("queue_depths", {}),
+                }
+                result["ftcache_extended"] = {
+                    k: stats.get(k, 0) for k in [
+                        "requests_total", "cache_hits", "cache_partial",
+                        "cache_misses", "acquire_total",
+                        "tickers_requests", "tickers_cache_hits",
+                        "tickers_fetches", "positions_puts",
+                        "positions_gets", "positions_cache_hits",
+                    ]
+                }
+                hit_rate_keys = {
+                    "requests_total": "cache_hits",
+                    "tickers_requests": "tickers_cache_hits",
+                    "positions_gets": "positions_cache_hits",
+                }
+                for total_k, hits_k in hit_rate_keys.items():
+                    total = stats.get(total_k, 0)
+                    hits = stats.get(hits_k, 0)
+                    pct_key = hits_k.replace("cache_hits", "hit_rate_pct")
+                    if pct_key == "hit_rate_pct":
+                        pct_key = "cache_hit_rate_pct"
+                    result["ftcache_extended"][pct_key] = (
+                        round(hits / total * 100, 1) if total > 0 else 0
+                    )
+        except Exception:  # noqa: S110
+            pass
+
+        return result
+
     def _update_market_direction(self, direction: MarketDirection) -> None:
         self._freqtrade.strategy.market_direction = direction
 

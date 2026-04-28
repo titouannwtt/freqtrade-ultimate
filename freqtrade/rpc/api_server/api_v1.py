@@ -18,6 +18,7 @@ from freqtrade.rpc.api_server.api_schemas import (
     MarketResponse,
     Ping,
     PlotConfig,
+    RateMetricsResponse,
     ShowConfig,
     StrategyResponse,
     SysInfo,
@@ -211,6 +212,15 @@ def health(rpc: RPC = Depends(get_rpc)):
 @router.get("/cache_status", response_model=CacheStatus, tags=["Info"])
 def cache_status():
     return _query_cache_daemons()
+
+
+@router.get("/rate_metrics", response_model=RateMetricsResponse, tags=["Info"])
+def rate_metrics(
+    window: int = Query(3600, ge=60, le=86400),
+    bucket_s: int = Query(10, ge=5, le=300),
+    rpc: RPC = Depends(get_rpc),
+):
+    return rpc._rpc_rate_metrics(window=window, bucket_s=bucket_s)
 
 
 def _query_cache_daemons() -> dict:

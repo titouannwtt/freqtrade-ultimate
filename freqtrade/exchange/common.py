@@ -10,6 +10,34 @@ from freqtrade.mixins import LoggingMixin
 
 
 logger = logging.getLogger(__name__)
+
+
+def _record_metric(
+    args: tuple, method_name: str, elapsed_s: float, *,
+    success: bool, error_type: str | None = None,
+) -> None:
+    if not args or not method_name:
+        return
+    exchange_obj = args[0]
+    metrics = getattr(exchange_obj, "_metrics", None)
+    if metrics is None:
+        return
+    try:
+        from freqtrade.exchange.exchange_metrics import ApiCall
+
+        metrics.record(ApiCall(
+            ts=time.time(),
+            method=method_name,
+            exchange=getattr(exchange_obj, "name", "unknown"),
+            latency_ms=elapsed_s * 1000,
+            cached=False,
+            success=success,
+            error_type=error_type,
+        ))
+    except Exception:  # noqa: S110
+        pass
+
+
 __logging_mixin = None
 
 
@@ -118,12 +146,22 @@ def calculate_backoff(retrycount, max_retries):
 
 
 def retrier_async(f):
+    _fname = getattr(f, "__name__", "unknown")
+
     async def wrapper(*args, **kwargs):
         count = kwargs.pop("count", API_RETRY_COUNT)
         kucoin = args[0].name == "KuCoin"  # Check if the exchange is KuCoin.
+        t0 = time.monotonic()
         try:
-            return await f(*args, **kwargs)
+            result = await f(*args, **kwargs)
+            _record_metric(args, _fname, time.monotonic() - t0, success=True)
+            return result
         except TemporaryError as ex:
+            error_type = "429" if isinstance(ex, DDosProtection) else "error"
+            _record_metric(
+                args, _fname, time.monotonic() - t0,
+                success=False, error_type=error_type,
+            )
             msg = f'{f.__name__}() returned exception: "{ex}". '
             if count > 0:
                 msg += f"Retrying still for {count} times."
@@ -172,12 +210,24 @@ def retrier(*, retries=API_RETRY_COUNT) -> Callable[[F], F]: ...
 
 def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
     def decorator(f: F) -> F:
+        _fname = getattr(f, "__name__", "unknown")
+
         @wraps(f)
         def wrapper(*args, **kwargs):
             count = kwargs.pop("count", retries)
+            t0 = time.monotonic()
             try:
-                return f(*args, **kwargs)
+                result = f(*args, **kwargs)
+                _record_metric(
+                    args, _fname, time.monotonic() - t0, success=True,
+                )
+                return result
             except (TemporaryError, RetryableOrderError) as ex:
+                error_type = "429" if isinstance(ex, DDosProtection) else "error"
+                _record_metric(
+                    args, _fname, time.monotonic() - t0,
+                    success=False, error_type=error_type,
+                )
                 msg = f'{f.__name__}() returned exception: "{ex}". '
                 if count > 0:
                     logger.warning(msg + f"Retrying still for {count} times.")

@@ -779,6 +779,52 @@ class CacheStatus(BaseModel):
     pairlist_cache: PairlistCacheStatus = PairlistCacheStatus()
 
 
+class RateTimelineBucket(BaseModel):
+    ts: int = 0
+    total: int = 0
+    cached: int = 0
+    direct: int = 0
+    errors: int = 0
+    errors_429: int = 0
+    avg_latency_ms: float = 0.0
+    by_method: dict[str, int] = {}
+
+
+class RateLimitEvent(BaseModel):
+    ts: float = 0.0
+    method: str = ""
+    exchange: str = ""
+    pair: str | None = None
+
+
+class MethodStats(BaseModel):
+    count: int = 0
+    cached: int = 0
+    direct: int = 0
+    errors: int = 0
+    avg_latency_ms: float = 0.0
+    p95_latency_ms: float = 0.0
+
+
+class TokenBucketState(BaseModel):
+    tokens_available: float = 0.0
+    tokens_max: float = 0.0
+    refill_rate: float = 0.0
+    backoff_active: bool = False
+    backoff_factor: float = 1.0
+    backoff_remaining_s: float = 0.0
+    queue_depths: dict[str, int] = {}
+
+
+class RateMetricsResponse(BaseModel):
+    exchange: str = ""
+    timeline: list[RateTimelineBucket] = []
+    current: TokenBucketState = TokenBucketState()
+    recent_429s: list[RateLimitEvent] = []
+    summary: dict[str, Any] = {}
+    ftcache_extended: dict[str, Any] = {}
+
+
 class CustomDataEntry(BaseModel):
     key: str
     type: str

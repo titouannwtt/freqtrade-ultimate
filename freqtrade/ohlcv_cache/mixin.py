@@ -148,6 +148,28 @@ class CachedExchangeMixin:
         if hasattr(self, "_ftcache_stats"):
             self._ftcache_stats[key] = self._ftcache_stats.get(key, 0) + 1
 
+    def _ftcache_record_cached(
+        self, method: str, pair: str | None = None, latency_ms: float = 0.0,
+    ) -> None:
+        metrics = getattr(self, "_metrics", None)
+        if metrics is None:
+            return
+        try:
+            from freqtrade.exchange.exchange_metrics import ApiCall
+
+            metrics.record(ApiCall(
+                ts=time.time(),
+                method=method,
+                exchange=getattr(self, "name", "unknown"),
+                latency_ms=latency_ms,
+                cached=True,
+                success=True,
+                error_type=None,
+                pair=pair,
+            ))
+        except Exception:  # noqa: S110
+            pass
+
     def ftcache_get_stats(self) -> dict:
         """Return diagnostic counters for the cache layer."""
         return dict(getattr(self, "_ftcache_stats", {}))
@@ -228,11 +250,13 @@ class CachedExchangeMixin:
             priority: int | None = None
             if pair in self._ftcache_open_pairs:
                 priority = OhlcvCacheClient.CRITICAL
-            return await client.fetch(
+            result = await client.fetch(
                 pair=pair, timeframe=timeframe,
                 candle_type=candle_type, since_ms=since_ms, limit=limit,
                 priority=priority,
             )
+            self._ftcache_record_cached("fetch_ohlcv", pair=pair)
+            return result
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
             logger.info(
@@ -298,6 +322,7 @@ class CachedExchangeMixin:
             with self._cache_lock:  # type: ignore[attr-defined]
                 self._fetch_tickers_cache[cache_key] = tickers  # type: ignore[attr-defined]
             self._ftcache_tickers_fresh_ts = time.monotonic()
+            self._ftcache_record_cached("get_tickers")
             return tickers
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
@@ -353,6 +378,7 @@ class CachedExchangeMixin:
                     "fetch_positions", positions, add_info="from ftcache",
                 )
                 self._ftcache_save_positions(positions)
+                self._ftcache_record_cached("fetch_positions")
                 return positions
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")

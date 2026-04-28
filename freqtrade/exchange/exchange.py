@@ -289,6 +289,11 @@ class Exchange:
             self._exchange_ws = ExchangeWS(self._config, self._ws_async)
 
         logger.info(f'Using Exchange "{self.name}"')
+
+        from freqtrade.exchange.exchange_metrics import ExchangeMetrics
+
+        self._metrics = ExchangeMetrics(self.name)
+
         self.required_candle_call_count = 1
         # Converts the interval provided in minutes in config to seconds
         self.markets_refresh_interval: int = (
@@ -434,6 +439,12 @@ class Exchange:
     def name(self) -> str:
         """exchange Name (from ccxt)"""
         return self._api.name
+
+    @property
+    def api_metrics(self):
+        from freqtrade.exchange.exchange_metrics import ExchangeMetrics
+
+        return getattr(self, "_metrics", ExchangeMetrics("unknown"))
 
     @property
     def id(self) -> str:
