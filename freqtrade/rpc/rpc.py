@@ -1437,11 +1437,40 @@ class RPC:
         return lock
 
     def _rpc_whitelist(self) -> dict:
-        """Returns the currently active whitelist"""
+        """Returns the currently active whitelist with pipeline details"""
+        pairlists = self._freqtrade.pairlists
+        active_whitelist = self._freqtrade.active_pair_whitelist
+        pairlist_only = pairlists.whitelist
+
+        added_pairs = [p for p in active_whitelist if p not in pairlist_only]
+
+        stake_currency = self._config["stake_currency"]
+        trading_mode = self._config.get("trading_mode", "spot")
+        try:
+            all_markets = self._freqtrade.exchange.get_markets(
+                quote_currencies=[stake_currency],
+                tradable_only=True,
+                active_only=True,
+            )
+            if trading_mode == "futures":
+                total_market_pairs = len([
+                    m for m in all_markets.values() if m.get("swap", False)
+                ])
+            else:
+                total_market_pairs = len([
+                    m for m in all_markets.values() if m.get("spot", False)
+                ])
+        except Exception:
+            total_market_pairs = 0
+
         res = {
-            "method": self._freqtrade.pairlists.name_list,
-            "length": len(self._freqtrade.active_pair_whitelist),
-            "whitelist": self._freqtrade.active_pair_whitelist,
+            "method": pairlists.name_list,
+            "length": len(active_whitelist),
+            "whitelist": active_whitelist,
+            "handler_configs": pairlists.handler_configs,
+            "pipeline": pairlists.pipeline_snapshot,
+            "total_market_pairs": total_market_pairs,
+            "added_pairs": added_pairs,
         }
         return res
 

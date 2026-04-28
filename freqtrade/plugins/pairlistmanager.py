@@ -56,6 +56,7 @@ class PairListManager(LoggingMixin):
                 f"{invalid}."
             )
 
+        self._pipeline_snapshot: list[dict] = []
         self._check_backtest()
         self._not_expiring_cache: LRUCache = LRUCache(maxsize=1)
 
@@ -130,6 +131,20 @@ class PairListManager(LoggingMixin):
         """List of short_desc for each Pairlist Handler"""
         return [{p.name: p.short_desc()} for p in self._pairlist_handlers]
 
+    @property
+    def pipeline_snapshot(self) -> list[dict]:
+        """Per-handler pair counts from the last refresh_pairlist() run"""
+        return self._pipeline_snapshot
+
+    @property
+    def handler_configs(self) -> list[dict]:
+        """Sanitized config for each handler (method + params, no secrets)"""
+        configs = []
+        for handler in self._pairlist_handlers:
+            config = dict(handler._pairlistconfig)
+            configs.append(config)
+        return configs
+
     @cached(FtTTLCache(maxsize=1, ttl=1800))
     def _get_cached_tickers(self) -> Tickers:
         return self._exchange.get_tickers()
@@ -156,6 +171,12 @@ class PairListManager(LoggingMixin):
         # Generate the pairlist with first Pairlist Handler in the chain
         pairlist = self._pairlist_handlers[0].gen_pairlist(tickers)
 
+        snapshot: list[dict] = [{
+            "handler": self._pairlist_handlers[0].name,
+            "count_after": len(pairlist),
+            "pairs_removed": [],
+        }]
+
         # Optional intersection with an explicit list of pairs (used in backtesting)
         if pairs is not None:
             pairlist = [p for p in pairlist if p in pairs]
@@ -164,12 +185,28 @@ class PairListManager(LoggingMixin):
             # Process all Pairlist Handlers in the chain
             # except for the first one, which is the generator.
             for pairlist_handler in self._pairlist_handlers[1:]:
+                prev_set = set(pairlist)
                 pairlist = pairlist_handler.filter_pairlist(pairlist, tickers)
+                removed = sorted(prev_set - set(pairlist))
+                snapshot.append({
+                    "handler": pairlist_handler.name,
+                    "count_after": len(pairlist),
+                    "pairs_removed": removed,
+                })
 
         # Validation against blacklist happens after the chain of Pairlist Handlers
         # to ensure blacklist is respected.
+        prev_set = set(pairlist)
         pairlist = self.verify_blacklist(pairlist, logger.warning)
+        bl_removed = sorted(prev_set - set(pairlist))
+        if bl_removed:
+            snapshot.append({
+                "handler": "Blacklist",
+                "count_after": len(pairlist),
+                "pairs_removed": bl_removed,
+            })
 
+        self._pipeline_snapshot = snapshot
         self.log_once(f"Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)
 
         self._whitelist = pairlist

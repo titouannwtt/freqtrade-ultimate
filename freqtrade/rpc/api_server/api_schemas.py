@@ -448,10 +448,20 @@ class BlacklistResponse(BaseModel):
     method: list[str]
 
 
+class PipelineStep(BaseModel):
+    handler: str
+    count_after: int
+    pairs_removed: list[str] = []
+
+
 class WhitelistResponse(BaseModel):
     whitelist: list[str]
     length: int
     method: list[str]
+    handler_configs: list[dict[str, Any]] | None = None
+    pipeline: list[PipelineStep] | None = None
+    total_market_pairs: int | None = None
+    added_pairs: list[str] | None = None
 
 
 class WhitelistEvaluateResponse(BackgroundTaskResult):
