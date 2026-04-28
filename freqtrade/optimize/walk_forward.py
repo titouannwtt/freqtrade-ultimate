@@ -15,6 +15,7 @@ import rapidjson
 from freqtrade.constants import Config
 from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.hyperopt_tools import HyperoptTools, hyperopt_serializer
+from freqtrade.resolvers.exchange_resolver import ExchangeResolver
 
 
 if TYPE_CHECKING:
@@ -38,10 +39,10 @@ class WalkForwardWindow:
     test_end: datetime
 
     def train_timerange_str(self) -> str:
-        return f"{self.train_start.strftime('%Y%m%d')}-" f"{self.train_end.strftime('%Y%m%d')}"
+        return f"{self.train_start.strftime('%Y%m%d')}-{self.train_end.strftime('%Y%m%d')}"
 
     def test_timerange_str(self) -> str:
-        return f"{self.test_start.strftime('%Y%m%d')}-" f"{self.test_end.strftime('%Y%m%d')}"
+        return f"{self.test_start.strftime('%Y%m%d')}-{self.test_end.strftime('%Y%m%d')}"
 
 
 @dataclass
@@ -89,7 +90,7 @@ class WalkForward:
         timerange_str = self.config.get("timerange", "")
         if not timerange_str or "-" not in timerange_str:
             raise OperationalException(
-                "Walk-forward analysis requires --timerange " "in format YYYYMMDD-YYYYMMDD."
+                "Walk-forward analysis requires --timerange in format YYYYMMDD-YYYYMMDD."
             )
         parts = timerange_str.split("-")
         if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -251,7 +252,7 @@ class WalkForward:
     def _validate(self, windows: list[WalkForwardWindow]) -> None:
         if not (0.5 <= self.train_ratio <= 0.9):
             raise OperationalException(
-                f"--wf-train-ratio must be between 0.5 and 0.9, " f"got {self.train_ratio}."
+                f"--wf-train-ratio must be between 0.5 and 0.9, got {self.train_ratio}."
             )
 
         for w in windows:
@@ -273,7 +274,7 @@ class WalkForward:
         epochs = self.config.get("epochs", 150)
         if epochs > 300:
             logger.warning(
-                f"Epochs per window ({epochs}) > 300. " f"Risk of per-window overfitting (tip #14)."
+                f"Epochs per window ({epochs}) > 300. Risk of per-window overfitting (tip #14)."
             )
 
         if 0 < self.holdout_months < 2:
@@ -312,7 +313,7 @@ class WalkForward:
             ho = self._compute_holdout_window(full_end)
             if ho:
                 logger.info(
-                    f"  Holdout: {ho.test_start:%Y-%m-%d} -> " f"{ho.test_end:%Y-%m-%d} (untouched)"
+                    f"  Holdout: {ho.test_start:%Y-%m-%d} -> {ho.test_end:%Y-%m-%d} (untouched)"
                 )
 
         logger.info("=" * 70)
@@ -401,9 +402,15 @@ class WalkForward:
                 "params": best.get("params_details", {}),
                 "metrics": self._extract_metrics(raw_metrics),
             }
+
+        logger.warning(
+            f"Window {window.index + 1}: hyperopt produced no valid epochs! "
+            f"All epochs may have been rejected by the loss function. "
+            f"Test backtest will run with default params."
+        )
         return {"loss": 0, "params": {}, "metrics": {}}
 
-    def _run_backtest(self, timerange_str: str) -> dict[str, Any]:
+    def _run_backtest(self, timerange_str: str, exchange: Any | None = None) -> dict[str, Any]:
         from freqtrade.optimize.backtesting import Backtesting
 
         cfg = deepcopy(self.config)
@@ -413,7 +420,7 @@ class WalkForward:
         cfg["wfa_silent"] = True
         cfg.pop("backtest_cache", None)
 
-        bt = Backtesting(cfg)
+        bt = Backtesting(cfg, exchange=exchange)
         bt.start()
 
         strat_results: dict[str, Any] = {}
@@ -447,25 +454,17 @@ class WalkForward:
     # Market context (Improvement #2)
     # ------------------------------------------------------------------
 
-    def _compute_market_context(
-        self, test_start: datetime, test_end: datetime
-    ) -> dict[str, float]:
+    def _compute_market_context(self, test_start: datetime, test_end: datetime) -> dict[str, float]:
         """Load BTC data for the test period and compute context metrics."""
         try:
             from freqtrade.configuration.timerange import TimeRange
             from freqtrade.data.history import load_pair_history
             from freqtrade.enums import CandleType
 
-            tr_str = (
-                f"{test_start.strftime('%Y%m%d')}-"
-                f"{test_end.strftime('%Y%m%d')}"
-            )
+            tr_str = f"{test_start.strftime('%Y%m%d')}-{test_end.strftime('%Y%m%d')}"
             tr = TimeRange.parse_timerange(tr_str)
             trading_mode = self.config.get("trading_mode", "spot")
-            candle_type = (
-                CandleType.FUTURES if trading_mode == "futures"
-                else CandleType.SPOT
-            )
+            candle_type = CandleType.FUTURES if trading_mode == "futures" else CandleType.SPOT
             stake = self.config.get("stake_currency", "USDT")
             if candle_type == CandleType.FUTURES:
                 btc_pair = f"BTC/{stake}:{stake}"
@@ -600,9 +599,7 @@ class WalkForward:
         return stability
 
     @staticmethod
-    def _weighted_median(
-        values: list[float], weights: list[float]
-    ) -> float:
+    def _weighted_median(values: list[float], weights: list[float]) -> float:
         """Weighted median: value where cumulative weight reaches 50%."""
         arr = np.array(values)
         w = np.array(weights)
@@ -621,9 +618,7 @@ class WalkForward:
         """Resolve a single parameter's consensus value."""
         if all(isinstance(v, int | float) for v in values):
             if weights is not None and len(w_list) == len(values):
-                med = WalkForward._weighted_median(
-                    [float(v) for v in values], w_list
-                )
+                med = WalkForward._weighted_median([float(v) for v in values], w_list)
             else:
                 med = float(np.median(values))
             if all(isinstance(v, int) for v in values):
@@ -693,13 +688,10 @@ class WalkForward:
             return 0.0
 
         ln_n = log(max(n_trials, 2))
-        sr_benchmark = sqrt(2.0 * ln_n) * (
-            1.0 - EULER_MASCHERONI / (2.0 * ln_n)
-        )
+        sr_benchmark = sqrt(2.0 * ln_n) * (1.0 - EULER_MASCHERONI / (2.0 * ln_n))
 
         se_sr = sqrt(
-            (1.0 - skewness * sr_observed
-             + ((kurtosis - 1.0) / 4.0) * sr_observed**2)
+            (1.0 - skewness * sr_observed + ((kurtosis - 1.0) / 4.0) * sr_observed**2)
             / max(n_obs - 1, 1)
         )
 
@@ -875,8 +867,7 @@ class WalkForward:
             hhi = r.test_metrics.get("hhi", 0)
             if hhi > 0.15:
                 warnings.append(
-                    f"Window {r.window.index + 1}: HHI = "
-                    f"{hhi:.3f} — profit depends on few trades"
+                    f"Window {r.window.index + 1}: HHI = {hhi:.3f} — profit depends on few trades"
                 )
 
         unstable = [k for k, v in stability.items() if v.get("unstable", False)]
@@ -960,7 +951,7 @@ class WalkForward:
         if not stability:
             return
         logger.info("")
-        logger.info(f"{'=' * 25} PARAMETER STABILITY " f"{'=' * 25}")
+        logger.info(f"{'=' * 25} PARAMETER STABILITY {'=' * 25}")
         for name, s in stability.items():
             if s.get("unstable"):
                 flag = "UNSTABLE"
@@ -981,11 +972,9 @@ class WalkForward:
         if not self.holdout_result:
             return
         logger.info("")
-        logger.info(f"{'=' * 25} HOLDOUT FINAL " f"{'=' * 31}")
+        logger.info(f"{'=' * 25} HOLDOUT FINAL {'=' * 31}")
         ho = self.holdout_result
-        logger.info(
-            f"  Period: {ho.window.test_start:%Y-%m-%d} -> " f"{ho.window.test_end:%Y-%m-%d}"
-        )
+        logger.info(f"  Period: {ho.window.test_start:%Y-%m-%d} -> {ho.window.test_end:%Y-%m-%d}")
         for label, m in [
             ("Consensus", ho.test_metrics),
             ("Baseline ", ho.baseline_metrics),
@@ -1020,7 +1009,7 @@ class WalkForward:
         self._log_stability(stability)
 
         logger.info("")
-        logger.info(f"{'=' * 25} CONSENSUS PARAMS " f"{'=' * 28}")
+        logger.info(f"{'=' * 25} CONSENSUS PARAMS {'=' * 28}")
         logger.info("  (weighted by test-period Calmar ratio)")
         for space, params in consensus.items():
             if isinstance(params, dict) and params:
@@ -1029,7 +1018,7 @@ class WalkForward:
 
         if dsr is not None:
             logger.info("")
-            logger.info(f"{'=' * 25} DEFLATED SHARPE " f"{'=' * 29}")
+            logger.info(f"{'=' * 25} DEFLATED SHARPE {'=' * 29}")
             logger.info(
                 f"  DSR p-value: {dsr:.3f} "
                 f"({'significant' if dsr > 0.95 else 'weak' if dsr > 0.5 else 'not significant'})"
@@ -1041,7 +1030,7 @@ class WalkForward:
 
         if warnings:
             logger.info("")
-            logger.info(f"{'=' * 25} WARNING FLAGS " f"{'=' * 31}")
+            logger.info(f"{'=' * 25} WARNING FLAGS {'=' * 31}")
             for w in warnings:
                 logger.info(f"  * {w}")
 
@@ -1062,6 +1051,7 @@ class WalkForward:
         default_params: dict[str, Any],
         strategy_json: Path | None,
         original_json_bytes: bytes | None,
+        exchange: Any | None = None,
     ) -> None:
         _, full_end = self._parse_timerange()
         holdout_window = self._compute_holdout_window(full_end)
@@ -1071,12 +1061,12 @@ class WalkForward:
         logger.info("")
         logger.info("Running holdout backtest with consensus params...")
         self._restore_params(consensus, strategy_json)
-        ho_test = self._run_backtest(holdout_window.test_timerange_str())
+        ho_test = self._run_backtest(holdout_window.test_timerange_str(), exchange=exchange)
 
         ho_baseline: dict[str, Any] = {}
         if default_params:
             self._restore_params(default_params, strategy_json)
-            ho_baseline = self._run_backtest(holdout_window.test_timerange_str())
+            ho_baseline = self._run_backtest(holdout_window.test_timerange_str(), exchange=exchange)
 
         self.holdout_result = WindowResult(
             window=holdout_window,
@@ -1106,6 +1096,11 @@ class WalkForward:
         windows = self._compute_windows()
         self._validate(windows)
         self._print_plan(windows)
+
+        cfg_for_exchange = deepcopy(self.config)
+        cfg_for_exchange["dry_run"] = True
+        exchange = ExchangeResolver.load_exchange(cfg_for_exchange, load_leverage_tiers=True)
+        logger.info("Exchange loaded once — reused for all backtests.")
 
         strategy_json = self._get_strategy_json_path()
         base_seed = self.config.get("hyperopt_random_state")
@@ -1147,17 +1142,19 @@ class WalkForward:
                     all_params.append(ho_result.get("params", {}))
 
                     dashboard.set_phase("backtest_optimized")
-                    test_metrics = self._run_backtest(window.test_timerange_str())
+                    test_metrics = self._run_backtest(
+                        window.test_timerange_str(), exchange=exchange
+                    )
 
                     baseline_metrics: dict[str, Any] = {}
                     if default_params:
                         self._restore_params(default_params, strategy_json)
                         dashboard.set_phase("backtest_baseline")
-                        baseline_metrics = self._run_backtest(window.test_timerange_str())
+                        baseline_metrics = self._run_backtest(
+                            window.test_timerange_str(), exchange=exchange
+                        )
 
-                    market_ctx = self._compute_market_context(
-                        window.test_start, window.test_end
-                    )
+                    market_ctx = self._compute_market_context(window.test_start, window.test_end)
 
                     result = WindowResult(
                         window=window,
@@ -1174,7 +1171,7 @@ class WalkForward:
                     gc.collect()
 
         except KeyboardInterrupt:
-            logger.info(f"Interrupted. Partial results for " f"{len(self.results)} window(s).")
+            logger.info(f"Interrupted. Partial results for {len(self.results)} window(s).")
 
         finally:
             self._restore_original_json(strategy_json, original_json_bytes)
@@ -1190,10 +1187,7 @@ class WalkForward:
         stability = self._analyze_param_stability(all_params[: len(self.results)], search_ranges)
 
         # Weighted consensus: weight by test-period Calmar
-        calmar_weights = [
-            max(r.test_metrics.get("calmar", 0), 0.01)
-            for r in self.results
-        ]
+        calmar_weights = [max(r.test_metrics.get("calmar", 0), 0.01) for r in self.results]
         consensus = self._compute_consensus_params(
             all_params[: len(self.results)], weights=calmar_weights
         )
@@ -1202,14 +1196,16 @@ class WalkForward:
         sharpes = [r.test_metrics.get("sharpe", 0) for r in self.results]
         avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
         n_trials = self.config.get("epochs", 150) * len(self.results)
-        avg_trades = int(np.mean([
-            r.test_metrics.get("trades", 0) for r in self.results
-        ])) if self.results else 0
-        dsr = self._deflated_sharpe_ratio(
-            avg_sharpe, n_trials, max(avg_trades, 2)
+        avg_trades = (
+            int(np.mean([r.test_metrics.get("trades", 0) for r in self.results]))
+            if self.results
+            else 0
         )
+        dsr = self._deflated_sharpe_ratio(avg_sharpe, n_trials, max(avg_trades, 2))
 
-        self._run_holdout(consensus, default_params, strategy_json, original_json_bytes)
+        self._run_holdout(
+            consensus, default_params, strategy_json, original_json_bytes, exchange=exchange
+        )
 
         # Export consensus JSON (to wfa_dir only, never overwrites live JSON)
         self._export_consensus_json(consensus)

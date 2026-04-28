@@ -441,12 +441,12 @@ class Wallets:
                 f"Stake amount for pair {pair} is too small "
                 f"({stake_amount} < {min_stake_amount}), adjusting to {min_stake_amount}."
             )
-            if stake_amount * 1.3 < min_stake_amount:
-                # Top-cap stake-amount adjustments to +30%.
+            if stake_amount * 1.8 < min_stake_amount:
+                # Top-cap stake-amount adjustments to +80%.
                 self._local_log(
-                    f"Adjusted stake amount for pair {pair} is more than 30% bigger than "
-                    f"the desired stake amount of ({stake_amount:.8f} * 1.3 = "
-                    f"{stake_amount * 1.3:.8f}) < {min_stake_amount}), ignoring trade."
+                    f"Adjusted stake amount for pair {pair} is more than 80% bigger than "
+                    f"the desired stake amount of ({stake_amount:.8f} * 1.8 = "
+                    f"{stake_amount * 1.8:.8f}) < {min_stake_amount}), ignoring trade."
                 )
                 return 0
             stake_amount = min_stake_amount
