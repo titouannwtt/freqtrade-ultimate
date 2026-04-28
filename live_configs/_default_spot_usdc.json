@@ -20,13 +20,13 @@
     "entry_pricing": {
         "price_side": "same",
         "price_last_balance": 1.0,
-        "use_order_book": true,
+        "use_order_book": false,
         "order_book_top": 1
     },
     "exit_pricing": {
         "price_side": "same",
         "price_last_balance": 1.0,
-        "use_order_book": true,
+        "use_order_book": false,
         "order_book_top": 1
     },
     "edge": {
