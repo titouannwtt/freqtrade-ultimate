@@ -57,6 +57,7 @@
             "PAXG/USDC:USDC",
             "TRX/USDC:USDC",
             "VVV/USDC:USDC",
+            "FTT/USDC:USDC",
             "EUR/.*",
             "USDT/.*",
             "UST/.*",
