@@ -3035,3 +3035,245 @@ class TestExportHTMLReport:
         assert path.suffix == ".html"
         content = path.read_text()
         assert "<!DOCTYPE html>" in content
+
+
+# ------------------------------------------------------------------
+# Block 7 — Beginner-friendly overhaul tests
+# ------------------------------------------------------------------
+
+
+class TestGlossary:
+    def test_glossary_completeness(self):
+        from freqtrade.optimize.wfa_glossary import METRIC_GLOSSARY
+
+        expected_slugs = {
+            "wfe",
+            "sqn",
+            "dsr",
+            "calmar",
+            "dd",
+            "hhi",
+            "pf",
+            "mc",
+            "carver_discount",
+            "k_ratio",
+            "expectancy",
+            "embargo",
+            "cpcv",
+            "sensitivity",
+            "convergence",
+            "prob_of_loss",
+            "sharpe_of_paths",
+        }
+        assert expected_slugs == set(METRIC_GLOSSARY.keys())
+
+    def test_glossary_structure(self):
+        from freqtrade.optimize.wfa_glossary import METRIC_GLOSSARY
+
+        required_keys = {"name", "abbrev", "one_liner", "explanation", "thresholds", "source"}
+        for slug, entry in METRIC_GLOSSARY.items():
+            missing = required_keys - set(entry.keys())
+            assert not missing, f"{slug} missing keys: {missing}"
+            assert isinstance(entry["thresholds"], list)
+            assert isinstance(entry["name"], str)
+            assert len(entry["one_liner"]) > 0
+
+    def test_verdict_guide_grades(self):
+        from freqtrade.optimize.wfa_glossary import VERDICT_GUIDE
+
+        assert set(VERDICT_GUIDE.keys()) == {"A", "B", "C", "D", "F"}
+        for grade, text in VERDICT_GUIDE.items():
+            assert len(text) > 20, f"Grade {grade} guide too short"
+
+
+class TestBeginnerConsole:
+    def test_plan_includes_intro(self, walkforward_conf, caplog):
+        wf = WalkForward(walkforward_conf)
+        windows = wf._compute_windows()
+        with caplog.at_level("INFO"):
+            wf._print_plan(windows)
+        low = caplog.text.lower()
+        assert "optimize on past data" in low or "train on past" in low
+        assert "embargo" in caplog.text.lower()
+
+    def test_cpcv_log_spells_out_acronym(self, caplog):
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            n_paths=5,
+            avg_return=3.5,
+            sharpe_of_paths=1.2,
+            prob_of_loss=0.13,
+            path_returns=[1.0, 2.0, 5.0, 7.0, 3.0],
+        )
+        with caplog.at_level("INFO"):
+            WalkForward._log_cpcv(cpcv)
+        assert "Combinatorial Purged" in caplog.text
+
+    def test_report_includes_next_steps(self, walkforward_conf, caplog):
+        wf = WalkForward(walkforward_conf)
+        with caplog.at_level("INFO"):
+            wf._log_next_steps("A")
+        assert "NEXT STEPS" in caplog.text
+        assert "consensus" in caplog.text.lower()
+
+    def test_threshold_label_returns_label(self):
+        label = WalkForward._threshold_label("sqn", 2.0)
+        assert "good" in label.lower()
+
+    def test_threshold_label_unknown_slug(self):
+        label = WalkForward._threshold_label("nonexistent", 1.0)
+        assert label == "" or label == "N/A"
+
+
+class TestBeginnerHTML:
+    def _make_data(self, **overrides):
+        data = {
+            "strategy": "TestStrategy",
+            "wf_mode": "rolling",
+            "n_windows": 3,
+            "epochs_per_window": 100,
+            "hyperopt_loss": "CalmarHyperOptLoss",
+            "timestamp": "2024-01-01T00:00:00",
+            "verdict": {
+                "grade": "B",
+                "checks": [
+                    ("profitable_windows", True, "3/3 profitable"),
+                    ("wfe", False, "WFE median 40%"),
+                    ("dsr", True, "DSR 0.970"),
+                ],
+            },
+            "warnings": ["Test warning"],
+            "oos_trade_profits": [10.0, -5.0, 15.0, -3.0, 8.0],
+            "windows": [
+                {
+                    "index": 1,
+                    "test_range": "20180601-20180801",
+                    "test_metrics": {
+                        "profit_pct": 5.0,
+                        "trades": 40,
+                        "calmar": 1.5,
+                        "max_dd_pct": 3.0,
+                    },
+                    "wfe": 0.65,
+                    "market_context": {"regime": "bull"},
+                }
+            ],
+            "param_stability": {
+                "rsi": {
+                    "values": [25, 30, 28],
+                    "median": 28,
+                    "std": 2.5,
+                    "std_over_range": 0.05,
+                    "stable": True,
+                    "unstable": False,
+                },
+            },
+            "consensus_params": {"buy": {"rsi": 28}},
+            "monte_carlo": {
+                "n_simulations": 1000,
+                "total_return_pct": 15.0,
+                "max_dd_p5": 2.0,
+                "max_dd_p50": 5.0,
+                "max_dd_p95": 12.0,
+                "return_dd_p5": 1.2,
+                "return_dd_p50": 3.0,
+                "return_dd_p95": 7.0,
+                "max_consec_loss_p50": 4,
+                "max_consec_loss_p95": 8,
+                "carver_discount": 0.40,
+            },
+            "regime_analysis": {
+                "regime_stats": {
+                    "bull": {"windows": 2, "avg_profit": 5.0, "avg_dd": 2.0},
+                },
+                "worst_regime": "bull",
+                "regime_dependent": False,
+            },
+            "perturbation": {
+                "n_perturbations": 60,
+                "profit_p5": 1.0,
+                "profit_p50": 3.0,
+                "profit_p95": 6.0,
+                "pct_profitable": 0.85,
+                "sensitivity": 0.9,
+            },
+            "multi_seed": {"n_seeds": 5, "convergence_pct": 0.80},
+            "cpcv": {
+                "n_groups": 6,
+                "n_test_groups": 2,
+                "n_combinations": 15,
+                "n_paths": 5,
+                "avg_return": 3.5,
+                "sharpe_of_paths": 1.2,
+                "prob_of_loss": 0.13,
+                "path_returns": [1.0, 2.0, 5.0, 7.0, 3.0],
+            },
+        }
+        data.update(overrides)
+        return data
+
+    def test_contains_intro_section(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "walk-forward" in content.lower() or "Walk-Forward" in content
+
+    def test_contains_tooltips(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert 'class="tooltip"' in content
+
+    def test_contains_next_steps(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "What To Do Next" in content or "Next Steps" in content or "NEXT" in content
+
+    def test_contains_glossary(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Glossary" in content
+
+    def test_equity_chart_labels(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Trade" in content
+        assert "Equity" in content
+
+    def test_section_explainers(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "<details" in content
+
+    def test_threshold_badges_present(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "badge" in content.lower() or "color:" in content
