@@ -319,6 +319,8 @@ class Hyperopt:
                 HyperoptTools.show_epoch_details(
                     self.current_best_epoch, self.total_epochs, self.print_json
                 )
+                self._print_post_run_summary(self.current_best_epoch)
+                self._export_html_report()
         elif self.num_epochs_saved > 0:
             print(
                 f"No good result found for given optimization function in {self.num_epochs_saved} "
@@ -328,3 +330,171 @@ class Hyperopt:
             # This is printed when Ctrl+C is pressed quickly, before first epochs have
             # a chance to be evaluated.
             print("No epochs evaluated yet, no best result.")
+
+    @staticmethod
+    def _threshold_label(slug: str, value: float) -> str:
+        from freqtrade.optimize.wfa_glossary import METRIC_GLOSSARY
+
+        entry = METRIC_GLOSSARY.get(slug)
+        if not entry or not entry.get("thresholds"):
+            return ""
+        label = ""
+        for threshold_val, threshold_label, _color in entry["thresholds"]:
+            if value >= threshold_val:
+                label = threshold_label
+        return label
+
+    def _print_post_run_summary(self, best_epoch: dict[str, Any]) -> None:
+        rm = best_epoch.get("results_metrics", {})
+        if not rm:
+            return
+
+        metrics = [
+            ("Calmar", "calmar", rm.get("calmar", 0)),
+            ("SQN", "sqn", rm.get("sqn", 0)),
+            ("Sharpe", "sharpe", rm.get("sharpe", 0)),
+            ("Sortino", "sortino", rm.get("sortino", 0)),
+            ("Profit Factor", "pf", rm.get("profit_factor", 0)),
+            (
+                "Max DD",
+                "dd",
+                abs(rm.get("max_drawdown_account", 0)) * 100,
+            ),
+            ("Win Rate", "win_rate", rm.get("winrate", 0)),
+            ("Expectancy", "expectancy", rm.get("expectancy", 0)),
+        ]
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("  Key Metrics (best epoch):")
+        logger.info("-" * 60)
+        for name, slug, val in metrics:
+            label = self._threshold_label(slug, val)
+            tag = f" [{label}]" if label else ""
+            if slug == "dd":
+                logger.info(f"    {name:16s} {val:8.1f}%{tag}")
+            elif slug == "win_rate":
+                logger.info(f"    {name:16s} {val:8.1%}{tag}")
+            else:
+                logger.info(f"    {name:16s} {val:8.2f}{tag}")
+        logger.info("=" * 60)
+
+        self._log_hyperopt_next_steps(rm)
+
+    def _log_hyperopt_next_steps(self, rm: dict[str, Any]) -> None:
+        from freqtrade.optimize.wfa_glossary import (
+            HYPEROPT_NEXT_STEPS,
+            LOSS_GLOSSARY,
+        )
+
+        profit = rm.get("profit_total", 0)
+        dd = abs(rm.get("max_drawdown_account", 0))
+        trades = rm.get("total_trades", 0)
+
+        logger.info("")
+        logger.info("  NEXT STEPS:")
+        if profit <= 0:
+            guide = HYPEROPT_NEXT_STEPS["unprofitable"]
+        elif trades < 30:
+            guide = HYPEROPT_NEXT_STEPS["low_trades"]
+        elif dd > 0.30:
+            guide = HYPEROPT_NEXT_STEPS["high_dd"]
+        else:
+            guide = HYPEROPT_NEXT_STEPS["profitable"]
+
+        strategy = self.config.get("strategy") or "MyStrategy"
+        guide = guide.replace("{strategy}", strategy)
+        guide = guide.replace("{tr}", self.config.get("timerange") or "")
+        logger.info(f"  {guide}")
+
+        loss_name = self.config.get("hyperopt_loss", "")
+        loss_info = LOSS_GLOSSARY.get(loss_name, {})
+        if loss_info:
+            logger.info("")
+            logger.info(f"  Loss: {loss_name} — {loss_info.get('one_liner', '')}")
+        logger.info("")
+
+    def _export_html_report(self) -> None:
+        try:
+            self._do_export_html_report()
+        except Exception as e:
+            logger.warning(f"HTML report generation failed: {e}")
+
+    def _do_export_html_report(self) -> None:
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        all_epochs = HyperoptTools._read_results(self.results_file)
+
+        all_losses = []
+        top_epochs = []
+        for ep in all_epochs:
+            loss = ep.get("loss", 1e6)
+            if loss < 1e5:
+                all_losses.append(loss)
+                top_epochs.append(ep)
+
+        top_epochs.sort(key=lambda e: e.get("loss", 1e6))
+        top_10 = top_epochs[:10]
+
+        best = self.current_best_epoch or {}
+        rm = best.get("results_metrics", {})
+
+        param_values: dict[str, list] = {}
+        for ep in top_10:
+            pd = ep.get("params_dict", {})
+            for k, v in pd.items():
+                param_values.setdefault(k, []).append(v)
+
+        param_stability: dict[str, dict] = {}
+        for pname, vals in param_values.items():
+            nums = [v for v in vals if isinstance(v, (int, float))]
+            if len(nums) >= 2:
+                import statistics
+
+                std = statistics.stdev(nums)
+                rng = max(nums) - min(nums)
+                ratio = std / rng if rng > 0 else 0.0
+                param_stability[pname] = {
+                    "values": nums,
+                    "median": statistics.median(nums),
+                    "std": round(std, 4),
+                    "std_over_range": round(ratio, 4),
+                    "stable": ratio < 0.15,
+                    "unstable": ratio > 0.30,
+                }
+
+        sampler = self.config.get("hyperopt_sampler")
+
+        data = {
+            "strategy": self.config.get("strategy", "Unknown"),
+            "hyperopt_loss": self.config.get("hyperopt_loss", "Unknown"),
+            "sampler": sampler,
+            "total_epochs": self.total_epochs,
+            "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "stake_currency": self.config.get("stake_currency", "USDT"),
+            "best_epoch": rm,
+            "best_params": best.get("params_details", {}),
+            "top_epochs": [
+                {
+                    "loss": e.get("loss", 0),
+                    "results_metrics": e.get("results_metrics", {}),
+                    "params_dict": e.get("params_dict", {}),
+                }
+                for e in top_10
+            ],
+            "all_losses": all_losses,
+            "param_stability": param_stability,
+            "config_summary": {
+                "epochs": self.total_epochs,
+                "spaces": self.config.get("spaces", []),
+                "min_trades": self.config.get("hyperopt_min_trades", 1),
+                "timerange": self.config.get("timerange", ""),
+                "timeframe": self.config.get("timeframe", ""),
+            },
+        }
+
+        out_path = self.results_file.with_suffix(".html")
+        result = generate_hyperopt_html_report(data, out_path)
+        logger.info(f"HTML report saved to '{result}'")

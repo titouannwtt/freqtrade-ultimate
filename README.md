@@ -114,6 +114,9 @@ Concrete list of fork-only changes (48 code files, +6500 / -30 lines vs. `upstre
 | `freqtrade/commands/arguments.py` | +1 line | Wires `--sampler` into `ARGS_HYPEROPT`. |
 | `freqtrade/configuration/configuration.py` | +1 line | Logs the selected sampler when `--sampler` is used. |
 | `freqtrade/optimize/hyperopt/hyperopt_optimizer.py` | 1-line change | `get_optimizer()` uses the CLI-selected sampler when present, falls back to the strategy's default otherwise. |
+| `freqtrade/optimize/hyperopt/hyperopt.py` | +80 lines | **Post-run console summary** — prints 8 key metrics with threshold-colored labels (good/excellent/weak), context-sensitive next steps, and auto-exports an HTML report. |
+| `freqtrade/optimize/hyperopt_html_report.py` | +640 lines | **Self-contained HTML report** — best epoch metrics with tooltips, top-10 epoch table, SVG convergence chart, parameter agreement analysis, loss/sampler explanations, verdict-specific next steps, full glossary. No JavaScript. |
+| `docs/hyperopt-custom.md` | +440 lines | **Custom losses & samplers documentation** — metric weights, hard filters, per-sampler guidance, HTML report walkthrough. See [docs](docs/hyperopt-custom.md). |
 
 #### Walk-Forward Analysis
 

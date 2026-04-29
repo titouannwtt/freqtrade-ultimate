@@ -283,14 +283,20 @@ AVAILABLE_CLI_OPTIONS = {
     "epochs": Arg(
         "-e",
         "--epochs",
-        help="Specify number of epochs (default: %(default)d).",
+        help="Number of parameter combinations to test. 300-500 for "
+        "initial exploration; 1000+ for final optimization once "
+        "you know the strategy has a real edge. More epochs = "
+        "better search but longer runtime. Default: %(default)d.",
         type=check_int_positive,
         metavar="INT",
         default=constants.HYPEROPT_EPOCH,
     ),
     "early_stop": Arg(
         "--early-stop",
-        help="Early stop hyperopt if no improvement after (default: %(default)d) epochs.",
+        help="Stop if no improvement after N epochs. Good values: "
+        "100-200 (20-30%% of total epochs). Too low risks "
+        "stopping before convergence; too high wastes time. "
+        "0 = disabled. Default: %(default)d.",
         type=check_int_positive,
         metavar="INT",
         default=0,  # 0 to disable by default
@@ -298,13 +304,15 @@ AVAILABLE_CLI_OPTIONS = {
     "hyperopt_sampler": Arg(
         "--sampler",
         help=(
-            "Optuna sampler to use. Overrides the strategy's HyperOpt.generate_estimator(). "
-            "Choices: NSGAIIISampler (default, genetic multi-objective, good diversity), "
-            "NSGAIISampler (genetic multi-objective, older variant), "
-            "TPESampler (Tree-structured Parzen Estimator, Bayesian, fast convergence), "
-            "CmaEsSampler (CMA-ES, gradient-free for continuous spaces), "
-            "GPSampler (Gaussian Process Bayesian), "
-            "QMCSampler (Quasi-Monte Carlo, pure exploration)."
+            "Optuna sampler. Overrides generate_estimator(). "
+            "NSGAIIISampler (default): genetic, good diversity "
+            "— best for multi-metric losses. "
+            "TPESampler: Bayesian, fast convergence — best for "
+            "simple losses (Sharpe, Calmar) with 300-500 epochs. "
+            "CmaEsSampler: gradient-free — best for continuous "
+            "parameter spaces. GPSampler: Gaussian process — "
+            "thorough but slow with >10 params. "
+            "QMCSampler: pure exploration, no learning."
         ),
         choices=[
             "NSGAIIISampler",
@@ -319,10 +327,13 @@ AVAILABLE_CLI_OPTIONS = {
     "spaces": Arg(
         "--spaces",
         help=(
-            "Specify which parameters to hyperopt. Space-separated list. "
-            "Available builtin options (custom spaces will not be listed here): "
-            f"{', '.join(HYPEROPT_BUILTIN_SPACE_OPTIONS)}. Default: `default` - "
-            "which includes all spaces except for 'trailing', 'protection', and 'trades'."
+            "Which parameter spaces to optimize. Space-separated. "
+            "'buy'/'sell' = entry/exit signal parameters. "
+            "'roi' = minimal ROI table. 'stoploss' = stop loss. "
+            "'trailing' = trailing stop. 'protection' = "
+            "protection params. 'trades' = max open trades. "
+            "'default' = buy+sell+roi+stoploss (start here). "
+            f"Available: {', '.join(HYPEROPT_BUILTIN_SPACE_OPTIONS)}."
         ),
         nargs="+",
     ),
@@ -360,24 +371,32 @@ AVAILABLE_CLI_OPTIONS = {
     "hyperopt_jobs": Arg(
         "-j",
         "--job-workers",
-        help="The number of concurrently running jobs for hyperoptimization "
-        "(hyperopt worker processes). "
-        "If -1 (default), all CPUs are used, for -2, all CPUs but one are used, etc. "
-        "If 1 is given, no parallel computing code is used at all.",
+        help="Parallel worker processes. -1 = all CPUs (fastest "
+        "but high RAM). -2 = all minus one (leaves OS headroom). "
+        "1 = sequential (for debugging or low-RAM machines). "
+        "Each worker loads a full data copy, so RAM scales "
+        "linearly with workers. Default: %(default)d.",
         type=int,
         metavar="JOBS",
         default=-1,
     ),
     "hyperopt_random_state": Arg(
         "--random-state",
-        help="Set random state to some positive integer for reproducible hyperopt results.",
+        help="Fix the random seed for reproducible results. "
+        "Without this, each run explores different combinations. "
+        "Set to any positive integer (e.g. 42) when comparing "
+        "loss functions or samplers to ensure differences come "
+        "from the config, not randomness.",
         type=check_int_positive,
         metavar="INT",
     ),
     "hyperopt_min_trades": Arg(
         "--min-trades",
-        help="Set minimal desired number of trades for evaluations in the hyperopt "
-        "optimization path (default: 1).",
+        help="Minimum trades for an epoch to be scored (others "
+        "get max loss). Below 30 is statistically unreliable. "
+        "Set to 50-100 for robust results; lower for "
+        "pair-specific optimization on short timeranges. "
+        "Default: %(default)d.",
         type=check_int_positive,
         metavar="INT",
         default=1,
@@ -385,9 +404,11 @@ AVAILABLE_CLI_OPTIONS = {
     "hyperopt_loss": Arg(
         "--hyperopt-loss",
         "--hyperoptloss",
-        help="Specify the class name of the hyperopt loss function class (IHyperOptLoss). "
-        "Different functions can generate completely different results, "
-        "since the target for optimization is different. Built-in Hyperopt-loss-functions are: "
+        help="Loss function — defines what 'better' means. "
+        "SharpeHyperOptLoss for momentum, CalmarHyperOptLoss "
+        "for low-drawdown, MoutonMeanRevHyperOptLoss for "
+        "DCA/mean-reversion, MoutonMomentumHyperOptLoss for "
+        "trend-following. Built-in: "
         f"{', '.join(HYPEROPT_LOSS_BUILTIN)}",
         metavar="NAME",
     ),

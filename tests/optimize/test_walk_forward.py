@@ -3064,6 +3064,11 @@ class TestGlossary:
             "convergence",
             "prob_of_loss",
             "sharpe_of_paths",
+            "sharpe",
+            "sortino",
+            "win_rate",
+            "payoff_ratio",
+            "cagr",
         }
         assert expected_slugs == set(METRIC_GLOSSARY.keys())
 

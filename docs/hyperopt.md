@@ -850,6 +850,10 @@ Should results not match, check the following factors:
 * Verify that you do not have an unexpected parameters JSON file overriding the parameters or the default hyperopt settings in your strategy.
 * Verify that any protections that are enabled in backtesting are also enabled when hyperopting, and vice versa. When using `--space protection`, protections are auto-enabled for hyperopting.
 
+## Custom Loss Functions & Samplers
+
+This fork provides three custom loss functions (`MoutonMeanRevHyperOptLoss`, `MoutonMomentumHyperOptLoss`, `MyProfitDrawDownHyperOptLoss`) and a `--sampler` flag for choosing the Optuna optimization algorithm. See [Custom Losses & Samplers](hyperopt-custom.md) for full documentation: metric weights, hard filters, per-sampler guidance, and the auto-generated HTML report.
+
 ## Validate with Walk-Forward Analysis
 
 Hyperopt finds parameters that work on your training data, but that does not mean they will work on new data. To test whether your optimized strategy generalizes, run [Walk-Forward Analysis](walk-forward-analysis.md) — it splits the data into sequential train/test windows, validates out-of-sample, and gives you an A–F confidence grade before you risk real capital.

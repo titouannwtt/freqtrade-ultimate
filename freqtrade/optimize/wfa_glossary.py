@@ -316,3 +316,349 @@ VERDICT_GUIDE: dict[str, str] = {
 
 
 PERCENTILE_HINT = "p5 = worst 5% of scenarios, p50 = median (typical), p95 = best 5% of scenarios."
+
+
+# ---------------------------------------------------------------------------
+# Hyperopt-specific metrics
+# ---------------------------------------------------------------------------
+
+METRIC_GLOSSARY.update(
+    {
+        "sharpe": {
+            "name": "Sharpe Ratio",
+            "abbrev": "Sharpe",
+            "one_liner": ("Risk-adjusted return. >1 good, >2 excellent"),
+            "explanation": (
+                "Annualized return divided by annualized volatility. "
+                "Measures how much return you get per unit of risk. "
+                "Above 1 is good, above 2 is excellent — but "
+                "in-sample Sharpe above 3 is almost always "
+                "overfitting."
+            ),
+            "thresholds": [
+                (-99, "losing", "#ef4444"),
+                (0, "flat", "#f97316"),
+                (1.0, "good", "#84cc16"),
+                (2.0, "excellent", "#22c55e"),
+                (3.0, "suspicious", "#eab308"),
+            ],
+            "source": "Sharpe",
+        },
+        "sortino": {
+            "name": "Sortino Ratio",
+            "abbrev": "Sortino",
+            "one_liner": ("Like Sharpe but only penalizes downside. >2 good"),
+            "explanation": (
+                "Annualized return divided by downside deviation "
+                "only. Unlike Sharpe, upside volatility is not "
+                "penalized. Better for strategies with positively "
+                "skewed returns."
+            ),
+            "thresholds": [
+                (-99, "losing", "#ef4444"),
+                (0, "flat", "#f97316"),
+                (1.0, "acceptable", "#eab308"),
+                (2.0, "good", "#84cc16"),
+                (4.0, "excellent", "#22c55e"),
+            ],
+            "source": "Sortino & Price",
+        },
+        "win_rate": {
+            "name": "Win Rate",
+            "abbrev": "WR",
+            "one_liner": "Fraction of trades that are profitable",
+            "explanation": (
+                "Percentage of trades that closed with a profit. "
+                "A high win rate (>60%) feels comfortable but means "
+                "nothing without considering payoff ratio. A 40% "
+                "win rate with 3:1 payoff beats 80% with 0.3:1."
+            ),
+            "thresholds": [
+                (0, "very low", "#ef4444"),
+                (0.35, "low", "#f97316"),
+                (0.50, "balanced", "#eab308"),
+                (0.60, "good", "#84cc16"),
+                (0.75, "high", "#22c55e"),
+            ],
+            "source": "",
+        },
+        "payoff_ratio": {
+            "name": "Payoff Ratio",
+            "abbrev": "Payoff",
+            "one_liner": ("Avg win / avg loss. >1.5 good for trend, <1 OK for DCA"),
+            "explanation": (
+                "Average winning trade divided by average losing "
+                "trade. High payoff (>2) means winners are much "
+                "larger than losers — typical of momentum "
+                "strategies. DCA strategies often have payoff "
+                "below 1 but compensate with high win rate."
+            ),
+            "thresholds": [
+                (0, "tiny wins", "#ef4444"),
+                (0.5, "low", "#f97316"),
+                (1.0, "balanced", "#eab308"),
+                (1.5, "good", "#84cc16"),
+                (2.5, "excellent", "#22c55e"),
+            ],
+            "source": "Van Tharp",
+        },
+        "cagr": {
+            "name": "Compound Annual Growth Rate",
+            "abbrev": "CAGR",
+            "one_liner": ("Annualized return. Comparable across timeranges"),
+            "explanation": (
+                "The geometric mean annual return. Unlike total "
+                "profit, CAGR is comparable across different "
+                "backtest durations. A 50% CAGR on 2 years is "
+                "more meaningful than 100% total profit on an "
+                "unknown period."
+            ),
+            "thresholds": [
+                (-99, "losing", "#ef4444"),
+                (0, "flat", "#f97316"),
+                (0.20, "moderate", "#eab308"),
+                (0.50, "good", "#84cc16"),
+                (1.0, "excellent", "#22c55e"),
+            ],
+            "source": "",
+        },
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Sampler glossary
+# ---------------------------------------------------------------------------
+
+SAMPLER_GLOSSARY: dict[str, dict] = {
+    "NSGAIIISampler": {
+        "name": "NSGA-III",
+        "one_liner": ("Genetic multi-objective, good diversity. Default."),
+        "explanation": (
+            "Evolutionary algorithm that maintains a diverse "
+            "population across the Pareto front. Best when the "
+            "loss function has multiple implicit objectives."
+        ),
+        "when_to_use": (
+            "Default choice. Works well with all loss functions, "
+            "especially multi-metric ones like MoutonMeanRev."
+        ),
+    },
+    "NSGAIISampler": {
+        "name": "NSGA-II (older variant)",
+        "one_liner": ("Genetic multi-objective, less diverse than III."),
+        "explanation": (
+            "Predecessor of NSGA-III with less sophisticated diversity maintenance. Rarely better."
+        ),
+        "when_to_use": ("Try if NSGA-III results are unsatisfying."),
+    },
+    "TPESampler": {
+        "name": "TPE (Tree-structured Parzen Estimator)",
+        "one_liner": ("Bayesian, fast convergence on single-objective."),
+        "explanation": (
+            "Models the search space as a probability "
+            "distribution and focuses sampling on promising "
+            "regions. Converges faster than genetic algorithms "
+            "but explores less diversity."
+        ),
+        "when_to_use": (
+            "Best for simple losses (Sharpe, Calmar) where "
+            "you want fast convergence. Use with 300-500 epochs."
+        ),
+    },
+    "CmaEsSampler": {
+        "name": "CMA-ES",
+        "one_liner": ("Gradient-free, for continuous spaces. Powerful."),
+        "explanation": (
+            "Adapts a covariance matrix to model correlations "
+            "between parameters. Excellent for continuous "
+            "parameter spaces where parameters interact."
+        ),
+        "when_to_use": (
+            "Best when most parameters are continuous "
+            "(FloatRange, DecimalParameter). Less effective "
+            "with many categorical or integer parameters."
+        ),
+    },
+    "GPSampler": {
+        "name": "GP (Gaussian Process)",
+        "one_liner": ("Gaussian process model. Expensive, thorough."),
+        "explanation": (
+            "Fits a Gaussian process to model the loss "
+            "surface. Very sample-efficient but slow with "
+            "many parameters (>10)."
+        ),
+        "when_to_use": (
+            "Best for strategies with few parameters (<8) where each epoch is expensive."
+        ),
+    },
+    "QMCSampler": {
+        "name": "QMC (Quasi-Monte Carlo)",
+        "one_liner": ("Uniform exploration. Pure random, no learning."),
+        "explanation": (
+            "Low-discrepancy sequence that covers the search "
+            "space more evenly than pure random. Does not "
+            "learn from previous results."
+        ),
+        "when_to_use": (
+            "Use for initial landscape mapping before switching to a learning sampler."
+        ),
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Loss function glossary
+# ---------------------------------------------------------------------------
+
+LOSS_GLOSSARY: dict[str, dict] = {
+    "MoutonMeanRevHyperOptLoss": {
+        "name": "Mouton Mean-Reversion Loss",
+        "one_liner": "8 weighted metrics tuned for DCA strategies",
+        "best_for": "DCA / mean-reversion with safety orders",
+        "metrics": (
+            "CAGR 25%, K-ratio 18%, quarterly consistency 14%, "
+            "PF 13%, payoff 8%, diversity 8%, TUW 8%, "
+            "confidence 6%. Gates: concentration sigmoid + "
+            "exponential drawdown."
+        ),
+        "hard_filters": ("Trades >= 40, pairs >= 5, WR >= 50%, DD <= 50%, training >= 30d."),
+    },
+    "MoutonMomentumHyperOptLoss": {
+        "name": "Mouton Momentum Loss",
+        "one_liner": ("9 weighted metrics tuned for trend-following"),
+        "best_for": "Momentum / trend-following strategies",
+        "metrics": (
+            "CAGR 22%, payoff 16%, Sharpe 14%, tail ratio "
+            "12%, PF 10%, quarterly 9%, diversity 6%, TUW 6%, "
+            "confidence 5%. Gates: consecutive loss sigmoid + "
+            "exponential drawdown."
+        ),
+        "hard_filters": ("Trades >= 30, pairs >= 5, DD <= 45%, payoff >= 0.3, training >= 30d."),
+    },
+    "MyProfitDrawDownHyperOptLoss": {
+        "name": "Profit-Drawdown Loss",
+        "one_liner": "Simple profit minus drawdown penalty",
+        "best_for": "General-purpose baseline",
+        "metrics": ("Profit minus (drawdown * profit * DRAWDOWN_MULT)."),
+        "hard_filters": ("Relative drawdown <= 45%, account DD <= 45%."),
+    },
+    "SharpeHyperOptLoss": {
+        "name": "Sharpe Ratio Loss",
+        "one_liner": "Maximize annualized Sharpe ratio",
+        "best_for": "Risk-adjusted momentum strategies",
+        "metrics": "Annualized Sharpe ratio (daily returns).",
+        "hard_filters": "None.",
+    },
+    "SharpeHyperOptLossDaily": {
+        "name": "Sharpe Ratio Loss (Daily)",
+        "one_liner": "Sharpe on daily-bucketed returns",
+        "best_for": "More stable with many trades",
+        "metrics": "Sharpe on daily P&L buckets.",
+        "hard_filters": "None.",
+    },
+    "SortinoHyperOptLoss": {
+        "name": "Sortino Ratio Loss",
+        "one_liner": "Maximize Sortino — penalizes downside only",
+        "best_for": "Positively skewed returns",
+        "metrics": "Annualized Sortino ratio.",
+        "hard_filters": "None.",
+    },
+    "SortinoHyperOptLossDaily": {
+        "name": "Sortino Ratio Loss (Daily)",
+        "one_liner": "Sortino on daily-bucketed returns",
+        "best_for": "Same as Sortino, more stable",
+        "metrics": "Sortino ratio on daily P&L buckets.",
+        "hard_filters": "None.",
+    },
+    "CalmarHyperOptLoss": {
+        "name": "Calmar Ratio Loss",
+        "one_liner": "Maximize return / max drawdown",
+        "best_for": "Low-drawdown strategies, patient DCA",
+        "metrics": "Annualized Calmar ratio.",
+        "hard_filters": "None.",
+    },
+    "MaxDrawDownHyperOptLoss": {
+        "name": "Max Drawdown Loss",
+        "one_liner": "Minimize maximum drawdown",
+        "best_for": "Capital preservation",
+        "metrics": "Profit + max drawdown penalty.",
+        "hard_filters": "None.",
+    },
+    "MaxDrawDownRelativeHyperOptLoss": {
+        "name": "Max Drawdown Relative Loss",
+        "one_liner": "Minimize drawdown relative to profit",
+        "best_for": "Profit-drawdown balance",
+        "metrics": "Profit weighted by relative account DD.",
+        "hard_filters": "None.",
+    },
+    "MaxDrawDownPerPairHyperOptLoss": {
+        "name": "Max Drawdown Per Pair Loss",
+        "one_liner": "Control per-pair drawdown extremes",
+        "best_for": "Multi-pair with concentration risk",
+        "metrics": "Total DD + per-pair DD.",
+        "hard_filters": "None.",
+    },
+    "ProfitDrawDownHyperOptLoss": {
+        "name": "Profit-Drawdown Loss (built-in)",
+        "one_liner": "Upstream profit vs drawdown balance",
+        "best_for": "General-purpose, upstream default",
+        "metrics": "Profit penalized by drawdown.",
+        "hard_filters": "None.",
+    },
+    "ShortTradeDurHyperOptLoss": {
+        "name": "Short Trade Duration Loss",
+        "one_liner": "Maximize profit, minimize trade duration",
+        "best_for": "Scalping, fast trades",
+        "metrics": "Profit weighted by inverse holding time.",
+        "hard_filters": "None.",
+    },
+    "OnlyProfitHyperOptLoss": {
+        "name": "Only Profit Loss",
+        "one_liner": "Pure profit maximization, no risk adjust",
+        "best_for": "Baseline comparison only",
+        "metrics": "Negative total profit.",
+        "hard_filters": "None.",
+    },
+    "MultiMetricHyperOptLoss": {
+        "name": "Multi-Metric Loss",
+        "one_liner": "Configurable weighted metric combination",
+        "best_for": "Custom multi-objective optimization",
+        "metrics": "User-defined weighted combination.",
+        "hard_filters": "Configurable.",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Hyperopt next-steps guidance
+# ---------------------------------------------------------------------------
+
+HYPEROPT_NEXT_STEPS: dict[str, str] = {
+    "profitable": (
+        "The best epoch is profitable. Validate these parameters "
+        "with walk-forward analysis before deploying: "
+        "freqtrade walk-forward --strategy {strategy}. "
+        "Hyperopt finds parameters that fit training data — WFA "
+        "tests whether they generalize to unseen data."
+    ),
+    "unprofitable": (
+        "No profitable configuration was found. Common causes: "
+        "the strategy has no real edge, the search space is too "
+        "constrained, or the timerange is too short. Try: expand "
+        "the timerange, simplify the strategy, or try a different "
+        "loss function."
+    ),
+    "high_dd": (
+        "The best result has high drawdown (>30%). Consider: "
+        "switch to CalmarHyperOptLoss to penalize drawdown, "
+        "reduce position size, or add a max_open_trades "
+        "constraint."
+    ),
+    "low_trades": (
+        "Few trades found (<30). Statistical reliability "
+        "requires at least 30-50 trades. Try: expand the "
+        "timerange, lower entry thresholds, or increase "
+        "--min-trades to push the optimizer."
+    ),
+}

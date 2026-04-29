@@ -24,6 +24,7 @@ nav:
     - Data Downloading: data-download.md
     - Backtesting: backtesting.md
     - Hyperopt: hyperopt.md
+    - Custom Losses & Samplers: hyperopt-custom.md
     - Walk-Forward Analysis: walk-forward-analysis.md
     - FreqAI:
         - Introduction: freqai.md
