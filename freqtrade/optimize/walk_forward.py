@@ -5,7 +5,8 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from math import erf, log, sqrt
+from itertools import combinations as itertools_combinations
+from math import comb, erf, log, sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -116,6 +117,21 @@ class MultiSeedResult:
     seed_params: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class CPCVResult:
+    """Combinatorial Purged Cross-Validation results."""
+
+    n_groups: int = 0
+    n_test_groups: int = 0
+    n_combinations: int = 0
+    n_paths: int = 0
+    path_returns: list[float] = field(default_factory=list)
+    avg_return: float = 0.0
+    sharpe_of_paths: float = 0.0
+    prob_of_loss: float = 0.0
+    combo_metrics: list[dict[str, Any]] = field(default_factory=list)
+
+
 class WalkForward:
     """
     Walk-forward analysis: N sequential cycles of
@@ -130,6 +146,8 @@ class WalkForward:
         self.holdout_months: int = config.get("wf_holdout_months", 0)
         self.min_test_trades: int = config.get("wf_min_test_trades", 30)
         self.wf_mode: str = config.get("wf_mode", "rolling")
+        self.cpcv_groups: int = config.get("wf_cpcv_groups", 6)
+        self.cpcv_test_groups: int = config.get("wf_cpcv_test_groups", 2)
         self.strategy_name: str = config["strategy"]
 
         self.results: list[WindowResult] = []
@@ -303,6 +321,186 @@ class WalkForward:
             train_end=holdout_start,
             test_start=holdout_start,
             test_end=full_end,
+        )
+
+    # ------------------------------------------------------------------
+    # CPCV: group computation + combinations
+    # ------------------------------------------------------------------
+
+    def _compute_cpcv_groups(self) -> list[tuple[datetime, datetime]]:
+        full_start, full_end = self._parse_timerange()
+        holdout_delta = timedelta(days=self.holdout_months * 30)
+        usable_end = full_end - holdout_delta
+        total_days = (usable_end - full_start).days
+        n = self.cpcv_groups
+        group_days = total_days / n
+        groups = []
+        for i in range(n):
+            g_start = full_start + timedelta(days=i * group_days)
+            g_end = full_start + timedelta(days=(i + 1) * group_days)
+            if i == n - 1:
+                g_end = usable_end
+            groups.append((g_start, g_end))
+        return groups
+
+    @staticmethod
+    def _compute_cpcv_combinations(
+        n_groups: int, n_test: int
+    ) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+        combos = []
+        for test_indices in itertools_combinations(range(n_groups), n_test):
+            train_indices = tuple(i for i in range(n_groups) if i not in test_indices)
+            combos.append((train_indices, test_indices))
+        return combos
+
+    def _apply_cpcv_embargo(
+        self,
+        groups: list[tuple[datetime, datetime]],
+        train_indices: tuple[int, ...],
+        test_indices: tuple[int, ...],
+    ) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]]:
+        embargo = timedelta(days=self.embargo_days)
+        test_set = set(test_indices)
+        purged_train: list[tuple[datetime, datetime]] = []
+        for i in train_indices:
+            start, end = groups[i]
+            if i + 1 in test_set:
+                end = end - embargo
+            if i - 1 in test_set:
+                start = start + embargo
+            if end > start:
+                purged_train.append((start, end))
+        test_ranges = [groups[i] for i in test_indices]
+        return purged_train, test_ranges
+
+    def _run_cpcv_combination(
+        self,
+        combo_idx: int,
+        test_ranges: list[tuple[datetime, datetime]],
+        strategy_json: Path | None,
+        exchange: Any | None = None,
+    ) -> dict[str, Any]:
+        all_profits: list[float] = []
+        total_profit_pct = 0.0
+        total_trades = 0
+        total_dd = 0.0
+        for start, end in test_ranges:
+            tr_str = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+            metrics = self._run_backtest(tr_str, exchange=exchange)
+            total_profit_pct += metrics.get("profit_pct", 0)
+            total_trades += metrics.get("trades", 0)
+            total_dd = max(total_dd, metrics.get("max_dd_pct", 0))
+            all_profits.extend(metrics.get("trade_profits", []))
+        return {
+            "combo_idx": combo_idx,
+            "profit_pct": total_profit_pct,
+            "trades": total_trades,
+            "max_dd_pct": total_dd,
+            "trade_profits": all_profits,
+        }
+
+    @staticmethod
+    def _aggregate_cpcv(
+        combo_results: list[dict[str, Any]],
+        n_groups: int,
+        n_test: int,
+    ) -> CPCVResult:
+        if not combo_results:
+            return CPCVResult()
+        returns = [c["profit_pct"] for c in combo_results]
+        arr = np.array(returns)
+        avg_ret = float(np.mean(arr))
+        std_ret = float(np.std(arr))
+        sharpe = avg_ret / std_ret if std_ret > 1e-8 else 0.0
+        prob_loss = sum(1 for r in returns if r <= 0) / len(returns)
+        n_paths = comb(n_groups, n_test) * n_test // n_groups
+        return CPCVResult(
+            n_groups=n_groups,
+            n_test_groups=n_test,
+            n_combinations=len(combo_results),
+            n_paths=n_paths,
+            path_returns=returns,
+            avg_return=round(avg_ret, 2),
+            sharpe_of_paths=round(sharpe, 4),
+            prob_of_loss=round(prob_loss, 4),
+            combo_metrics=combo_results,
+        )
+
+    def _run_cpcv(
+        self,
+        consensus: dict[str, Any],
+        strategy_json: Path | None,
+        original_json_bytes: bytes | None,
+        exchange: Any | None = None,
+    ) -> CPCVResult:
+        groups = self._compute_cpcv_groups()
+        combos = self._compute_cpcv_combinations(self.cpcv_groups, self.cpcv_test_groups)
+        logger.info(
+            f"CPCV: {len(combos)} combinations (N={self.cpcv_groups}, K={self.cpcv_test_groups})"
+        )
+        self._restore_params(consensus, strategy_json)
+        resolver_logger = logging.getLogger("freqtrade.resolvers")
+        prev_level = resolver_logger.level
+        resolver_logger.setLevel(logging.WARNING)
+        results: list[dict[str, Any]] = []
+        try:
+            for idx, (train_idx, test_idx) in enumerate(combos):
+                _, test_ranges = self._apply_cpcv_embargo(groups, train_idx, test_idx)
+                logger.info(f"  Combo {idx + 1}/{len(combos)}: test groups {test_idx}")
+                result = self._run_cpcv_combination(
+                    idx,
+                    test_ranges,
+                    strategy_json,
+                    exchange=exchange,
+                )
+                results.append(result)
+        finally:
+            resolver_logger.setLevel(prev_level)
+            self._restore_original_json(strategy_json, original_json_bytes)
+        return self._aggregate_cpcv(results, self.cpcv_groups, self.cpcv_test_groups)
+
+    def _validate_cpcv(self) -> None:
+        n = self.cpcv_groups
+        k = self.cpcv_test_groups
+        if n < 4:
+            raise OperationalException(f"--wf-cpcv-groups must be >= 4, got {n}.")
+        if k >= n:
+            raise OperationalException(
+                f"--wf-cpcv-test-groups ({k}) must be < --wf-cpcv-groups ({n})."
+            )
+        if k < 1:
+            raise OperationalException(f"--wf-cpcv-test-groups must be >= 1, got {k}.")
+        n_combos = comb(n, k)
+        if n_combos > 120:
+            raise OperationalException(
+                f"C({n},{k}) = {n_combos} combinations is too many "
+                f"(max 120). Reduce --wf-cpcv-groups or --wf-cpcv-test-groups."
+            )
+        full_start, full_end = self._parse_timerange()
+        holdout_delta = timedelta(days=self.holdout_months * 30)
+        usable_days = (full_end - holdout_delta - full_start).days
+        group_days = usable_days / n
+        if group_days < 20:
+            raise OperationalException(
+                f"CPCV group size too short ({group_days:.0f} days). "
+                f"Need at least 20 days per group."
+            )
+
+    def _load_latest_consensus(self) -> dict[str, Any]:
+        pattern = f"{self.strategy_name}_consensus_*.json"
+        files = sorted(self._wfa_dir.glob(pattern))
+        if files:
+            with files[-1].open("r") as f:
+                data = rapidjson.load(f, number_mode=HYPER_PARAMS_FILE_FORMAT)
+            return data.get("params", {})
+        json_path = self._get_strategy_json_path()
+        if json_path and json_path.exists():
+            with json_path.open("r") as f:
+                data = rapidjson.load(f, number_mode=HYPER_PARAMS_FILE_FORMAT)
+            return data.get("params", {})
+        raise OperationalException(
+            f"No consensus params found for {self.strategy_name}. "
+            f"Run a standard WFA first, or provide a co-located strategy JSON."
         )
 
     # ------------------------------------------------------------------
@@ -762,6 +960,34 @@ class WalkForward:
         z = (sr_observed - sr_benchmark) / se_sr
         return WalkForward._norm_cdf(z)
 
+    def _compute_dsr(self, all_oos_profits: list[float]) -> tuple[float, float, float]:
+        sharpes = [r.test_metrics.get("sharpe", 0) for r in self.results]
+        avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
+        n_trials = self.config.get("epochs", 150) * len(self.results)
+        avg_trades = (
+            int(np.mean([r.test_metrics.get("trades", 0) for r in self.results]))
+            if self.results
+            else 0
+        )
+        skewness = 0.0
+        kurtosis = 3.0
+        if len(all_oos_profits) > 2:
+            arr = np.array(all_oos_profits)
+            mu = float(np.mean(arr))
+            std = float(np.std(arr))
+            if std > 1e-10:
+                z = (arr - mu) / std
+                skewness = float(np.mean(z**3))
+                kurtosis = float(np.mean(z**4))
+        dsr = self._deflated_sharpe_ratio(
+            avg_sharpe,
+            n_trials,
+            max(avg_trades, 2),
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
+        return dsr, skewness, kurtosis
+
     @staticmethod
     def _compute_degradation(train: dict[str, Any], test: dict[str, Any]) -> dict[str, float]:
         deg: dict[str, float] = {}
@@ -1081,11 +1307,12 @@ class WalkForward:
         logger.info(f"Consensus exported: {filename.name}")
         return filename
 
-    def _export_results_json(
+    def _build_results_data(
         self,
         all_results: list[WindowResult],
         stability: dict[str, dict[str, Any]],
         consensus: dict[str, Any],
+        warnings: list[str] | None = None,
         dsr: float | None = None,
         all_oos_profits: list[float] | None = None,
         mc: MCResult | None = None,
@@ -1093,10 +1320,8 @@ class WalkForward:
         regime: RegimeAnalysis | None = None,
         perturb: PerturbResult | None = None,
         multi_seed: MultiSeedResult | None = None,
-    ) -> Path:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = self._wfa_dir / (f"{self.strategy_name}_wfa_results_{ts}.json")
-
+        cpcv: CPCVResult | None = None,
+    ) -> dict[str, Any]:
         oos_profits = all_oos_profits or []
         oos_sqn = 0.0
         oos_expectancy = 0.0
@@ -1115,6 +1340,7 @@ class WalkForward:
             mc=mc,
             perturb=perturb,
             multi_seed=multi_seed,
+            cpcv=cpcv,
         )
 
         data: dict[str, Any] = {
@@ -1132,7 +1358,12 @@ class WalkForward:
                 "sqn": round(oos_sqn, 2),
                 "expectancy": round(oos_expectancy, 6),
             },
-            "verdict": {"grade": grade, "checks": {n: ok for n, ok, _ in checks}},
+            "verdict": {
+                "grade": grade,
+                "checks": [(n, ok, d) for n, ok, d in checks],
+            },
+            "warnings": warnings or [],
+            "oos_trade_profits": oos_profits,
             "monte_carlo": {
                 "n_simulations": mc.n_simulations,
                 "total_return_pct": round(mc.total_return_pct, 2),
@@ -1179,6 +1410,18 @@ class WalkForward:
             }
             if multi_seed and multi_seed.n_seeds > 0
             else None,
+            "cpcv": {
+                "n_groups": cpcv.n_groups,
+                "n_test_groups": cpcv.n_test_groups,
+                "n_combinations": cpcv.n_combinations,
+                "n_paths": cpcv.n_paths,
+                "avg_return": cpcv.avg_return,
+                "sharpe_of_paths": cpcv.sharpe_of_paths,
+                "prob_of_loss": cpcv.prob_of_loss,
+                "path_returns": cpcv.path_returns,
+            }
+            if cpcv and cpcv.n_combinations > 0
+            else None,
             "windows": [],
             "holdout": None,
             "param_stability": stability,
@@ -1203,11 +1446,15 @@ class WalkForward:
 
         if self.holdout_result:
             data["holdout"] = {
-                "test_range": (self.holdout_result.window.test_timerange_str()),
+                "test_range": self.holdout_result.window.test_timerange_str(),
                 "test_metrics": self.holdout_result.test_metrics,
                 "baseline_metrics": self.holdout_result.baseline_metrics,
             }
+        return data
 
+    def _export_results_json(self, data: dict[str, Any]) -> Path:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = self._wfa_dir / f"{self.strategy_name}_wfa_results_{ts}.json"
         with filename.open("w") as f:
             rapidjson.dump(
                 data,
@@ -1218,6 +1465,19 @@ class WalkForward:
             )
         logger.info(f"Results exported: {filename.name}")
         return filename
+
+    def _export_html_report(self, data: dict[str, Any]) -> Path | None:
+        try:
+            from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            html_path = self._wfa_dir / f"{self.strategy_name}_wfa_report_{ts}.html"
+            generate_wfa_html_report(data, html_path)
+            logger.info(f"HTML report: {html_path.name}")
+            return html_path
+        except Exception as e:
+            logger.warning(f"HTML report generation failed: {e}")
+            return None
 
     def _log_wfa_run(
         self,
@@ -1314,6 +1574,7 @@ class WalkForward:
         regime: RegimeAnalysis | None = None,
         perturb: PerturbResult | None = None,
         multi_seed: MultiSeedResult | None = None,
+        cpcv: CPCVResult | None = None,
     ) -> list[str]:
         warnings: list[str] = []
 
@@ -1362,17 +1623,35 @@ class WalkForward:
                 f"({profitable / n:.0%}) — below 50% threshold (Pardo)"
             )
 
-        if mc and mc.n_simulations > 0:
-            warnings.extend(self._mc_warnings(mc))
-
-        if regime:
-            warnings.extend(self._regime_warnings(regime))
-        if perturb and perturb.n_perturbations > 0:
-            warnings.extend(self._perturb_warnings(perturb))
-        if multi_seed and multi_seed.n_seeds > 0:
-            warnings.extend(self._multi_seed_warnings(multi_seed))
-
+        self._extend_analysis_warnings(
+            warnings,
+            mc=mc,
+            regime=regime,
+            perturb=perturb,
+            multi_seed=multi_seed,
+            cpcv=cpcv,
+        )
         return warnings
+
+    @staticmethod
+    def _extend_analysis_warnings(
+        warnings: list[str],
+        mc: MCResult | None = None,
+        regime: RegimeAnalysis | None = None,
+        perturb: PerturbResult | None = None,
+        multi_seed: MultiSeedResult | None = None,
+        cpcv: CPCVResult | None = None,
+    ) -> None:
+        if mc and mc.n_simulations > 0:
+            warnings.extend(WalkForward._mc_warnings(mc))
+        if regime:
+            warnings.extend(WalkForward._regime_warnings(regime))
+        if perturb and perturb.n_perturbations > 0:
+            warnings.extend(WalkForward._perturb_warnings(perturb))
+        if multi_seed and multi_seed.n_seeds > 0:
+            warnings.extend(WalkForward._multi_seed_warnings(multi_seed))
+        if cpcv and cpcv.n_combinations > 0:
+            warnings.extend(WalkForward._cpcv_warnings(cpcv))
 
     @staticmethod
     def _mc_warnings(mc: MCResult) -> list[str]:
@@ -1434,6 +1713,21 @@ class WalkForward:
             )
         return warnings
 
+    @staticmethod
+    def _cpcv_warnings(cpcv: CPCVResult) -> list[str]:
+        warnings: list[str] = []
+        if cpcv.prob_of_loss > 0.40:
+            warnings.append(
+                f"CPCV: {cpcv.prob_of_loss:.0%} of paths have negative return — "
+                f"fragile edge (Lopez de Prado)"
+            )
+        if cpcv.sharpe_of_paths < 0.5:
+            warnings.append(
+                f"CPCV: Sharpe of paths {cpcv.sharpe_of_paths:.2f} < 0.5 — "
+                f"weak risk-adjusted edge across combinations"
+            )
+        return warnings
+
     # ------------------------------------------------------------------
     # Verdict
     # ------------------------------------------------------------------
@@ -1456,6 +1750,7 @@ class WalkForward:
         mc: MCResult | None = None,
         perturb: PerturbResult | None = None,
         multi_seed: MultiSeedResult | None = None,
+        cpcv: CPCVResult | None = None,
     ) -> tuple[str, list[tuple[str, bool, str]]]:
         checks: list[tuple[str, bool, str]] = []
 
@@ -1597,6 +1892,16 @@ class WalkForward:
                     "seed_convergence",
                     multi_seed.convergence_pct >= 0.60,
                     f"Seed convergence: {multi_seed.convergence_pct:.0%}",
+                )
+            )
+
+        # 13. CPCV probability of loss (Lopez de Prado: < 30%)
+        if cpcv and cpcv.n_combinations > 0:
+            checks.append(
+                (
+                    "cpcv_prob_loss",
+                    cpcv.prob_of_loss < 0.30,
+                    f"CPCV prob of loss: {cpcv.prob_of_loss:.0%}",
                 )
             )
 
@@ -1824,6 +2129,25 @@ class WalkForward:
                 f"{multi_seed.convergence_pct:.0%} convergence"
             )
 
+    @staticmethod
+    def _log_cpcv(cpcv: CPCVResult | None) -> None:
+        if cpcv and cpcv.n_combinations > 0:
+            logger.info(
+                f"  CPCV ({cpcv.n_combinations} combos, "
+                f"N={cpcv.n_groups} K={cpcv.n_test_groups}): "
+                f"Avg return {cpcv.avg_return:+.1f}% | "
+                f"Sharpe {cpcv.sharpe_of_paths:.2f} | "
+                f"P(loss) {cpcv.prob_of_loss:.0%}"
+            )
+            if cpcv.path_returns:
+                arr = np.array(cpcv.path_returns)
+                logger.info(
+                    f"           p5/p50/p95: "
+                    f"{float(np.percentile(arr, 5)):+.1f}% / "
+                    f"{float(np.percentile(arr, 50)):+.1f}% / "
+                    f"{float(np.percentile(arr, 95)):+.1f}%"
+                )
+
     # ------------------------------------------------------------------
     # Phase 3 orchestration
     # ------------------------------------------------------------------
@@ -1923,7 +2247,69 @@ class WalkForward:
     # Main orchestration
     # ------------------------------------------------------------------
 
+    def _start_cpcv(self) -> None:
+        self._validate_cpcv()
+        cfg_for_exchange = deepcopy(self.config)
+        cfg_for_exchange["dry_run"] = True
+        exchange = ExchangeResolver.load_exchange(
+            cfg_for_exchange,
+            load_leverage_tiers=True,
+        )
+        strategy_json = self._get_strategy_json_path()
+        original_json_bytes: bytes | None = None
+        if strategy_json and strategy_json.exists():
+            original_json_bytes = strategy_json.read_bytes()
+
+        consensus = self._load_latest_consensus()
+        if not consensus:
+            raise OperationalException("No consensus params found for CPCV.")
+
+        n_combos = comb(self.cpcv_groups, self.cpcv_test_groups)
+        logger.info(
+            f"CPCV mode: N={self.cpcv_groups}, K={self.cpcv_test_groups}, "
+            f"C({self.cpcv_groups},{self.cpcv_test_groups})={n_combos} combinations"
+        )
+        cpcv_result = self._run_cpcv(
+            consensus,
+            strategy_json,
+            original_json_bytes,
+            exchange=exchange,
+        )
+        self._restore_original_json(strategy_json, original_json_bytes)
+
+        warnings = self._cpcv_warnings(cpcv_result)
+        data = self._build_results_data(
+            [],
+            {},
+            consensus,
+            warnings=warnings,
+            cpcv=cpcv_result,
+        )
+        self._export_results_json(data)
+        self._export_html_report(data)
+        self._log_cpcv(cpcv_result)
+
+        grade, checks = self._compute_verdict(
+            [],
+            {},
+            None,
+            0,
+            [],
+            cpcv=cpcv_result,
+        )
+        logger.info("")
+        logger.info(f"  VERDICT: {grade} — {self.VERDICT_LABELS.get(grade, '')}")
+        for _name, ok, desc in checks:
+            mark = "✓" if ok else "✗"
+            logger.info(f"    {mark} {desc}")
+        if warnings:
+            for w in warnings:
+                logger.info(f"  ! {w}")
+
     def start(self) -> None:
+        if self.wf_mode == "cpcv":
+            return self._start_cpcv()
+
         from freqtrade.optimize.wfa_output import WFADashboard
 
         windows = self._compute_windows()
@@ -2056,32 +2442,7 @@ class WalkForward:
         for r in self.results:
             all_oos_profits.extend(r.test_trade_profits)
 
-        # Deflated Sharpe Ratio (with empirical skew/kurtosis)
-        sharpes = [r.test_metrics.get("sharpe", 0) for r in self.results]
-        avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
-        n_trials = self.config.get("epochs", 150) * len(self.results)
-        avg_trades = (
-            int(np.mean([r.test_metrics.get("trades", 0) for r in self.results]))
-            if self.results
-            else 0
-        )
-        skewness = 0.0
-        kurtosis = 3.0
-        if len(all_oos_profits) > 2:
-            arr = np.array(all_oos_profits)
-            mu = float(np.mean(arr))
-            std = float(np.std(arr))
-            if std > 1e-10:
-                z = (arr - mu) / std
-                skewness = float(np.mean(z**3))
-                kurtosis = float(np.mean(z**4))
-        dsr = self._deflated_sharpe_ratio(
-            avg_sharpe,
-            n_trials,
-            max(avg_trades, 2),
-            skewness=skewness,
-            kurtosis=kurtosis,
-        )
+        dsr, skewness, kurtosis = self._compute_dsr(all_oos_profits)
 
         # Monte Carlo trade shuffle
         starting_balance = self.config.get("dry_run_wallet", 1000)
@@ -2110,24 +2471,10 @@ class WalkForward:
 
         n_params = len(search_ranges)
 
-        # Export full results
-        self._export_results_json(
-            self.results,
-            stability,
-            consensus,
-            dsr=dsr,
-            all_oos_profits=all_oos_profits,
-            mc=mc,
-            oos_equity=oos_equity,
-            regime=regime,
-            perturb=perturb,
-            multi_seed=multi_seed,
-        )
-
         # Log and get run count
         run_count = self._log_wfa_run(self.results, stability)
 
-        # Warnings
+        # Warnings (compute before export so they're included in data)
         warnings = self._generate_warning_flags(
             self.results,
             stability,
@@ -2138,6 +2485,25 @@ class WalkForward:
             perturb=perturb,
             multi_seed=multi_seed,
         )
+
+        # Build data dict (shared between JSON export and HTML report)
+        data = self._build_results_data(
+            self.results,
+            stability,
+            consensus,
+            warnings=warnings,
+            dsr=dsr,
+            all_oos_profits=all_oos_profits,
+            mc=mc,
+            oos_equity=oos_equity,
+            regime=regime,
+            perturb=perturb,
+            multi_seed=multi_seed,
+        )
+
+        # Export JSON + HTML
+        self._export_results_json(data)
+        self._export_html_report(data)
 
         # Report
         self._format_report(

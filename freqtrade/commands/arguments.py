@@ -301,6 +301,8 @@ ARGS_WALK_FORWARD = [
     "wf_min_test_trades",
     "wf_mode",
     "wf_multi_seed",
+    "wf_cpcv_groups",
+    "wf_cpcv_test_groups",
 ]
 
 # Command level configs - keep at the bottom of the above definitions

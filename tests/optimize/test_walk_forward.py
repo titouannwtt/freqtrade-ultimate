@@ -14,6 +14,7 @@ from freqtrade.commands.walk_forward_commands import start_walk_forward
 from freqtrade.enums import RunMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.walk_forward import (
+    CPCVResult,
     MCResult,
     MultiSeedResult,
     OOSEquityCurve,
@@ -550,14 +551,15 @@ class TestExport:
                 test_metrics={"profit_pct": 5},
             )
         ]
-        path = wf._export_results_json(results, {}, {"buy": {"rsi": 30}})
+        data = wf._build_results_data(results, {}, {"buy": {"rsi": 30}})
+        path = wf._export_results_json(data)
         assert path.exists()
 
         with path.open("r") as f:
-            data = rapidjson.load(f)
-        assert data["strategy"] == "HyperoptableStrategy"
-        assert len(data["windows"]) == 1
-        assert data["consensus_params"]["buy"]["rsi"] == 30
+            loaded = rapidjson.load(f)
+        assert loaded["strategy"] == "HyperoptableStrategy"
+        assert len(loaded["windows"]) == 1
+        assert loaded["consensus_params"]["buy"]["rsi"] == 30
 
     def test_log_wfa_run_appends(self, walkforward_conf, tmp_path):
         wf = WalkForward(walkforward_conf)
@@ -1873,13 +1875,14 @@ class TestExportPhase2:
             k_ratio=1.82,
             n_trades=200,
         )
-        path = wf._export_results_json(
+        build_data = wf._build_results_data(
             results,
             {},
             {"buy": {"rsi": 30}},
             mc=mc,
             oos_equity=oos_eq,
         )
+        path = wf._export_results_json(build_data)
         with path.open("r") as f:
             data = rapidjson.load(f)
 
@@ -1908,7 +1911,8 @@ class TestExportPhase2:
                 test_metrics={"profit_pct": 5},
             )
         ]
-        path = wf._export_results_json(results, {}, {"buy": {"rsi": 30}})
+        build_data = wf._build_results_data(results, {}, {"buy": {"rsi": 30}})
+        path = wf._export_results_json(build_data)
         with path.open("r") as f:
             data = rapidjson.load(f)
         assert data["monte_carlo"] is None
@@ -2303,7 +2307,7 @@ class TestExportPhase3:
         )
         ms = MultiSeedResult(n_seeds=5, convergence_pct=0.80, seed_params=[])
 
-        path = wf._export_results_json(
+        build_data = wf._build_results_data(
             results,
             {},
             {"buy": {"rsi": 30}},
@@ -2311,6 +2315,7 @@ class TestExportPhase3:
             perturb=perturb,
             multi_seed=ms,
         )
+        path = wf._export_results_json(build_data)
         with path.open("r") as f:
             data = rapidjson.load(f)
 
@@ -2339,7 +2344,8 @@ class TestExportPhase3:
                 test_metrics={"profit_pct": 5},
             )
         ]
-        path = wf._export_results_json(results, {}, {"buy": {"rsi": 30}})
+        build_data = wf._build_results_data(results, {}, {"buy": {"rsi": 30}})
+        path = wf._export_results_json(build_data)
         with path.open("r") as f:
             data = rapidjson.load(f)
         assert data["regime_analysis"] is None
@@ -2427,3 +2433,605 @@ class TestLogPhase3:
         assert "Regime" not in caplog.text
         assert "Perturbation" not in caplog.text
         assert "Multi-seed" not in caplog.text
+
+
+# ------------------------------------------------------------------
+# Phase 4: CPCV
+# ------------------------------------------------------------------
+
+
+class TestCPCVGroups:
+    def test_compute_groups_basic(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 6
+        wf = WalkForward(walkforward_conf)
+        groups = wf._compute_cpcv_groups()
+        assert len(groups) == 6
+        for start, end in groups:
+            assert end > start
+
+    def test_compute_groups_cover_full_range(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 4
+        wf = WalkForward(walkforward_conf)
+        groups = wf._compute_cpcv_groups()
+        full_start = datetime(2018, 1, 1, tzinfo=UTC)
+        full_end = datetime(2020, 1, 1, tzinfo=UTC)
+        assert groups[0][0] == full_start
+        assert groups[-1][1] == full_end
+
+    def test_compute_groups_contiguous(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 5
+        wf = WalkForward(walkforward_conf)
+        groups = wf._compute_cpcv_groups()
+        for i in range(len(groups) - 1):
+            gap = abs((groups[i + 1][0] - groups[i][1]).total_seconds())
+            assert gap < 86400 * 2
+
+
+class TestCPCVCombinations:
+    def test_basic_combinations(self):
+        combos = WalkForward._compute_cpcv_combinations(6, 2)
+        from math import comb
+
+        assert len(combos) == comb(6, 2)
+
+    def test_all_indices_present(self):
+        combos = WalkForward._compute_cpcv_combinations(4, 1)
+        for train_idx, test_idx in combos:
+            all_idx = set(train_idx) | set(test_idx)
+            assert all_idx == {0, 1, 2, 3}
+            assert len(test_idx) == 1
+            assert len(train_idx) == 3
+
+    def test_train_test_disjoint(self):
+        combos = WalkForward._compute_cpcv_combinations(6, 2)
+        for train_idx, test_idx in combos:
+            assert set(train_idx) & set(test_idx) == set()
+
+
+class TestCPCVEmbargo:
+    def test_embargo_shrinks_adjacent_train(self, walkforward_conf):
+        walkforward_conf["wf_embargo_days"] = 7
+        wf = WalkForward(walkforward_conf)
+        groups = [
+            (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC)),
+            (datetime(2024, 2, 1, tzinfo=UTC), datetime(2024, 3, 1, tzinfo=UTC)),
+            (datetime(2024, 3, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)),
+            (datetime(2024, 4, 1, tzinfo=UTC), datetime(2024, 5, 1, tzinfo=UTC)),
+        ]
+        train_idx = (0, 2, 3)
+        test_idx = (1,)
+        purged_train, test_ranges = wf._apply_cpcv_embargo(groups, train_idx, test_idx)
+        assert len(test_ranges) == 1
+        train_g0 = purged_train[0]
+        assert train_g0[1] < groups[0][1]
+
+    def test_embargo_no_adjacent(self, walkforward_conf):
+        walkforward_conf["wf_embargo_days"] = 7
+        wf = WalkForward(walkforward_conf)
+        groups = [
+            (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC)),
+            (datetime(2024, 2, 1, tzinfo=UTC), datetime(2024, 3, 1, tzinfo=UTC)),
+            (datetime(2024, 3, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)),
+            (datetime(2024, 4, 1, tzinfo=UTC), datetime(2024, 5, 1, tzinfo=UTC)),
+        ]
+        train_idx = (0, 1)
+        test_idx = (2, 3)
+        purged_train, test_ranges = wf._apply_cpcv_embargo(groups, train_idx, test_idx)
+        assert len(test_ranges) == 2
+        assert purged_train[0][0] == groups[0][0]
+        assert purged_train[1][1] < groups[1][1]
+
+
+class TestCPCVAggregate:
+    def test_aggregate_basic(self):
+        combo_results = [
+            {"combo_idx": 0, "profit_pct": 5.0, "trades": 100, "max_dd_pct": 3.0},
+            {"combo_idx": 1, "profit_pct": -2.0, "trades": 80, "max_dd_pct": 5.0},
+            {"combo_idx": 2, "profit_pct": 8.0, "trades": 120, "max_dd_pct": 2.0},
+        ]
+        result = WalkForward._aggregate_cpcv(combo_results, 4, 1)
+        assert isinstance(result, CPCVResult)
+        assert result.n_combinations == 3
+        assert result.n_groups == 4
+        assert result.n_test_groups == 1
+        assert len(result.path_returns) == 3
+        assert result.prob_of_loss == pytest.approx(1 / 3, abs=0.01)
+
+    def test_aggregate_empty(self):
+        result = WalkForward._aggregate_cpcv([], 6, 2)
+        assert result.n_combinations == 0
+        assert result.path_returns == []
+
+    def test_aggregate_all_positive(self):
+        combo_results = [
+            {"combo_idx": i, "profit_pct": 3.0 + i, "trades": 50, "max_dd_pct": 1.0}
+            for i in range(5)
+        ]
+        result = WalkForward._aggregate_cpcv(combo_results, 5, 1)
+        assert result.prob_of_loss == 0.0
+        assert result.avg_return > 0
+
+    def test_aggregate_sharpe_positive(self):
+        combo_results = [
+            {"combo_idx": i, "profit_pct": 10.0 + i, "trades": 50, "max_dd_pct": 1.0}
+            for i in range(6)
+        ]
+        result = WalkForward._aggregate_cpcv(combo_results, 6, 2)
+        assert result.sharpe_of_paths > 0
+
+
+class TestCPCVValidation:
+    def test_validate_too_few_groups(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 3
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="must be >= 4"):
+            wf._validate_cpcv()
+
+    def test_validate_k_ge_n(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 4
+        walkforward_conf["wf_cpcv_test_groups"] = 4
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="must be <"):
+            wf._validate_cpcv()
+
+    def test_validate_k_zero(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 4
+        walkforward_conf["wf_cpcv_test_groups"] = 0
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="must be >= 1"):
+            wf._validate_cpcv()
+
+    def test_validate_too_many_combos(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 20
+        walkforward_conf["wf_cpcv_test_groups"] = 10
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="too many"):
+            wf._validate_cpcv()
+
+    def test_validate_short_groups(self, walkforward_conf):
+        walkforward_conf["timerange"] = "20240101-20240210"
+        walkforward_conf["wf_cpcv_groups"] = 10
+        walkforward_conf["wf_cpcv_test_groups"] = 2
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="too short"):
+            wf._validate_cpcv()
+
+    def test_validate_passes(self, walkforward_conf):
+        walkforward_conf["wf_cpcv_groups"] = 6
+        walkforward_conf["wf_cpcv_test_groups"] = 2
+        wf = WalkForward(walkforward_conf)
+        wf._validate_cpcv()
+
+
+class TestCPCVWarnings:
+    def test_high_prob_loss_warning(self):
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            prob_of_loss=0.50,
+            sharpe_of_paths=1.0,
+            path_returns=[1.0, -2.0, 3.0],
+        )
+        warnings = WalkForward._cpcv_warnings(cpcv)
+        assert any("50%" in w for w in warnings)
+
+    def test_low_sharpe_warning(self):
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            prob_of_loss=0.10,
+            sharpe_of_paths=0.3,
+            path_returns=[1.0, 2.0, 3.0],
+        )
+        warnings = WalkForward._cpcv_warnings(cpcv)
+        assert any("Sharpe" in w for w in warnings)
+
+    def test_clean_cpcv_no_warnings(self):
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            prob_of_loss=0.10,
+            sharpe_of_paths=1.5,
+            path_returns=[5.0, 3.0, 7.0],
+        )
+        warnings = WalkForward._cpcv_warnings(cpcv)
+        assert len(warnings) == 0
+
+
+class TestCPCVVerdict:
+    def test_cpcv_verdict_pass(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            prob_of_loss=0.10,
+            sharpe_of_paths=1.2,
+            path_returns=[5.0, 3.0, 7.0],
+        )
+        _, checks = wf._compute_verdict([], {}, None, 0, [], cpcv=cpcv)
+        cpcv_checks = [c for c in checks if c[0] == "cpcv_prob_loss"]
+        assert len(cpcv_checks) == 1
+        assert cpcv_checks[0][1] is True
+
+    def test_cpcv_verdict_fail(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            prob_of_loss=0.50,
+            sharpe_of_paths=0.3,
+            path_returns=[1.0, -2.0, -3.0],
+        )
+        _, checks = wf._compute_verdict([], {}, None, 0, [], cpcv=cpcv)
+        cpcv_checks = [c for c in checks if c[0] == "cpcv_prob_loss"]
+        assert len(cpcv_checks) == 1
+        assert cpcv_checks[0][1] is False
+
+
+class TestLoadLatestConsensus:
+    def test_load_from_consensus_file(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        consensus_file = tmp_path / "walk_forward" / "HyperoptableStrategy_consensus_2024.json"
+        consensus_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {"params": {"buy": {"rsi": 25}}, "strategy_name": "HyperoptableStrategy"}
+        consensus_file.write_text(rapidjson.dumps(data))
+        result = wf._load_latest_consensus()
+        assert result == {"buy": {"rsi": 25}}
+
+    def test_load_no_consensus_raises(self, walkforward_conf, tmp_path):
+        walkforward_conf["strategy"] = "NoSuchStrategy"
+        wf = WalkForward(walkforward_conf)
+        with pytest.raises(OperationalException, match="No consensus params"):
+            wf._load_latest_consensus()
+
+
+class TestLogCPCV:
+    def test_log_cpcv_basic(self, caplog):
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            n_paths=5,
+            avg_return=3.5,
+            sharpe_of_paths=1.2,
+            prob_of_loss=0.13,
+            path_returns=[1.0, 2.0, 5.0, 7.0, 3.0],
+        )
+        WalkForward._log_cpcv(cpcv)
+        assert "CPCV" in caplog.text
+        assert "15 combos" in caplog.text
+        assert "p5/p50/p95" in caplog.text
+
+    def test_log_cpcv_none(self, caplog):
+        WalkForward._log_cpcv(None)
+        assert "CPCV" not in caplog.text
+
+
+class TestExportCPCV:
+    def test_export_with_cpcv(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        results = [
+            WindowResult(
+                window=WalkForwardWindow(
+                    0,
+                    datetime(2018, 1, 1),
+                    datetime(2018, 6, 1),
+                    datetime(2018, 6, 8),
+                    datetime(2018, 8, 1),
+                ),
+                train_metrics={"profit_pct": 10, "trades": 100, "calmar": 2.0},
+                test_metrics={"profit_pct": 5, "trades": 50, "calmar": 1.0},
+            )
+        ]
+        cpcv = CPCVResult(
+            n_groups=6,
+            n_test_groups=2,
+            n_combinations=15,
+            n_paths=5,
+            avg_return=3.5,
+            sharpe_of_paths=1.2,
+            prob_of_loss=0.13,
+            path_returns=[1.0, 2.0, 5.0, 7.0, 3.0],
+        )
+        data = wf._build_results_data(results, {}, {"buy": {"rsi": 30}}, cpcv=cpcv)
+        assert data["cpcv"] is not None
+        assert data["cpcv"]["n_groups"] == 6
+        assert data["cpcv"]["prob_of_loss"] == 0.13
+        path = wf._export_results_json(data)
+        assert path.exists()
+        content = rapidjson.loads(path.read_text())
+        assert "cpcv" in content
+        assert content["cpcv"]["n_combinations"] == 15
+
+
+# ------------------------------------------------------------------
+# Phase 4: HTML report
+# ------------------------------------------------------------------
+
+
+class TestHTMLReport:
+    def _make_data(self, **overrides):
+        data = {
+            "strategy": "TestStrategy",
+            "wf_mode": "rolling",
+            "n_windows": 3,
+            "epochs_per_window": 100,
+            "hyperopt_loss": "CalmarHyperOptLoss",
+            "timestamp": "2024-01-01T00:00:00",
+            "verdict": {
+                "grade": "B",
+                "checks": [
+                    ("profitable_windows", True, "3/3 profitable (100%)"),
+                    ("wfe", False, "WFE median 40%"),
+                    ("dsr", True, "DSR 0.970"),
+                ],
+            },
+            "warnings": ["Test warning 1", "Test warning 2"],
+            "oos_trade_profits": [10.0, -5.0, 15.0, -3.0, 8.0, 12.0, -2.0, 7.0],
+            "windows": [
+                {
+                    "index": 1,
+                    "test_range": "20180601-20180801",
+                    "test_metrics": {
+                        "profit_pct": 5.0,
+                        "trades": 40,
+                        "calmar": 1.5,
+                        "max_dd_pct": 3.0,
+                    },
+                    "wfe": 0.65,
+                    "market_context": {"regime": "bull"},
+                }
+            ],
+            "param_stability": {
+                "rsi": {
+                    "values": [25, 30, 28],
+                    "median": 28,
+                    "std": 2.5,
+                    "std_over_range": 0.05,
+                    "stable": True,
+                    "unstable": False,
+                },
+            },
+            "consensus_params": {"buy": {"rsi": 28}},
+            "monte_carlo": None,
+            "regime_analysis": None,
+            "perturbation": None,
+            "multi_seed": None,
+            "cpcv": None,
+        }
+        data.update(overrides)
+        return data
+
+    def test_generate_basic(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        result = generate_wfa_html_report(data, out)
+        assert result == out
+        assert out.exists()
+        content = out.read_text()
+        assert "<!DOCTYPE html>" in content
+        assert "</html>" in content
+
+    def test_contains_verdict(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Verdict" in content
+        assert "grade" in content.lower() or "B" in content
+
+    def test_contains_windows_table(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Windows" in content
+        assert "20180601" in content
+
+    def test_equity_chart_svg(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "<svg" in content
+        assert "polyline" in content
+
+    def test_no_equity_with_empty_profits(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data(oos_trade_profits=[])
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "<svg" not in content
+
+    def test_self_contained_no_external(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        stripped = content.replace("http://www.w3.org/2000/svg", "")
+        assert "http://" not in stripped
+        assert "https://" not in stripped
+        assert "<script" not in content
+
+    def test_html_escaping(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data(strategy="<script>alert('xss')</script>")
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "<script>alert" not in content
+        assert "&lt;script&gt;" in content
+
+    def test_with_monte_carlo(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        mc = {
+            "n_simulations": 1000,
+            "total_return_pct": 15.0,
+            "max_dd_p5": 2.0,
+            "max_dd_p50": 5.0,
+            "max_dd_p95": 12.0,
+            "return_dd_p5": 1.2,
+            "return_dd_p50": 3.0,
+            "return_dd_p95": 7.0,
+            "max_consec_loss_p50": 4,
+            "max_consec_loss_p95": 8,
+            "carver_discount": 0.40,
+        }
+        data = self._make_data(monte_carlo=mc)
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Monte Carlo" in content
+        assert "1000 sims" in content
+
+    def test_with_cpcv(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        cpcv_data = {
+            "n_groups": 6,
+            "n_test_groups": 2,
+            "n_combinations": 15,
+            "n_paths": 5,
+            "avg_return": 3.5,
+            "sharpe_of_paths": 1.2,
+            "prob_of_loss": 0.13,
+            "path_returns": [1.0, 2.0, 5.0, 7.0, 3.0],
+        }
+        data = self._make_data(cpcv=cpcv_data)
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "CPCV" in content
+        assert "N=6" in content
+        assert "P(loss)" in content
+
+    def test_with_phase3(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        regime = {
+            "regime_stats": {
+                "bull": {"windows": 3, "avg_profit": 5.0, "avg_dd": 2.0},
+                "bear": {"windows": 2, "avg_profit": -1.0, "avg_dd": 4.0},
+            },
+            "worst_regime": "bear",
+            "regime_dependent": True,
+        }
+        perturb = {
+            "n_perturbations": 60,
+            "profit_p5": 1.0,
+            "profit_p50": 3.0,
+            "profit_p95": 6.0,
+            "pct_profitable": 0.85,
+            "sensitivity": 0.9,
+        }
+        ms = {"n_seeds": 5, "convergence_pct": 0.80}
+        data = self._make_data(regime_analysis=regime, perturbation=perturb, multi_seed=ms)
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Robustness" in content
+        assert "Regime" in content
+        assert "Perturbation" in content
+        assert "Multi-Seed" in content
+
+    def test_warnings_section(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data(warnings=["Watch out!", "Be careful!"])
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Watch out!" in content
+        assert "Be careful!" in content
+
+    def test_no_warnings_section_when_empty(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data(warnings=[])
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Warnings" not in content
+
+    def test_consensus_section(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        data = self._make_data(consensus_params={"buy": {"rsi": 28, "volume_pct": 0.3}})
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "Consensus" in content
+        assert "rsi" in content
+        assert "28" in content
+
+    def test_param_stability_badges(self, tmp_path):
+        from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
+
+        stability = {
+            "rsi": {
+                "values": [25, 30, 28],
+                "median": 28,
+                "std": 2.5,
+                "std_over_range": 0.05,
+                "stable": True,
+                "unstable": False,
+            },
+            "volume": {
+                "values": [0.1, 0.9, 0.5],
+                "median": 0.5,
+                "std": 0.4,
+                "std_over_range": 0.50,
+                "stable": False,
+                "unstable": True,
+            },
+        }
+        data = self._make_data(param_stability=stability)
+        out = tmp_path / "report.html"
+        generate_wfa_html_report(data, out)
+        content = out.read_text()
+        assert "stable" in content
+        assert "unstable" in content
+
+
+class TestExportHTMLReport:
+    def test_export_html_report_method(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        results = [
+            WindowResult(
+                window=WalkForwardWindow(
+                    0,
+                    datetime(2018, 1, 1),
+                    datetime(2018, 6, 1),
+                    datetime(2018, 6, 8),
+                    datetime(2018, 8, 1),
+                ),
+                train_metrics={"profit_pct": 10, "trades": 100, "calmar": 2.0},
+                test_metrics={"profit_pct": 5, "trades": 50, "calmar": 1.0},
+            )
+        ]
+        data = wf._build_results_data(results, {}, {"buy": {"rsi": 30}})
+        path = wf._export_html_report(data)
+        assert path is not None
+        assert path.exists()
+        assert path.suffix == ".html"
+        content = path.read_text()
+        assert "<!DOCTYPE html>" in content

@@ -910,7 +910,7 @@ AVAILABLE_CLI_OPTIONS = {
         help="Window mode: rolling (fixed-size sliding) or "
         "anchored (train grows from start). Default: %(default)s.",
         type=str,
-        choices=["rolling", "anchored"],
+        choices=["rolling", "anchored", "cpcv"],
         default="rolling",
     ),
     "wf_multi_seed": Arg(
@@ -920,5 +920,19 @@ AVAILABLE_CLI_OPTIONS = {
         type=int,
         default=0,
         metavar="N",
+    ),
+    "wf_cpcv_groups": Arg(
+        "--wf-cpcv-groups",
+        help="Number of groups for CPCV mode (default: %(default)d).",
+        type=int,
+        default=6,
+        metavar="N",
+    ),
+    "wf_cpcv_test_groups": Arg(
+        "--wf-cpcv-test-groups",
+        help="Number of test groups held out per CPCV combination (default: %(default)d).",
+        type=int,
+        default=2,
+        metavar="K",
     ),
 }
