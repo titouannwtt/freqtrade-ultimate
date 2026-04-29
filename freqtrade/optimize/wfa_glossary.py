@@ -283,6 +283,66 @@ METRIC_GLOSSARY: dict[str, dict] = {
         ],
         "source": "Lopez de Prado",
     },
+    "skewness": {
+        "name": "Skewness",
+        "abbrev": "Skew",
+        "one_liner": "Return asymmetry. Negative = more large losses than gains",
+        "explanation": (
+            "Measures how asymmetric the return distribution is. "
+            "Negative skew (< -1) means occasional large losses — "
+            "typical of DCA without stop-loss. Positive skew means "
+            "occasional large wins."
+        ),
+        "thresholds": [
+            (-99, "extreme neg", "#ef4444"),
+            (-1, "negative", "#f97316"),
+            (-0.5, "mild neg", "#eab308"),
+            (0, "symmetric", "#84cc16"),
+            (0.5, "positive", "#22c55e"),
+        ],
+        "source": "Carver",
+    },
+    "kurtosis": {
+        "name": "Excess Kurtosis",
+        "abbrev": "Kurt",
+        "one_liner": "Tail heaviness. >3 = fat tails, extreme events more frequent",
+        "explanation": (
+            "Excess kurtosis above 3 means extreme gains and losses "
+            "are more frequent than a normal distribution predicts. "
+            "Risk models assuming normality underestimate real risk."
+        ),
+        "thresholds": [
+            (-99, "thin tails", "#22c55e"),
+            (3, "fat tails", "#eab308"),
+            (6, "extreme", "#ef4444"),
+        ],
+        "source": "Carver",
+    },
+    "profit_concentration": {
+        "name": "Profit Concentration",
+        "abbrev": "Conc.",
+        "one_liner": "How much profit depends on top trades. Low = robust",
+        "explanation": (
+            "If removing the top 1-2 trades collapses profit to zero, "
+            "the edge may be luck, not a repeatable pattern. "
+            "Robust strategies remain profitable without their best trades."
+        ),
+        "thresholds": [],
+        "source": "Community",
+    },
+    "expected_max_sharpe": {
+        "name": "Expected Maximum Sharpe",
+        "abbrev": "E[max SR]",
+        "one_liner": "Best Sharpe expected from N random trials: sqrt(2*ln(N))",
+        "explanation": (
+            "When you test N parameter combinations, the best Sharpe "
+            "is biased upward. From pure noise, the expected max is "
+            "sqrt(2*ln(N)). If your Sharpe is below this, "
+            "the result is likely a statistical artifact."
+        ),
+        "thresholds": [],
+        "source": "Bailey & Lopez de Prado",
+    },
 }
 
 

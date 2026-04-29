@@ -420,26 +420,204 @@ class Hyperopt:
         except Exception as e:
             logger.warning(f"HTML report generation failed: {e}")
 
+    @staticmethod
+    def _compute_skew_kurtosis(
+        values: list[float],
+    ) -> tuple[float, float]:
+        n = len(values)
+        if n < 3:
+            return 0.0, 0.0
+        mean = sum(values) / n
+        m2 = sum((x - mean) ** 2 for x in values) / n
+        m3 = sum((x - mean) ** 3 for x in values) / n
+        m4 = sum((x - mean) ** 4 for x in values) / n
+        if m2 < 1e-15:
+            return 0.0, 0.0
+        skew = m3 / (m2**1.5)
+        kurt = m4 / (m2**2) - 3.0
+        return round(skew, 4), round(kurt, 4)
+
+    @staticmethod
+    def _compute_pearson(xs: list[float], ys: list[float]) -> float:
+        n = len(xs)
+        if n < 3:
+            return 0.0
+        mx, my = sum(xs) / n, sum(ys) / n
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+        sx = sum((x - mx) ** 2 for x in xs) ** 0.5
+        sy = sum((y - my) ** 2 for y in ys) ** 0.5
+        if sx < 1e-15 or sy < 1e-15:
+            return 0.0
+        return round(cov / (sx * sy), 4)
+
+    @staticmethod
+    def _compute_histogram_bins(values: list[float], n_bins: int = 10) -> list[dict]:
+        if not values:
+            return []
+        lo, hi = min(values), max(values)
+        n_bins = min(n_bins, max(len(set(values)), 1))
+        bw = (hi - lo) / n_bins if n_bins > 0 and hi > lo else 1.0
+        bins = []
+        for i in range(n_bins):
+            edge_lo = lo + i * bw
+            edge_hi = lo + (i + 1) * bw
+            if i == n_bins - 1:
+                count = sum(1 for v in values if edge_lo <= v <= edge_hi)
+            else:
+                count = sum(1 for v in values if edge_lo <= v < edge_hi)
+            bins.append(
+                {
+                    "lo": round(edge_lo, 4),
+                    "hi": round(edge_hi, 4),
+                    "count": count,
+                }
+            )
+        return bins
+
+    @staticmethod
+    def _compute_trade_metrics(
+        best_trades: list[dict],
+    ) -> dict:
+        result: dict = {}
+        profit_ratios = [t.get("profit_ratio", 0.0) for t in best_trades if isinstance(t, dict)]
+        if len(profit_ratios) >= 10:
+            skew, kurt = Hyperopt._compute_skew_kurtosis(profit_ratios)
+            result["distribution_analysis"] = {
+                "skewness": skew,
+                "excess_kurtosis": kurt,
+                "n_trades": len(profit_ratios),
+                "skew_alert": skew < -1.0,
+                "kurtosis_alert": kurt > 3.0,
+            }
+        profits_sorted = sorted(
+            [t.get("profit_abs", 0.0) for t in best_trades if isinstance(t, dict)],
+            reverse=True,
+        )
+        if profits_sorted:
+            total_p = sum(profits_sorted)
+            w1 = total_p - profits_sorted[0]
+            w2 = total_p - sum(profits_sorted[:2]) if len(profits_sorted) >= 2 else total_p
+            result["sans_top_trade"] = {
+                "total_profit": round(total_p, 4),
+                "without_top1": round(w1, 4),
+                "without_top1_pct": (round(w1 / total_p * 100, 1) if total_p else 0.0),
+                "without_top2": round(w2, 4),
+                "without_top2_pct": (round(w2 / total_p * 100, 1) if total_p else 0.0),
+                "fragile": w2 <= 0,
+            }
+        pair_profits: dict[str, float] = {}
+        for t in best_trades:
+            if isinstance(t, dict):
+                pair = t.get("pair", "unknown")
+                pair_profits[pair] = pair_profits.get(pair, 0.0) + t.get("profit_abs", 0.0)
+        result["pair_profit_distribution"] = sorted(
+            [{"pair": p, "profit_abs": round(v, 4)} for p, v in pair_profits.items()],
+            key=lambda x: abs(x["profit_abs"]),
+            reverse=True,
+        )
+        return result
+
+    @staticmethod
+    def _compute_param_analytics(
+        param_values: dict[str, list],
+        top_10: list[dict],
+        rm: dict,
+    ) -> dict:
+        import statistics
+
+        result: dict = {}
+        num_params = {
+            k: v
+            for k, v in param_values.items()
+            if len(v) >= 3 and all(isinstance(x, (int, float)) for x in v)
+        }
+        pnames = sorted(num_params.keys())
+        corr: list[dict] = []
+        for i, pa in enumerate(pnames):
+            for pb in pnames[i + 1 :]:
+                r = Hyperopt._compute_pearson(
+                    [float(x) for x in num_params[pa]],
+                    [float(x) for x in num_params[pb]],
+                )
+                corr.append({"param_a": pa, "param_b": pb, "correlation": r})
+        result["param_correlation"] = corr
+        pc: dict = {"params": pnames, "lines": []}
+        for ep in top_10:
+            pd = ep.get("params_dict", {})
+            normalized = {}
+            for pn in pnames:
+                vals = num_params.get(pn, [])
+                v = pd.get(pn)
+                if isinstance(v, (int, float)) and vals and max(vals) > min(vals):
+                    normalized[pn] = round(
+                        (float(v) - min(vals)) / (max(vals) - min(vals)),
+                        4,
+                    )
+                else:
+                    normalized[pn] = 0.5
+            pc["lines"].append(
+                {
+                    "values": normalized,
+                    "loss": ep.get("loss", 0),
+                }
+            )
+        result["parallel_coords"] = pc
+        top10_profits = [e.get("results_metrics", {}).get("profit_total", 0.0) for e in top_10]
+        if len(top10_profits) >= 2:
+            med = statistics.median(top10_profits)
+            bp = rm.get("profit_total", 0.0)
+            gap = bp / med if med > 0 else float("inf")
+            result["best_vs_median_gap"] = {
+                "best_profit": round(bp * 100, 2),
+                "median_profit": round(med * 100, 2),
+                "gap_ratio": round(gap, 2),
+                "outlier": gap > 2.0,
+            }
+
+        def _band(key: str, mult: float = 1.0):
+            vals = [e.get("results_metrics", {}).get(key, 0) * mult for e in top_10]
+            if not vals:
+                return None
+            return {
+                "min": round(min(vals), 2),
+                "median": round(statistics.median(vals), 2),
+                "max": round(max(vals), 2),
+            }
+
+        result["dispersion_bands"] = {
+            "profit": _band("profit_total", 100),
+            "drawdown": _band("max_drawdown_account", 100),
+            "sharpe": _band("sharpe"),
+        }
+        return result
+
     def _do_export_html_report(self) -> None:
+        import math
+        import statistics
+
         from freqtrade.optimize.hyperopt_html_report import (
             generate_hyperopt_html_report,
         )
 
-        all_epochs = HyperoptTools._read_results(self.results_file)
-
-        all_losses = []
-        top_epochs = []
-        for ep in all_epochs:
-            loss = ep.get("loss", 1e6)
-            if loss < 1e5:
-                all_losses.append(loss)
-                top_epochs.append(ep)
+        all_losses: list[float] = []
+        epoch_dd_data: list[float] = []
+        top_epochs: list[dict] = []
+        for batch in HyperoptTools._read_results(self.results_file):
+            for ep in batch:
+                loss = ep.get("loss", 1e6)
+                if loss < 1e5:
+                    all_losses.append(loss)
+                    epoch_dd_data.append(
+                        ep.get("results_metrics", {}).get("max_drawdown_account", 0.0)
+                    )
+                    top_epochs.append(ep)
 
         top_epochs.sort(key=lambda e: e.get("loss", 1e6))
         top_10 = top_epochs[:10]
 
         best = self.current_best_epoch or {}
         rm = best.get("results_metrics", {})
+        best_trades = rm.get("trades", [])
 
         param_values: dict[str, list] = {}
         for ep in top_10:
@@ -451,8 +629,6 @@ class Hyperopt:
         for pname, vals in param_values.items():
             nums = [v for v in vals if isinstance(v, (int, float))]
             if len(nums) >= 2:
-                import statistics
-
                 std = statistics.stdev(nums)
                 rng = max(nums) - min(nums)
                 ratio = std / rng if rng > 0 else 0.0
@@ -465,12 +641,23 @@ class Hyperopt:
                     "unstable": ratio > 0.30,
                 }
 
-        sampler = self.config.get("hyperopt_sampler")
+        exp_max_sr = math.sqrt(2 * math.log(max(self.total_epochs, 2)))
+        observed_sharpe = rm.get("sharpe", 0.0)
+
+        trade_metrics = self._compute_trade_metrics(best_trades)
+        param_analytics = self._compute_param_analytics(param_values, top_10, rm)
+
+        loss_histogram = None
+        if all_losses:
+            loss_histogram = {
+                "bins": self._compute_histogram_bins(all_losses, 10),
+                "best_loss": round(min(all_losses), 4),
+            }
 
         data = {
             "strategy": self.config.get("strategy", "Unknown"),
             "hyperopt_loss": self.config.get("hyperopt_loss", "Unknown"),
-            "sampler": sampler,
+            "sampler": self.config.get("hyperopt_sampler"),
             "total_epochs": self.total_epochs,
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "stake_currency": self.config.get("stake_currency", "USDT"),
@@ -493,6 +680,33 @@ class Hyperopt:
                 "timerange": self.config.get("timerange", ""),
                 "timeframe": self.config.get("timeframe", ""),
             },
+            "dsr_analysis": {
+                "observed_sharpe": round(observed_sharpe, 4),
+                "expected_max_sharpe": round(exp_max_sr, 4),
+                "n_trials": self.total_epochs,
+                "genuine": observed_sharpe > exp_max_sr,
+            },
+            "distribution_analysis": trade_metrics.get("distribution_analysis"),
+            "sans_top_trade": trade_metrics.get("sans_top_trade"),
+            "pair_profit_distribution": trade_metrics.get("pair_profit_distribution", []),
+            "best_vs_median_gap": param_analytics.get("best_vs_median_gap"),
+            "param_correlation": param_analytics.get("param_correlation", []),
+            "loss_histogram": loss_histogram,
+            "parallel_coords": param_analytics.get("parallel_coords", {"params": [], "lines": []}),
+            "benchmark_comparison": {
+                "sharpe": {
+                    "value": round(rm.get("sharpe", 0), 4),
+                    "benchmark": 0.85,
+                    "above": rm.get("sharpe", 0) > 0.85,
+                },
+                "dd": {
+                    "value": round(rm.get("max_drawdown_account", 0) * 100, 2),
+                    "benchmark": 25.0,
+                    "above": rm.get("max_drawdown_account", 0) > 0.25,
+                },
+            },
+            "dispersion_bands": param_analytics.get("dispersion_bands", {}),
+            "epoch_dd_data": epoch_dd_data,
         }
 
         out_path = self.results_file.with_suffix(".html")

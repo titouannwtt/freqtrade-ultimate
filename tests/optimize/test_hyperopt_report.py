@@ -6,7 +6,17 @@ class TestHyperoptGlossary:
     def test_new_metric_entries_exist(self):
         from freqtrade.optimize.wfa_glossary import METRIC_GLOSSARY
 
-        new_slugs = {"sharpe", "sortino", "win_rate", "payoff_ratio", "cagr"}
+        new_slugs = {
+            "sharpe",
+            "sortino",
+            "win_rate",
+            "payoff_ratio",
+            "cagr",
+            "skewness",
+            "kurtosis",
+            "profit_concentration",
+            "expected_max_sharpe",
+        }
         assert new_slugs.issubset(set(METRIC_GLOSSARY.keys()))
 
     def test_sampler_glossary_completeness(self):
@@ -134,6 +144,71 @@ class TestHyperoptHTMLReport:
                 "timerange": "20230101-20250101",
                 "timeframe": "15m",
             },
+            "dsr_analysis": {
+                "observed_sharpe": 1.5,
+                "expected_max_sharpe": 3.03,
+                "n_trials": 100,
+                "genuine": False,
+            },
+            "distribution_analysis": {
+                "skewness": -1.2,
+                "excess_kurtosis": 4.5,
+                "n_trades": 50,
+                "skew_alert": True,
+                "kurtosis_alert": True,
+            },
+            "sans_top_trade": {
+                "total_profit": 150.0,
+                "without_top1": 120.0,
+                "without_top1_pct": 80.0,
+                "without_top2": 95.0,
+                "without_top2_pct": 63.3,
+                "fragile": False,
+            },
+            "pair_profit_distribution": [
+                {"pair": "BTC/USDT", "profit_abs": 80.0},
+                {"pair": "ETH/USDT", "profit_abs": 50.0},
+                {"pair": "SOL/USDT", "profit_abs": -10.0},
+            ],
+            "best_vs_median_gap": {
+                "best_profit": 15.0,
+                "median_profit": 6.0,
+                "gap_ratio": 2.5,
+                "outlier": True,
+            },
+            "param_correlation": [
+                {"param_a": "rsi", "param_b": "volume_pct", "correlation": 0.85},
+            ],
+            "loss_histogram": {
+                "bins": [
+                    {"lo": 0.0, "hi": 0.1, "count": 5},
+                    {"lo": 0.1, "hi": 0.2, "count": 15},
+                    {"lo": 0.2, "hi": 0.3, "count": 25},
+                    {"lo": 0.3, "hi": 0.4, "count": 20},
+                    {"lo": 0.4, "hi": 0.5, "count": 10},
+                ],
+                "best_loss": 0.05,
+            },
+            "parallel_coords": {
+                "params": ["rsi", "volume_pct", "exit_rsi"],
+                "lines": [
+                    {"values": {"rsi": 0.3, "volume_pct": 0.6, "exit_rsi": 0.8}, "loss": 0.5},
+                    {"values": {"rsi": 0.4, "volume_pct": 0.5, "exit_rsi": 0.7}, "loss": 0.6},
+                    {"values": {"rsi": 0.5, "volume_pct": 0.4, "exit_rsi": 0.6}, "loss": 0.7},
+                    {"values": {"rsi": 0.6, "volume_pct": 0.3, "exit_rsi": 0.5}, "loss": 0.8},
+                ],
+            },
+            "benchmark_comparison": {
+                "sharpe": {"value": 1.5, "benchmark": 0.85, "above": True},
+                "dd": {"value": 12.0, "benchmark": 25, "above": False},
+                "cagr": {"value": 20.0, "benchmark": 15, "above": True},
+            },
+            "dispersion_bands": {
+                "profit": {"min": 5.0, "median": 12.0, "max": 18.0},
+                "drawdown": {"min": 8.0, "median": 15.0, "max": 25.0},
+                "sharpe": {"min": 0.8, "median": 1.3, "max": 1.8},
+            },
+            "epoch_dd_data": [0.1, 0.2, 0.15, 0.25, 0.08, 0.35, 0.12],
         }
         data.update(overrides)
         return data
@@ -182,7 +257,15 @@ class TestHyperoptHTMLReport:
             generate_hyperopt_html_report,
         )
 
-        data = self._make_data(all_losses=[])
+        data = self._make_data(
+            all_losses=[],
+            pair_profit_distribution=[],
+            loss_histogram=None,
+            param_correlation=[],
+            parallel_coords={},
+            dispersion_bands={},
+            epoch_dd_data=[],
+        )
         out = tmp_path / "report.html"
         generate_hyperopt_html_report(data, out)
         content = out.read_text()
@@ -293,6 +376,264 @@ class TestHyperoptHTMLReport:
         generate_hyperopt_html_report(data, out)
         content = out.read_text()
         assert "Sampler" not in content or "sampler" in content.lower()
+
+    # ------------------------------------------------------------------
+    # Phase 4 — New metric/chart tests
+    # ------------------------------------------------------------------
+
+    def test_dsr_badge_overfit(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            dsr_analysis={
+                "observed_sharpe": 1.0,
+                "expected_max_sharpe": 3.03,
+                "n_trials": 100,
+                "genuine": False,
+            }
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "likely overfitted" in content
+        assert "#ef4444" in content
+
+    def test_dsr_badge_genuine(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            dsr_analysis={
+                "observed_sharpe": 4.0,
+                "expected_max_sharpe": 3.03,
+                "n_trials": 100,
+                "genuine": True,
+            }
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "likely genuine" in content
+        assert "#22c55e" in content
+
+    def test_skew_alert_negative(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            distribution_analysis={
+                "skewness": -1.5,
+                "excess_kurtosis": 1.0,
+                "n_trades": 50,
+                "skew_alert": True,
+                "kurtosis_alert": False,
+            }
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "tail risk" in content
+        assert "-1.50" in content
+
+    def test_kurtosis_alert(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            distribution_analysis={
+                "skewness": 0.0,
+                "excess_kurtosis": 5.0,
+                "n_trades": 50,
+                "skew_alert": False,
+                "kurtosis_alert": True,
+            }
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "fat tails" in content
+        assert "5.00" in content
+
+    def test_sans_top_trade_fragile(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            sans_top_trade={
+                "total_profit": 100.0,
+                "without_top1": -5.0,
+                "without_top1_pct": -5.0,
+                "without_top2": -20.0,
+                "without_top2_pct": -20.0,
+                "fragile": True,
+            }
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "FRAGILE" in content
+        assert "luck, not edge" in content
+
+    def test_sans_top_trade_robust(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Sans Top Trade" in content
+        assert "FRAGILE" not in content
+
+    def test_pair_distribution_svg(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Profit by Pair" in content
+        assert "BTC/USDT" in content
+        assert "SOL/USDT" in content
+
+    def test_loss_histogram_svg(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Loss Distribution" in content
+        assert "stroke-dasharray" in content
+
+    def test_parallel_coords_svg(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Parallel Coordinates" in content
+        assert "polyline" in content
+
+    def test_correlation_heatmap(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Parameter Correlation" in content
+        assert "0.85" in content
+
+    def test_no_heatmap_few_params(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(param_correlation=[])
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Parameter Correlation" not in content
+
+    def test_convergence_colored_dd(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            epoch_dd_data=[0.1, 0.2, 0.15, 0.25, 0.08, 0.35, 0.12],
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "#22c55e" in content
+        assert "#eab308" in content
+        assert "#ef4444" in content
+        assert "DD&lt;15%" in content
+
+    def test_dispersion_bands(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Top-10 Dispersion" in content
+        assert "Profit %" in content
+        assert "Sharpe" in content
+
+    def test_benchmark_annotations(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "benchmark" in content.lower()
+        assert "0.85" in content
+
+    def test_best_vs_median_outlier(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data()
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "Best vs. Median" in content
+        assert "outlier" in content
+        assert "2.50x" in content
+
+    def test_graceful_empty_data(self, tmp_path):
+        from freqtrade.optimize.hyperopt_html_report import (
+            generate_hyperopt_html_report,
+        )
+
+        data = self._make_data(
+            dsr_analysis=None,
+            distribution_analysis=None,
+            sans_top_trade=None,
+            pair_profit_distribution=[],
+            best_vs_median_gap=None,
+            param_correlation=[],
+            loss_histogram=None,
+            parallel_coords={},
+            benchmark_comparison={},
+            dispersion_bands={},
+            epoch_dd_data=[],
+            all_losses=[],
+        )
+        out = tmp_path / "report.html"
+        generate_hyperopt_html_report(data, out)
+        content = out.read_text()
+        assert "<!DOCTYPE html>" in content
+        assert "</html>" in content
+        assert "Concentration Risk" not in content
+        assert "Profit by Pair" not in content
+        assert "Loss Distribution" not in content
+        assert "Parallel Coordinates" not in content
 
 
 class TestHyperoptConsoleSummary:

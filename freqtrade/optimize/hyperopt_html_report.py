@@ -26,10 +26,17 @@ class HyperoptHTMLReport:
             self._html_header(),
             self._section_intro(),
             self._section_best_epoch(),
+            self._section_sans_top_trade(),
+            self._section_pair_distribution(),
             self._section_best_params(),
             self._section_top10_table(),
+            self._section_best_vs_median(),
+            self._section_dispersion_bands(),
             self._section_convergence_chart(),
+            self._section_loss_histogram(),
             self._section_param_agreement(),
+            self._section_param_correlation(),
+            self._section_parallel_coords(),
             self._section_loss_explanation(),
             self._section_sampler_explanation(),
             self._section_next_steps(),
@@ -80,6 +87,64 @@ class HyperoptHTMLReport:
             return f"{value:.{decimals}f}"
         except (TypeError, ValueError):
             return "N/A"
+
+    def _dsr_badge(self) -> str:
+        dsr = self.d.get("dsr_analysis")
+        if not dsr:
+            return ""
+        if dsr["genuine"]:
+            c, t = "#22c55e", "DSR: likely genuine"
+        else:
+            c = "#ef4444"
+            t = (
+                f"DSR: likely overfitted — E[max SR] "
+                f"from {dsr['n_trials']} trials "
+                f"= {dsr['expected_max_sharpe']:.2f}"
+            )
+        return f' <span class="badge-inline" style="color:{c}">({t})</span>'
+
+    def _skew_kurtosis_badges(self) -> str:
+        da = self.d.get("distribution_analysis")
+        if not da or da.get("n_trades", 0) < 10:
+            return ""
+        skew = da["skewness"]
+        kurt = da["excess_kurtosis"]
+        parts = []
+        skew_c = "#22c55e" if skew >= 0 else ("#ef4444" if skew < -1 else "#eab308")
+        skew_lbl = "tail risk" if skew < -1 else ""
+        parts.append(
+            f'<span class="kv"><span class="kv-label">'
+            f"{self._tip('skewness', 'Skewness')}</span><br>"
+            f'<span class="kv-value" style="color:{skew_c}">'
+            f"{skew:.2f}" + (f" — {skew_lbl}" if skew_lbl else "") + "</span></span>"
+        )
+        kurt_c = "#ef4444" if kurt > 6 else ("#eab308" if kurt > 3 else "#22c55e")
+        kurt_lbl = "fat tails" if kurt > 3 else ""
+        parts.append(
+            f'<span class="kv"><span class="kv-label">'
+            f"{self._tip('kurtosis', 'Kurtosis')}</span><br>"
+            f'<span class="kv-value" style="color:{kurt_c}">'
+            f"{kurt:.2f}" + (f" — {kurt_lbl}" if kurt_lbl else "") + "</span></span>"
+        )
+        return "".join(parts)
+
+    def _benchmark_tag(self, metric: str) -> str:
+        bm = self.d.get("benchmark_comparison", {}).get(metric)
+        if not bm:
+            return ""
+        if metric == "dd":
+            if bm["above"]:
+                return (
+                    ' <span class="badge-inline" style="color:#eab308">'
+                    f"(&gt; {bm['benchmark']:.0f}% benchmark)</span>"
+                )
+            return ""
+        if bm["above"]:
+            return (
+                ' <span class="badge-inline" style="color:#22c55e">'
+                f"(&gt; {bm['benchmark']} benchmark)</span>"
+            )
+        return ""
 
     # ------------------------------------------------------------------
     # Structure
@@ -162,6 +227,14 @@ details > div {
   padding: 8px 0 8px 16px; color: #bbb; font-size: 0.85em; line-height: 1.6;
 }
 .best-rank { color: #00d4ff; font-weight: bold; }
+.mini-section {
+  background: #16213e; padding: 12px 16px; border-radius: 6px;
+  margin: 10px 0; font-size: 0.88em; line-height: 1.6;
+}
+.badge-inline { font-size: 0.78em; margin-left: 6px; }
+.band-track {
+  fill: #2a2a4a; rx: 3; ry: 3;
+}
 """
 
     # ------------------------------------------------------------------
@@ -251,7 +324,10 @@ details > div {
                 self._tip("sqn", "SQN") + self._threshold_badge("sqn", sqn),
                 self._fmt(sqn),
             ),
-            kv("Sharpe", self._fmt(sharpe)),
+            kv(
+                "Sharpe" + self._dsr_badge(),
+                self._fmt(sharpe) + self._benchmark_tag("sharpe"),
+            ),
             kv("Sortino", self._fmt(sortino)),
             kv(
                 self._tip("pf", "Profit Factor") + self._threshold_badge("pf", pf),
@@ -259,7 +335,7 @@ details > div {
             ),
             kv(
                 self._tip("dd", "Max Drawdown"),
-                f"{self._fmt(dd_pct)}% ({self._fmt(dd_abs)} {sc})",
+                f"{self._fmt(dd_pct)}% ({self._fmt(dd_abs)} {sc})" + self._benchmark_tag("dd"),
             ),
             kv(
                 self._tip("expectancy", "Expectancy"),
@@ -268,6 +344,9 @@ details > div {
             kv("Expectancy Ratio", self._fmt(expectancy_ratio)),
             kv("Avg Holding", holding),
         ]
+        skew_html = self._skew_kurtosis_badges()
+        if skew_html:
+            rows.append(skew_html)
 
         return '<div class="section"><h2>Best Epoch — Summary</h2>' + "".join(rows) + "</div>"
 
@@ -344,17 +423,30 @@ details > div {
         all_losses = self.d.get("all_losses", [])
         if len(all_losses) < 2:
             return ""
+        dd_data = self.d.get("epoch_dd_data", [])
         return (
             '<div class="section"><h2>Convergence Chart</h2>'
-            + self._svg_convergence(all_losses)
+            + self._svg_convergence(all_losses, dd_data)
             + "</div>"
         )
 
     @staticmethod
-    def _svg_convergence(all_losses: list[float]) -> str:
+    def _dd_to_color(dd: float) -> str:
+        if dd < 0.15:
+            return "#22c55e"
+        if dd < 0.30:
+            return "#eab308"
+        return "#ef4444"
+
+    @staticmethod
+    def _svg_convergence(
+        all_losses: list[float],
+        dd_data: list[float] | None = None,
+    ) -> str:
         w, h = 900, 300
         pad_l, pad_r, pad_t, pad_b = 70, 20, 20, 40
         n = len(all_losses)
+        has_dd = dd_data and len(dd_data) == n
 
         finite = [v for v in all_losses if v == v and abs(v) < 1e15]
         if not finite:
@@ -373,14 +465,17 @@ details > div {
         def sy(v: float) -> float:
             return pad_t + (h - pad_t - pad_b) * (1 - (v - y_min) / (y_max - y_min))
 
-        # All epochs scatter (thin dots)
         dots = ""
         for i, v in enumerate(all_losses):
             if v != v or abs(v) >= 1e15:
                 continue
             cx = sx(i)
             cy = sy(v)
-            dots += f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1.5" fill="#3a4a6a" opacity="0.7"/>\n'
+            if has_dd:
+                color = HyperoptHTMLReport._dd_to_color(dd_data[i])
+            else:
+                color = "#3a4a6a"
+            dots += f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1.5" fill="{color}" opacity="0.7"/>\n'
 
         # Best-so-far line
         best_so_far: list[float] = []
@@ -444,6 +539,19 @@ details > div {
             f'<text x="{legend_x + 140}" y="18" fill="#888" font-size="10">'
             f"Best epoch</text>\n"
         )
+        if has_dd:
+            dd_lx = pad_l
+            legend += (
+                f'<circle cx="{dd_lx}" cy="{h - 5}" r="4" fill="#22c55e"/>'
+                f'<text x="{dd_lx + 8}" y="{h - 2}" fill="#888" '
+                f'font-size="8">DD&lt;15%</text>'
+                f'<circle cx="{dd_lx + 60}" cy="{h - 5}" r="4" fill="#eab308"/>'
+                f'<text x="{dd_lx + 68}" y="{h - 2}" fill="#888" '
+                f'font-size="8">DD 15-30%</text>'
+                f'<circle cx="{dd_lx + 140}" cy="{h - 5}" r="4" fill="#ef4444"/>'
+                f'<text x="{dd_lx + 148}" y="{h - 2}" fill="#888" '
+                f'font-size="8">DD&gt;30%</text>\n'
+            )
 
         return (
             f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">\n'
@@ -532,6 +640,368 @@ details > div {
             f"{rows}"
             "</table></div>"
         )
+
+    # ------------------------------------------------------------------
+    # New metric sections (A3, A4, B1-B3, C1, C3, C4)
+    # ------------------------------------------------------------------
+
+    def _section_sans_top_trade(self) -> str:
+        st = self.d.get("sans_top_trade")
+        if not st:
+            return ""
+        sc = self._esc(self.d.get("stake_currency", "USDC"))
+        fragile_badge = (
+            ' <span style="color:#ef4444;font-weight:bold">FRAGILE — luck, not edge</span>'
+            if st["fragile"]
+            else ""
+        )
+        return (
+            '<div class="section">'
+            f"<h2>{self._tip('profit_concentration', 'Concentration Risk')}"
+            " — Sans Top Trade Test</h2>"
+            '<div class="mini-section">'
+            f"Total profit: <strong>{self._fmt(st['total_profit'])}"
+            f" {sc}</strong><br>"
+            f"Without best trade: {self._fmt(st['without_top1'])}"
+            f" {sc} ({st['without_top1_pct']:.1f}%)<br>"
+            f"Without top 2 trades: {self._fmt(st['without_top2'])}"
+            f" {sc} ({st['without_top2_pct']:.1f}%)"
+            f"{fragile_badge}"
+            "</div></div>"
+        )
+
+    def _section_pair_distribution(self) -> str:
+        pairs = self.d.get("pair_profit_distribution", [])
+        if not pairs:
+            return ""
+        return (
+            '<div class="section"><h2>Profit by Pair</h2>' + self._svg_pair_bars(pairs) + "</div>"
+        )
+
+    @staticmethod
+    def _svg_pair_bars(pairs: list[dict]) -> str:
+        n = len(pairs)
+        row_h = 28
+        pad_l, pad_r, pad_t, pad_b = 120, 60, 10, 10
+        h = pad_t + n * row_h + pad_b
+        w = 900
+        bar_w = w - pad_l - pad_r
+        max_abs = max((abs(p["profit_abs"]) for p in pairs), default=1)
+        if max_abs < 1e-9:
+            max_abs = 1.0
+        lines = []
+        for i, p in enumerate(pairs):
+            y = pad_t + i * row_h + row_h // 2
+            val = p["profit_abs"]
+            bw = abs(val) / max_abs * bar_w * 0.8
+            color = "#22c55e" if val >= 0 else "#ef4444"
+            pair_name = html.escape(str(p["pair"])[:20])
+            lines.append(
+                f'<text x="{pad_l - 8}" y="{y + 4}" '
+                f'text-anchor="end" fill="#bbb" '
+                f'font-size="10">{pair_name}</text>'
+            )
+            lines.append(
+                f'<rect x="{pad_l}" y="{y - 8}" '
+                f'width="{bw:.1f}" height="16" '
+                f'fill="{color}" rx="2"/>'
+            )
+            lines.append(
+                f'<text x="{pad_l + bw + 6:.1f}" y="{y + 4}" '
+                f'fill="{color}" font-size="10">'
+                f"{val:+.2f}</text>"
+            )
+        body = "\n".join(lines)
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
+
+    def _section_best_vs_median(self) -> str:
+        bvm = self.d.get("best_vs_median_gap")
+        if not bvm:
+            return ""
+        badge = ""
+        if bvm["outlier"]:
+            badge = (
+                ' <span style="color:#eab308;font-size:0.85em">'
+                "(outlier — may be the luckiest, not the best)</span>"
+            )
+        return (
+            '<div class="section">'
+            "<h2>Best vs. Median Top-10</h2>"
+            '<div class="mini-section">'
+            f"Best epoch profit: <strong>{bvm['best_profit']:.2f}%"
+            f"</strong> | Median top-10: "
+            f"<strong>{bvm['median_profit']:.2f}%</strong>"
+            f" | Gap: <strong>{bvm['gap_ratio']:.2f}x</strong>"
+            f"{badge}"
+            "</div></div>"
+        )
+
+    def _section_dispersion_bands(self) -> str:
+        bands = self.d.get("dispersion_bands", {})
+        if not bands:
+            return ""
+        parts = ['<div class="section"><h2>Top-10 Dispersion</h2>']
+        labels = {
+            "profit": "Profit %",
+            "drawdown": "Max DD %",
+            "sharpe": "Sharpe",
+        }
+        for key, label in labels.items():
+            b = bands.get(key)
+            if not b:
+                continue
+            parts.append(self._svg_band(label, b))
+        parts.append("</div>")
+        return "".join(parts)
+
+    @staticmethod
+    def _svg_band(label: str, b: dict) -> str:
+        w, h = 500, 30
+        pad_l = 80
+        track_w = w - pad_l - 20
+        lo, med, hi = b["min"], b["median"], b["max"]
+        span = hi - lo if hi > lo else 1.0
+        x_lo = pad_l
+        x_med = pad_l + (med - lo) / span * track_w
+        x_hi = pad_l + track_w
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{w}" height="{h}" '
+            f'style="background:transparent;margin:2px 0">'
+            f'<text x="{pad_l - 8}" y="20" text-anchor="end" '
+            f'fill="#888" font-size="10">{html.escape(label)}</text>'
+            f'<rect x="{x_lo}" y="10" width="{track_w}" '
+            f'height="10" class="band-track"/>'
+            f'<rect x="{x_lo}" y="10" '
+            f'width="{x_hi - x_lo:.1f}" height="10" '
+            f'fill="#3a4a6a" rx="3"/>'
+            f'<line x1="{x_med:.1f}" y1="6" '
+            f'x2="{x_med:.1f}" y2="24" '
+            f'stroke="#00d4ff" stroke-width="2"/>'
+            f'<text x="{x_lo}" y="28" fill="#666" '
+            f'font-size="8">{lo:.2f}</text>'
+            f'<text x="{x_med:.1f}" y="28" fill="#00d4ff" '
+            f'font-size="8" text-anchor="middle">{med:.2f}</text>'
+            f'<text x="{x_hi}" y="28" fill="#666" '
+            f'font-size="8" text-anchor="end">{hi:.2f}</text>'
+            "</svg>"
+        )
+
+    def _section_loss_histogram(self) -> str:
+        hist = self.d.get("loss_histogram")
+        if not hist or not hist.get("bins"):
+            return ""
+        return (
+            '<div class="section"><h2>Loss Distribution</h2>'
+            + self._svg_loss_histogram(hist)
+            + "</div>"
+        )
+
+    @staticmethod
+    def _svg_loss_histogram(hist: dict) -> str:
+        bins = hist["bins"]
+        best_loss = hist["best_loss"]
+        w, h = 900, 250
+        pad_l, pad_r, pad_t, pad_b = 60, 20, 20, 40
+        max_count = max((b["count"] for b in bins), default=1)
+        if max_count == 0:
+            max_count = 1
+        n = len(bins)
+        bar_w = (w - pad_l - pad_r) / max(n, 1)
+
+        bars = []
+        for i, b in enumerate(bins):
+            bh = b["count"] / max_count * (h - pad_t - pad_b)
+            x = pad_l + i * bar_w
+            y = h - pad_b - bh
+            bars.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" '
+                f'width="{bar_w * 0.85:.1f}" '
+                f'height="{bh:.1f}" fill="#3a4a6a" rx="1"/>'
+            )
+            if i % max(1, n // 5) == 0:
+                bars.append(
+                    f'<text x="{x:.1f}" y="{h - 8}" fill="#888" font-size="9">{b["lo"]:.3f}</text>'
+                )
+
+        # Best loss marker
+        if bins:
+            lo_val = bins[0]["lo"]
+            hi_val = bins[-1]["hi"]
+            rng = hi_val - lo_val
+            if rng > 0:
+                bx = pad_l + (best_loss - lo_val) / rng * (w - pad_l - pad_r)
+                bars.append(
+                    f'<line x1="{bx:.1f}" y1="{pad_t}" '
+                    f'x2="{bx:.1f}" y2="{h - pad_b}" '
+                    f'stroke="#00d4ff" stroke-width="2" '
+                    f'stroke-dasharray="4"/>'
+                )
+                bars.append(
+                    f'<text x="{bx:.1f}" y="{pad_t - 4}" '
+                    f'fill="#00d4ff" font-size="9" '
+                    f'text-anchor="middle">best</text>'
+                )
+
+        bars.append(
+            f'<text x="{w // 2}" y="{h - 2}" fill="#888" '
+            f'font-size="11" text-anchor="middle">Loss</text>'
+        )
+        bars.append(
+            f'<text x="12" y="{h // 2}" fill="#888" '
+            f'font-size="11" text-anchor="middle" '
+            f'transform="rotate(-90 12 {h // 2})">Count</text>'
+        )
+
+        body = "\n".join(bars)
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
+
+    def _section_param_correlation(self) -> str:
+        corr = self.d.get("param_correlation", [])
+        if not corr:
+            return ""
+        params = sorted({c["param_a"] for c in corr} | {c["param_b"] for c in corr})
+        if len(params) < 2:
+            return ""
+        return (
+            '<div class="section">'
+            "<h2>Parameter Correlation (Top-10)</h2>"
+            + self._svg_correlation_heatmap(corr, params)
+            + "</div>"
+        )
+
+    @staticmethod
+    def _svg_correlation_heatmap(corr: list[dict], params: list[str]) -> str:
+        n = len(params)
+        cell = 45
+        pad_l, pad_t = 100, 80
+        w = pad_l + n * cell + 10
+        h = pad_t + n * cell + 10
+        idx = {p: i for i, p in enumerate(params)}
+        corr_map: dict[tuple[int, int], float] = {}
+        for c in corr:
+            ia = idx.get(c["param_a"], -1)
+            ib = idx.get(c["param_b"], -1)
+            if ia >= 0 and ib >= 0:
+                corr_map[(ia, ib)] = c["correlation"]
+                corr_map[(ib, ia)] = c["correlation"]
+
+        def _color(r: float) -> str:
+            if r > 0:
+                g = int(min(r, 1.0) * 180)
+                return f"rgb({g + 60}, {60}, {60})"
+            g = int(min(abs(r), 1.0) * 180)
+            return f"rgb({60}, {60}, {g + 60})"
+
+        elems = []
+        for i, p in enumerate(params):
+            lbl = html.escape(p[:12])
+            x = pad_l + i * cell + cell // 2
+            elems.append(
+                f'<text x="{x}" y="{pad_t - 8}" fill="#bbb" '
+                f'font-size="9" text-anchor="middle" '
+                f'transform="rotate(-45 {x} {pad_t - 8})">'
+                f"{lbl}</text>"
+            )
+            y = pad_t + i * cell + cell // 2 + 3
+            elems.append(
+                f'<text x="{pad_l - 6}" y="{y}" fill="#bbb" '
+                f'font-size="9" text-anchor="end">{lbl}</text>'
+            )
+        for i in range(n):
+            for j in range(n):
+                x = pad_l + j * cell
+                y = pad_t + i * cell
+                if i == j:
+                    r = 1.0
+                else:
+                    r = corr_map.get((i, j), 0.0)
+                col = _color(r)
+                elems.append(
+                    f'<rect x="{x}" y="{y}" '
+                    f'width="{cell - 2}" height="{cell - 2}" '
+                    f'fill="{col}" rx="3"/>'
+                )
+                tc = "#e0e0e0" if abs(r) > 0.3 else "#888"
+                elems.append(
+                    f'<text x="{x + cell // 2}" '
+                    f'y="{y + cell // 2 + 3}" fill="{tc}" '
+                    f'font-size="9" text-anchor="middle">'
+                    f"{r:.2f}</text>"
+                )
+        body = "\n".join(elems)
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
+
+    def _section_parallel_coords(self) -> str:
+        pc = self.d.get("parallel_coords", {})
+        params = pc.get("params", [])
+        lines = pc.get("lines", [])
+        if len(params) < 2 or len(lines) < 3:
+            return ""
+        return (
+            '<div class="section">'
+            "<h2>Parallel Coordinates (Top-10)</h2>" + self._svg_parallel_coords(pc) + "</div>"
+        )
+
+    @staticmethod
+    def _svg_parallel_coords(pc: dict) -> str:
+        params = pc["params"]
+        lines = pc["lines"]
+        n_params = len(params)
+        w, h = 900, 320
+        pad_l, pad_r, pad_t, pad_b = 40, 40, 50, 30
+        plot_w = w - pad_l - pad_r
+        plot_h = h - pad_t - pad_b
+
+        elems = []
+        # Axes
+        for i, p in enumerate(params):
+            x = pad_l + i * plot_w / max(n_params - 1, 1)
+            elems.append(
+                f'<line x1="{x:.1f}" y1="{pad_t}" '
+                f'x2="{x:.1f}" y2="{h - pad_b}" '
+                f'stroke="#2a2a4a" stroke-width="1"/>'
+            )
+            lbl = html.escape(p[:15])
+            elems.append(
+                f'<text x="{x:.1f}" y="{pad_t - 10}" '
+                f'fill="#bbb" font-size="9" text-anchor="middle">'
+                f"{lbl}</text>"
+            )
+
+        for li, line in enumerate(lines):
+            vals = line["values"]
+            opacity = max(0.15, 1.0 - li * 0.12)
+            color = "#00d4ff" if li == 0 else "#888"
+            stroke_w = 2.5 if li == 0 else 1.2
+            points = []
+            for pi, p in enumerate(params):
+                x = pad_l + pi * plot_w / max(n_params - 1, 1)
+                v = vals.get(p, 0.5)
+                y = pad_t + (1.0 - v) * plot_h
+                points.append(f"{x:.1f},{y:.1f}")
+            if points:
+                elems.append(
+                    f'<polyline points="{" ".join(points)}" '
+                    f'fill="none" stroke="{color}" '
+                    f'stroke-width="{stroke_w}" '
+                    f'opacity="{opacity:.2f}"/>'
+                )
+
+        # Legend
+        elems.append(
+            f'<line x1="{w - 120}" y1="12" '
+            f'x2="{w - 100}" y2="12" '
+            f'stroke="#00d4ff" stroke-width="2.5"/>'
+        )
+        elems.append(f'<text x="{w - 96}" y="15" fill="#00d4ff" font-size="9">Best epoch</text>')
+
+        body = "\n".join(elems)
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
+
+    # ------------------------------------------------------------------
+    # Existing explanation sections
+    # ------------------------------------------------------------------
 
     def _section_loss_explanation(self) -> str:
         loss_name = self.d.get("hyperopt_loss", "")

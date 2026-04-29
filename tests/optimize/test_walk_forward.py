@@ -3069,6 +3069,10 @@ class TestGlossary:
             "win_rate",
             "payoff_ratio",
             "cagr",
+            "skewness",
+            "kurtosis",
+            "profit_concentration",
+            "expected_max_sharpe",
         }
         assert expected_slugs == set(METRIC_GLOSSARY.keys())
 
