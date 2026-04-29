@@ -1300,7 +1300,7 @@ class FreqtradeBot(LoggingMixin):
                 leverage=leverage,
                 is_short=is_short,
                 trading_mode=self.trading_mode,
-                funding_fees=funding_fees,
+                funding_fees=funding_fees or 0.0,
                 amount_precision=self.exchange.get_precision_amount(pair),
                 price_precision=self.exchange.get_precision_price(pair),
                 precision_mode=self.exchange.precisionMode,

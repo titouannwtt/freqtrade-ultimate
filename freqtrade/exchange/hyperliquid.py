@@ -313,7 +313,7 @@ class Hyperliquid(Exchange):
 
     def get_funding_fees(
         self, pair: str, amount: float, is_short: bool, open_date: datetime
-    ) -> float:
+    ) -> float | None:
         """
         Fetch funding fees, either from the exchange (live) or calculates them
         based on funding rate/mark price history
@@ -330,6 +330,7 @@ class Hyperliquid(Exchange):
                 return self._fetch_and_calculate_funding_fees(pair, amount, is_short, open_date)
             except ExchangeError:
                 logger.warning(f"Could not update funding fees for {pair}.")
+                return None
         return 0.0
 
     @retrier

@@ -271,6 +271,12 @@ class Exchange:
 
         self._api = self._init_ccxt(exchange_conf, True, ccxt_config)
 
+        # Increase HTTP connection pool to avoid "Connection pool is full" warnings
+        from requests.adapters import HTTPAdapter
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        self._api.session.mount("https://", adapter)
+        self._api.session.mount("http://", adapter)
+
         ccxt_async_config = self._ccxt_config
         ccxt_async_config = deep_merge_dicts(
             exchange_conf.get("ccxt_config", {}), ccxt_async_config
@@ -3969,7 +3975,7 @@ class Exchange:
 
     def get_funding_fees(
         self, pair: str, amount: float, is_short: bool, open_date: datetime
-    ) -> float:
+    ) -> float | None:
         """
         Fetch funding fees, either from the exchange (live) or calculates them
         based on funding rate/mark price history
@@ -3990,6 +3996,7 @@ class Exchange:
                 return funding_fees
             except ExchangeError:
                 logger.warning(f"Could not update funding fees for {pair}.")
+                return None
 
         return 0.0
 
