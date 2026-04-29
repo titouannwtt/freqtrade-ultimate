@@ -58,6 +58,34 @@ class WindowResult:
     wfe: float = 0.0
 
 
+@dataclass
+class MCResult:
+    """Monte Carlo trade-shuffle simulation results.
+    Return is invariant under permutation (sum doesn't change).
+    Max DD and return/DD ratio are path-dependent — those vary."""
+
+    total_return_pct: float = 0.0
+    max_dd_p5: float = 0.0
+    max_dd_p50: float = 0.0
+    max_dd_p95: float = 0.0
+    return_dd_p5: float = 0.0
+    return_dd_p50: float = 0.0
+    return_dd_p95: float = 0.0
+    max_consec_loss_p50: int = 0
+    max_consec_loss_p95: int = 0
+    n_simulations: int = 0
+
+
+@dataclass
+class OOSEquityCurve:
+    """Concatenated OOS equity curve metrics."""
+
+    total_return_pct: float = 0.0
+    max_dd_pct: float = 0.0
+    k_ratio: float = 0.0
+    n_trades: int = 0
+
+
 class WalkForward:
     """
     Walk-forward analysis: N sequential cycles of
@@ -728,6 +756,125 @@ class WalkForward:
         return ann_test / ann_train
 
     # ------------------------------------------------------------------
+    # Monte Carlo trade shuffle (Phase 2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mc_trade_shuffle(
+        profits: list[float],
+        starting_balance: float = 1000.0,
+        n_simulations: int = 1000,
+        seed: int = 42,
+    ) -> MCResult:
+        """Shuffle OOS trade sequence N times. Return is invariant (sum
+        doesn't change), but max DD and return/DD ratio are path-dependent."""
+        if len(profits) < 5:
+            return MCResult()
+
+        rng = np.random.RandomState(seed)
+        arr = np.array(profits)
+        total_return_pct = (np.sum(arr) / starting_balance) * 100.0
+        max_dds = np.empty(n_simulations)
+        return_dds = np.empty(n_simulations)
+        max_consec = np.empty(n_simulations, dtype=int)
+
+        for i in range(n_simulations):
+            shuffled = rng.permutation(arr)
+            equity = starting_balance + np.cumsum(shuffled)
+
+            peak = np.maximum.accumulate(equity)
+            dd = (peak - equity) / peak
+            max_dd = float(np.max(dd)) * 100.0
+            max_dds[i] = max_dd
+            return_dds[i] = total_return_pct / max_dd if max_dd > 0.01 else 999.0
+
+            consec = 0
+            best_consec = 0
+            for p in shuffled:
+                if p < 0:
+                    consec += 1
+                    best_consec = max(best_consec, consec)
+                else:
+                    consec = 0
+            max_consec[i] = best_consec
+
+        return MCResult(
+            total_return_pct=float(total_return_pct),
+            max_dd_p5=float(np.percentile(max_dds, 5)),
+            max_dd_p50=float(np.percentile(max_dds, 50)),
+            max_dd_p95=float(np.percentile(max_dds, 95)),
+            return_dd_p5=float(np.percentile(return_dds, 5)),
+            return_dd_p50=float(np.percentile(return_dds, 50)),
+            return_dd_p95=float(np.percentile(return_dds, 95)),
+            max_consec_loss_p50=int(np.percentile(max_consec, 50)),
+            max_consec_loss_p95=int(np.percentile(max_consec, 95)),
+            n_simulations=n_simulations,
+        )
+
+    # ------------------------------------------------------------------
+    # OOS equity curve concatenation (Phase 2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _concat_oos_equity(
+        all_results: list[WindowResult],
+        starting_balance: float = 1000.0,
+    ) -> OOSEquityCurve:
+        """Concatenate OOS trade profits chronologically into one equity curve."""
+        all_profits: list[float] = []
+        for r in all_results:
+            all_profits.extend(r.test_trade_profits)
+
+        if not all_profits:
+            return OOSEquityCurve()
+
+        arr = np.array(all_profits)
+        equity = starting_balance + np.cumsum(arr)
+        final_return = (equity[-1] / starting_balance - 1.0) * 100.0
+
+        peak = np.maximum.accumulate(equity)
+        dd = (peak - equity) / peak
+        max_dd = float(np.max(dd)) * 100.0
+
+        k = WalkForward._k_ratio_equity(equity)
+
+        return OOSEquityCurve(
+            total_return_pct=round(final_return, 2),
+            max_dd_pct=round(max_dd, 2),
+            k_ratio=round(k, 4),
+            n_trades=len(all_profits),
+        )
+
+    @staticmethod
+    def _k_ratio_equity(equity: np.ndarray) -> float:
+        """K-ratio: slope / SE(slope) of equity curve."""
+        n = len(equity)
+        if n < 3:
+            return 0.0
+        x = np.arange(n, dtype=float)
+        slope, intercept = np.polyfit(x, equity, 1)
+        if slope <= 0:
+            return 0.0
+        residuals = equity - (slope * x + intercept)
+        ss_res = np.sum(residuals**2)
+        se_slope = np.sqrt(ss_res / (n - 2)) / np.sqrt(np.sum((x - x.mean()) ** 2))
+        if se_slope < 1e-10:
+            return 20.0
+        return slope / se_slope
+
+    # ------------------------------------------------------------------
+    # Carver discount factor (Phase 2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _carver_discount(mc: MCResult) -> float:
+        """p5/p50 of return/DD ratio — how fragile is the risk-adjusted edge.
+        1.0 = robust, low = edge quality degrades badly in worst-case paths (tip #111)."""
+        if abs(mc.return_dd_p50) < 1e-8:
+            return 0.0
+        return mc.return_dd_p5 / mc.return_dd_p50
+
+    # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
 
@@ -758,6 +905,8 @@ class WalkForward:
         consensus: dict[str, Any],
         dsr: float | None = None,
         all_oos_profits: list[float] | None = None,
+        mc: MCResult | None = None,
+        oos_equity: OOSEquityCurve | None = None,
     ) -> Path:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = self._wfa_dir / (f"{self.strategy_name}_wfa_results_{ts}.json")
@@ -777,6 +926,7 @@ class WalkForward:
             dsr,
             len(stability),
             oos_profits,
+            mc=mc,
         )
 
         data: dict[str, Any] = {
@@ -795,6 +945,29 @@ class WalkForward:
                 "expectancy": round(oos_expectancy, 6),
             },
             "verdict": {"grade": grade, "checks": {n: ok for n, ok, _ in checks}},
+            "monte_carlo": {
+                "n_simulations": mc.n_simulations,
+                "total_return_pct": round(mc.total_return_pct, 2),
+                "max_dd_p5": round(mc.max_dd_p5, 2),
+                "max_dd_p50": round(mc.max_dd_p50, 2),
+                "max_dd_p95": round(mc.max_dd_p95, 2),
+                "return_dd_p5": round(mc.return_dd_p5, 4),
+                "return_dd_p50": round(mc.return_dd_p50, 4),
+                "return_dd_p95": round(mc.return_dd_p95, 4),
+                "max_consec_loss_p50": mc.max_consec_loss_p50,
+                "max_consec_loss_p95": mc.max_consec_loss_p95,
+                "carver_discount": round(self._carver_discount(mc), 4),
+            }
+            if mc
+            else None,
+            "oos_equity": {
+                "total_return_pct": oos_equity.total_return_pct,
+                "max_dd_pct": oos_equity.max_dd_pct,
+                "k_ratio": oos_equity.k_ratio,
+                "n_trades": oos_equity.n_trades,
+            }
+            if oos_equity and oos_equity.n_trades > 0
+            else None,
             "windows": [],
             "holdout": None,
             "param_stability": stability,
@@ -926,6 +1099,7 @@ class WalkForward:
         stability: dict[str, dict[str, Any]],
         run_count: int,
         n_params: int = 0,
+        mc: MCResult | None = None,
     ) -> list[str]:
         warnings: list[str] = []
 
@@ -974,6 +1148,30 @@ class WalkForward:
                 f"({profitable / n:.0%}) — below 50% threshold (Pardo)"
             )
 
+        if mc and mc.n_simulations > 0:
+            warnings.extend(self._mc_warnings(mc))
+
+        return warnings
+
+    @staticmethod
+    def _mc_warnings(mc: MCResult) -> list[str]:
+        warnings: list[str] = []
+        if mc.return_dd_p5 < 0.5:
+            warnings.append(
+                f"MC return/DD p5={mc.return_dd_p5:.2f} — "
+                f"risk-adjusted edge fragile under reordering (Carver #111)"
+            )
+        if mc.max_dd_p50 > 0.1 and mc.max_dd_p95 / mc.max_dd_p50 > 2.0:
+            warnings.append(
+                f"MC tail DD risk: p95={mc.max_dd_p95:.1f}% vs "
+                f"p50={mc.max_dd_p50:.1f}% "
+                f"({mc.max_dd_p95 / mc.max_dd_p50:.1f}x) — fat tail (tip #117)"
+            )
+        if mc.max_consec_loss_p95 >= 10:
+            warnings.append(
+                f"MC p95 consecutive losses: {mc.max_consec_loss_p95} — "
+                f"prepare for extended losing streaks"
+            )
         return warnings
 
     # ------------------------------------------------------------------
@@ -995,6 +1193,7 @@ class WalkForward:
         dsr: float | None,
         n_params: int,
         all_oos_profits: list[float],
+        mc: MCResult | None = None,
     ) -> tuple[str, list[tuple[str, bool, str]]]:
         checks: list[tuple[str, bool, str]] = []
 
@@ -1109,10 +1308,20 @@ class WalkForward:
             )
         )
 
+        # 10. MC return/DD p5 > 0.5 (Carver #111: edge survives reordering)
+        if mc and mc.n_simulations > 0:
+            checks.append(
+                (
+                    "mc_robust",
+                    mc.return_dd_p5 > 0.5,
+                    f"MC return/DD p5={mc.return_dd_p5:.2f}",
+                )
+            )
+
         # Grade
         passed = sum(1 for _, ok, _ in checks if ok)
         total = len(checks)
-        critical_names = {"profitable_windows", "dsr", "sqn"}
+        critical_names = {"profitable_windows", "dsr", "sqn", "mc_robust"}
         has_critical_fail = any(not ok and name in critical_names for name, ok, _ in checks)
 
         if has_critical_fail and passed < total * 0.3:
@@ -1190,6 +1399,8 @@ class WalkForward:
         n_params: int = 0,
         skewness: float = 0.0,
         kurtosis: float = 3.0,
+        mc: MCResult | None = None,
+        oos_equity: OOSEquityCurve | None = None,
     ) -> None:
         sep = "=" * 70
         n = len(all_results)
@@ -1218,6 +1429,8 @@ class WalkForward:
             )
 
         self._log_holdout_and_oos(all_results, oos_profits)
+
+        self._log_mc_and_equity(mc, oos_equity)
 
         logger.info("")
         logger.info("  Consensus (weighted by Calmar):")
@@ -1248,6 +1461,7 @@ class WalkForward:
             dsr,
             n_params,
             oos_profits,
+            mc=mc,
         )
         logger.info("")
         logger.info(f"  VERDICT: {grade} — {self.VERDICT_LABELS.get(grade, '')}")
@@ -1261,6 +1475,36 @@ class WalkForward:
                 logger.info(f"  ! {w}")
 
         logger.info(sep)
+
+    @staticmethod
+    def _log_mc_and_equity(
+        mc: MCResult | None,
+        oos_equity: OOSEquityCurve | None,
+    ) -> None:
+        if mc and mc.n_simulations > 0:
+            discount = WalkForward._carver_discount(mc)
+            logger.info("")
+            logger.info(
+                f"  MC Shuffle ({mc.n_simulations} sims):  "
+                f"Return {mc.total_return_pct:+.1f}% | "
+                f"Max DD p5/p50/p95: "
+                f"{mc.max_dd_p5:.1f}% / {mc.max_dd_p50:.1f}% / {mc.max_dd_p95:.1f}%"
+            )
+            logger.info(
+                f"                          "
+                f"Return/DD p5/p50/p95: "
+                f"{mc.return_dd_p5:.2f} / {mc.return_dd_p50:.2f} / {mc.return_dd_p95:.2f} | "
+                f"Consec loss p95: {mc.max_consec_loss_p95}"
+            )
+            logger.info(f"  Carver discount: {discount:.2f} (return/DD p5/p50)")
+
+        if oos_equity and oos_equity.n_trades > 0:
+            logger.info(
+                f"  OOS Equity: {oos_equity.total_return_pct:+.1f}% | "
+                f"Max DD {oos_equity.max_dd_pct:.1f}% | "
+                f"K-ratio {oos_equity.k_ratio:.2f} | "
+                f"{oos_equity.n_trades} trades"
+            )
 
     # ------------------------------------------------------------------
     # Holdout
@@ -1478,6 +1722,16 @@ class WalkForward:
             kurtosis=kurtosis,
         )
 
+        # Monte Carlo trade shuffle
+        starting_balance = self.config.get("dry_run_wallet", 1000)
+        mc = self._mc_trade_shuffle(
+            all_oos_profits,
+            starting_balance=starting_balance,
+        )
+
+        # OOS equity curve concatenation
+        oos_equity = self._concat_oos_equity(self.results, starting_balance=starting_balance)
+
         self._run_holdout(
             consensus, default_params, strategy_json, original_json_bytes, exchange=exchange
         )
@@ -1494,6 +1748,8 @@ class WalkForward:
             consensus,
             dsr=dsr,
             all_oos_profits=all_oos_profits,
+            mc=mc,
+            oos_equity=oos_equity,
         )
 
         # Log and get run count
@@ -1505,6 +1761,7 @@ class WalkForward:
             stability,
             run_count,
             n_params=n_params,
+            mc=mc,
         )
 
         # Report
@@ -1518,4 +1775,6 @@ class WalkForward:
             n_params=n_params,
             skewness=skewness,
             kurtosis=kurtosis,
+            mc=mc,
+            oos_equity=oos_equity,
         )

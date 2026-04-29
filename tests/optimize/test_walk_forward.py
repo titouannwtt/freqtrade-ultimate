@@ -14,6 +14,8 @@ from freqtrade.commands.walk_forward_commands import start_walk_forward
 from freqtrade.enums import RunMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.walk_forward import (
+    MCResult,
+    OOSEquityCurve,
     WalkForward,
     WalkForwardWindow,
     WindowResult,
@@ -1491,3 +1493,420 @@ class TestMarketContext:
         warnings = wf._generate_warning_flags(results, {}, 1)
         assert any("top-1" in w for w in warnings)
         assert any("HHI" in w for w in warnings)
+
+
+# ------------------------------------------------------------------
+# Phase 2: Monte Carlo trade shuffle
+# ------------------------------------------------------------------
+
+
+class TestMonteCarlo:
+    def test_mc_basic_distribution(self):
+        import numpy as np
+
+        rng = np.random.RandomState(123)
+        profits = list(rng.normal(0.5, 2.0, 200))
+        mc = WalkForward._mc_trade_shuffle(profits, starting_balance=1000, n_simulations=500)
+        assert mc.n_simulations == 500
+        assert mc.max_dd_p5 < mc.max_dd_p95
+        assert mc.return_dd_p5 < mc.return_dd_p95
+        assert mc.total_return_pct > 0
+
+    def test_mc_empty_profits(self):
+        mc = WalkForward._mc_trade_shuffle([], starting_balance=1000)
+        assert mc.n_simulations == 0
+        assert mc.total_return_pct == 0.0
+
+    def test_mc_few_trades(self):
+        mc = WalkForward._mc_trade_shuffle([1.0, 2.0, 3.0], starting_balance=1000)
+        assert mc.n_simulations == 0
+
+    def test_mc_all_positive(self):
+        profits = [1.0] * 50
+        mc = WalkForward._mc_trade_shuffle(profits, starting_balance=1000, n_simulations=100)
+        assert mc.total_return_pct > 0
+        assert mc.max_consec_loss_p50 == 0
+        assert mc.return_dd_p50 > 0
+
+    def test_mc_all_negative(self):
+        profits = [-1.0] * 50
+        mc = WalkForward._mc_trade_shuffle(profits, starting_balance=1000, n_simulations=100)
+        assert mc.total_return_pct < 0
+        assert mc.max_consec_loss_p50 == 50
+
+    def test_mc_deterministic_with_seed(self):
+        import numpy as np
+
+        rng = np.random.RandomState(99)
+        profits = list(rng.normal(0.3, 1.0, 100))
+        mc1 = WalkForward._mc_trade_shuffle(profits, seed=42, n_simulations=200)
+        mc2 = WalkForward._mc_trade_shuffle(profits, seed=42, n_simulations=200)
+        assert mc1.max_dd_p50 == mc2.max_dd_p50
+        assert mc1.return_dd_p50 == mc2.return_dd_p50
+
+    def test_mc_dd_varies_with_order(self):
+        import numpy as np
+
+        rng = np.random.RandomState(77)
+        profits = list(rng.normal(0.2, 3.0, 300))
+        mc = WalkForward._mc_trade_shuffle(profits, starting_balance=1000, n_simulations=500)
+        assert mc.max_dd_p5 < mc.max_dd_p95
+
+
+# ------------------------------------------------------------------
+# Phase 2: OOS equity curve concatenation
+# ------------------------------------------------------------------
+
+
+class TestOOSEquityCurve:
+    def test_concat_basic(self):
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                test_trade_profits=[10.0, 5.0, -3.0, 8.0, 2.0],
+            ),
+            WindowResult(
+                window=w,
+                test_trade_profits=[4.0, -2.0, 6.0, 1.0],
+            ),
+        ]
+        eq = WalkForward._concat_oos_equity(results, starting_balance=1000)
+        assert eq.n_trades == 9
+        assert eq.total_return_pct > 0
+        assert eq.max_dd_pct >= 0
+        assert eq.k_ratio > 0
+
+    def test_concat_empty(self):
+        eq = WalkForward._concat_oos_equity([], starting_balance=1000)
+        assert eq.n_trades == 0
+        assert eq.total_return_pct == 0.0
+
+    def test_concat_negative(self):
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(window=w, test_trade_profits=[-10.0, -5.0, -3.0]),
+        ]
+        eq = WalkForward._concat_oos_equity(results, starting_balance=1000)
+        assert eq.total_return_pct < 0
+        assert eq.max_dd_pct > 0
+
+    def test_k_ratio_equity_basic(self):
+        import numpy as np
+
+        equity = np.array([1000.0, 1010.0, 1020.0, 1030.0, 1040.0])
+        k = WalkForward._k_ratio_equity(equity)
+        assert k > 5.0
+
+    def test_k_ratio_equity_short(self):
+        import numpy as np
+
+        equity = np.array([1000.0, 1010.0])
+        k = WalkForward._k_ratio_equity(equity)
+        assert k == 0.0
+
+
+# ------------------------------------------------------------------
+# Phase 2: Carver discount factor
+# ------------------------------------------------------------------
+
+
+class TestCarverDiscount:
+    def test_discount_basic(self):
+        mc = MCResult(return_dd_p5=1.0, return_dd_p50=2.0, n_simulations=1000)
+        d = WalkForward._carver_discount(mc)
+        assert d == pytest.approx(0.5, abs=0.01)
+
+    def test_discount_low_p5(self):
+        mc = MCResult(return_dd_p5=0.1, return_dd_p50=2.0, n_simulations=1000)
+        d = WalkForward._carver_discount(mc)
+        assert d < 0.1
+
+    def test_discount_zero_p50(self):
+        mc = MCResult(return_dd_p5=1.0, return_dd_p50=0.0, n_simulations=1000)
+        d = WalkForward._carver_discount(mc)
+        assert d == 0.0
+
+    def test_discount_robust(self):
+        mc = MCResult(return_dd_p5=1.6, return_dd_p50=2.0, n_simulations=1000)
+        d = WalkForward._carver_discount(mc)
+        assert d == pytest.approx(0.8, abs=0.01)
+
+
+# ------------------------------------------------------------------
+# Phase 2: MC warnings
+# ------------------------------------------------------------------
+
+
+class TestMCWarnings:
+    def test_mc_return_dd_low_warning(self):
+        mc = MCResult(
+            return_dd_p5=0.2,
+            return_dd_p50=1.5,
+            max_dd_p50=8.0,
+            max_dd_p95=12.0,
+            n_simulations=1000,
+        )
+        warnings = WalkForward._mc_warnings(mc)
+        assert any("return/DD" in w for w in warnings)
+
+    def test_mc_tail_dd_warning(self):
+        mc = MCResult(max_dd_p50=5.0, max_dd_p95=12.0, n_simulations=1000)
+        warnings = WalkForward._mc_warnings(mc)
+        assert any("tail DD" in w for w in warnings)
+
+    def test_mc_consec_loss_warning(self):
+        mc = MCResult(max_consec_loss_p95=12, n_simulations=1000)
+        warnings = WalkForward._mc_warnings(mc)
+        assert any("consecutive losses" in w for w in warnings)
+
+    def test_mc_no_warnings_clean(self):
+        mc = MCResult(
+            return_dd_p5=1.5,
+            return_dd_p50=2.5,
+            return_dd_p95=4.0,
+            max_dd_p5=2.0,
+            max_dd_p50=5.0,
+            max_dd_p95=8.0,
+            max_consec_loss_p50=3,
+            max_consec_loss_p95=6,
+            n_simulations=1000,
+        )
+        warnings = WalkForward._mc_warnings(mc)
+        assert len(warnings) == 0
+
+
+# ------------------------------------------------------------------
+# Phase 2: MC verdict check
+# ------------------------------------------------------------------
+
+
+class TestMCVerdict:
+    @staticmethod
+    def _realistic_profits(n, mean=0.1, std=0.5):
+        import numpy as np
+
+        rng = np.random.RandomState(42)
+        return list(rng.normal(mean, std, n))
+
+    def _make_results(self, n_windows=5, trades=60, profit=5.0):
+        results = []
+        for i in range(n_windows):
+            w = WalkForwardWindow(
+                index=i,
+                train_start=datetime(2018, 1, 1, tzinfo=UTC),
+                train_end=datetime(2018, 6, 1, tzinfo=UTC),
+                test_start=datetime(2018, 6, 8, tzinfo=UTC),
+                test_end=datetime(2018, 9, 1, tzinfo=UTC),
+            )
+            tp = self._realistic_profits(trades)
+            results.append(
+                WindowResult(
+                    window=w,
+                    train_metrics={
+                        "profit_pct": 20,
+                        "calmar": 5,
+                        "max_dd_pct": 5,
+                        "trades": 200,
+                    },
+                    test_metrics={
+                        "profit_pct": profit,
+                        "calmar": 2,
+                        "max_dd_pct": 4,
+                        "trades": trades,
+                        "profit_factor": 1.5,
+                        "sqn": 2.5,
+                        "expectancy": 0.01,
+                    },
+                    test_trade_count=trades,
+                    test_trade_profits=tp,
+                    wfe=0.6,
+                )
+            )
+        return results
+
+    def test_mc_check_in_verdict_pass(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results()
+        stability = {f"p{i}": {"stable": True, "unstable": False} for i in range(10)}
+        all_profits = self._realistic_profits(300, mean=0.1, std=0.5)
+        mc = MCResult(return_dd_p5=1.5, return_dd_p50=2.5, n_simulations=1000)
+        grade, checks = wf._compute_verdict(results, stability, 0.97, 10, all_profits, mc=mc)
+        mc_check = [c for c in checks if c[0] == "mc_robust"]
+        assert len(mc_check) == 1
+        assert mc_check[0][1] is True
+        assert grade == "A"
+
+    def test_mc_check_in_verdict_fail(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results()
+        stability = {f"p{i}": {"stable": True, "unstable": False} for i in range(10)}
+        all_profits = self._realistic_profits(300, mean=0.1, std=0.5)
+        mc = MCResult(return_dd_p5=0.1, return_dd_p50=2.0, n_simulations=1000)
+        grade, checks = wf._compute_verdict(results, stability, 0.97, 10, all_profits, mc=mc)
+        mc_check = [c for c in checks if c[0] == "mc_robust"]
+        assert len(mc_check) == 1
+        assert mc_check[0][1] is False
+        assert grade in ("C", "D")
+
+    def test_no_mc_means_no_mc_check(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results()
+        stability = {f"p{i}": {"stable": True, "unstable": False} for i in range(10)}
+        all_profits = self._realistic_profits(300, mean=0.1, std=0.5)
+        _grade, checks = wf._compute_verdict(results, stability, 0.97, 10, all_profits)
+        mc_check = [c for c in checks if c[0] == "mc_robust"]
+        assert len(mc_check) == 0
+
+
+# ------------------------------------------------------------------
+# Phase 2: Report MC and equity logging
+# ------------------------------------------------------------------
+
+
+class TestReportMCAndEquity:
+    def test_format_report_with_mc(self, walkforward_conf, caplog):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"profit_pct": 10, "calmar": 2, "max_dd_pct": 5, "trades": 50},
+                test_metrics={"profit_pct": 5, "calmar": 1, "max_dd_pct": 8, "trades": 30},
+            )
+        ]
+        mc = MCResult(
+            total_return_pct=12.5,
+            max_dd_p5=3.0,
+            max_dd_p50=6.0,
+            max_dd_p95=10.0,
+            return_dd_p5=1.2,
+            return_dd_p50=2.1,
+            return_dd_p95=4.0,
+            max_consec_loss_p50=3,
+            max_consec_loss_p95=7,
+            n_simulations=1000,
+        )
+        oos_eq = OOSEquityCurve(
+            total_return_pct=12.5,
+            max_dd_pct=8.1,
+            k_ratio=1.82,
+            n_trades=200,
+        )
+        with caplog.at_level("INFO"):
+            wf._format_report(
+                results,
+                {},
+                {"buy": {"rsi": 30}},
+                [],
+                mc=mc,
+                oos_equity=oos_eq,
+            )
+        assert log_has_re(r".*MC Shuffle.*1000 sims.*", caplog)
+        assert log_has_re(r".*Carver discount.*", caplog)
+        assert log_has_re(r".*OOS Equity.*12\.5.*", caplog)
+
+    def test_log_mc_and_equity_no_mc(self, caplog):
+        with caplog.at_level("INFO"):
+            WalkForward._log_mc_and_equity(None, None)
+        assert not any("MC Shuffle" in r.message for r in caplog.records)
+
+
+# ------------------------------------------------------------------
+# Phase 2: Export JSON with MC and equity
+# ------------------------------------------------------------------
+
+
+class TestExportPhase2:
+    def test_export_includes_mc_and_equity(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"profit_pct": 10},
+                test_metrics={"profit_pct": 5},
+            )
+        ]
+        mc = MCResult(
+            total_return_pct=12.5,
+            max_dd_p5=3.0,
+            max_dd_p50=6.0,
+            max_dd_p95=10.0,
+            return_dd_p5=1.2,
+            return_dd_p50=2.1,
+            return_dd_p95=4.0,
+            max_consec_loss_p50=3,
+            max_consec_loss_p95=7,
+            n_simulations=1000,
+        )
+        oos_eq = OOSEquityCurve(
+            total_return_pct=12.5,
+            max_dd_pct=8.1,
+            k_ratio=1.82,
+            n_trades=200,
+        )
+        path = wf._export_results_json(
+            results,
+            {},
+            {"buy": {"rsi": 30}},
+            mc=mc,
+            oos_equity=oos_eq,
+        )
+        with path.open("r") as f:
+            data = rapidjson.load(f)
+
+        assert data["monte_carlo"] is not None
+        assert data["monte_carlo"]["n_simulations"] == 1000
+        assert data["monte_carlo"]["return_dd_p5"] == 1.2
+        assert data["monte_carlo"]["carver_discount"] is not None
+        assert data["monte_carlo"]["max_consec_loss_p95"] == 7
+        assert data["oos_equity"] is not None
+        assert data["oos_equity"]["total_return_pct"] == 12.5
+        assert data["oos_equity"]["k_ratio"] == 1.82
+
+    def test_export_no_mc(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"profit_pct": 10},
+                test_metrics={"profit_pct": 5},
+            )
+        ]
+        path = wf._export_results_json(results, {}, {"buy": {"rsi": 30}})
+        with path.open("r") as f:
+            data = rapidjson.load(f)
+        assert data["monte_carlo"] is None
+        assert data["oos_equity"] is None
