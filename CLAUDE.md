@@ -84,7 +84,8 @@ strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 
 | Path | Purpose |
 |------|---------|
-| `live_configs/` | Bot JSON configs (one per bot instance) |
+| `live_configs/` | **Live-only** bot JSON configs (one per bot instance) — never use for hyperopt/backtest |
+| `backtest_configs/` | Configs for hyperopt and backtesting (pair lists, MOT variants) |
 | `live_configs/_hyperliquid_freqtrade_access.json` | API keys (**gitignored, never commit**) |
 | `user_data/strategies/` | All custom strategies (.py) + hyperopt params (.json) |
 | `database/` | SQLite trade databases (one per bot) |
