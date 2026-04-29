@@ -129,7 +129,7 @@ class HyperoptHTMLReport:
         return "".join(parts)
 
     def _benchmark_tag(self, metric: str) -> str:
-        bm = self.d.get("benchmark_comparison", {}).get(metric)
+        bm = (self.d.get("benchmark_comparison") or {}).get(metric)
         if not bm:
             return ""
         if metric == "dd":
@@ -420,10 +420,10 @@ details > div {
         )
 
     def _section_convergence_chart(self) -> str:
-        all_losses = self.d.get("all_losses", [])
+        all_losses = self.d.get("all_losses") or []
         if len(all_losses) < 2:
             return ""
-        dd_data = self.d.get("epoch_dd_data", [])
+        dd_data = self.d.get("epoch_dd_data") or []
         return (
             '<div class="section"><h2>Convergence Chart</h2>'
             + self._svg_convergence(all_losses, dd_data)
@@ -737,7 +737,7 @@ details > div {
         )
 
     def _section_dispersion_bands(self) -> str:
-        bands = self.d.get("dispersion_bands", {})
+        bands = self.d.get("dispersion_bands") or {}
         if not bands:
             return ""
         parts = ['<div class="section"><h2>Top-10 Dispersion</h2>']
@@ -933,7 +933,7 @@ details > div {
         return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
 
     def _section_parallel_coords(self) -> str:
-        pc = self.d.get("parallel_coords", {})
+        pc = self.d.get("parallel_coords") or {}
         params = pc.get("params", [])
         lines = pc.get("lines", [])
         if len(params) < 2 or len(lines) < 3:
@@ -977,7 +977,7 @@ details > div {
             points = []
             for pi, p in enumerate(params):
                 x = pad_l + pi * plot_w / max(n_params - 1, 1)
-                v = vals.get(p, 0.5)
+                v = max(0.0, min(1.0, vals.get(p, 0.5)))
                 y = pad_t + (1.0 - v) * plot_h
                 points.append(f"{x:.1f},{y:.1f}")
             if points:
@@ -1043,9 +1043,10 @@ details > div {
         profit_total = m.get("profit_total", 0.0)
         calmar = m.get("calmar", 0.0)
         total_trades = m.get("total_trades", 0)
-        cfg = self.d.get("config_summary", {})
+        cfg = self.d.get("config_summary") or {}
         min_trades = cfg.get("min_trades", 0)
-        strategy = self._esc(self.d.get("strategy", "Strategy"))
+        strategy_raw = self.d.get("strategy", "Strategy")
+        strategy = self._esc(strategy_raw)
 
         if profit_total <= 0:
             guidance = (
@@ -1070,7 +1071,7 @@ details > div {
         else:
             guidance = (
                 "Results look reasonable. Copy the best parameters to your strategy JSON "
-                f"(user_data/strategies/{strategy}.json). Validate with a live dry-run "
+                f"(user_data/strategies/{strategy_raw}.json). Validate with a live dry-run "
                 "at minimal size before scaling capital. Monitor Calmar and win rate "
                 "against these in-sample numbers — sustained divergence signals regime change."
             )

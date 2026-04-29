@@ -495,16 +495,17 @@ class Hyperopt:
         )
         if profits_sorted:
             total_p = sum(profits_sorted)
-            w1 = total_p - profits_sorted[0]
-            w2 = total_p - sum(profits_sorted[:2]) if len(profits_sorted) >= 2 else total_p
-            result["sans_top_trade"] = {
-                "total_profit": round(total_p, 4),
-                "without_top1": round(w1, 4),
-                "without_top1_pct": (round(w1 / total_p * 100, 1) if total_p else 0.0),
-                "without_top2": round(w2, 4),
-                "without_top2_pct": (round(w2 / total_p * 100, 1) if total_p else 0.0),
-                "fragile": w2 <= 0,
-            }
+            if total_p > 0:
+                w1 = total_p - profits_sorted[0]
+                w2 = total_p - sum(profits_sorted[:2]) if len(profits_sorted) >= 2 else total_p
+                result["sans_top_trade"] = {
+                    "total_profit": round(total_p, 4),
+                    "without_top1": round(w1, 4),
+                    "without_top1_pct": round(w1 / total_p * 100, 1),
+                    "without_top2": round(w2, 4),
+                    "without_top2_pct": round(w2 / total_p * 100, 1),
+                    "fragile": w2 <= 0,
+                }
         pair_profits: dict[str, float] = {}
         for t in best_trades:
             if isinstance(t, dict):
@@ -566,12 +567,15 @@ class Hyperopt:
         if len(top10_profits) >= 2:
             med = statistics.median(top10_profits)
             bp = rm.get("profit_total", 0.0)
-            gap = bp / med if med > 0 else float("inf")
+            if med > 0:
+                gap = round(bp / med, 2)
+            else:
+                gap = 0.0
             result["best_vs_median_gap"] = {
                 "best_profit": round(bp * 100, 2),
                 "median_profit": round(med * 100, 2),
-                "gap_ratio": round(gap, 2),
-                "outlier": gap > 2.0,
+                "gap_ratio": gap,
+                "outlier": med > 0 and gap > 2.0,
             }
 
         def _band(key: str, mult: float = 1.0):
