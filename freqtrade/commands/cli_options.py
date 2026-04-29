@@ -879,32 +879,28 @@ AVAILABLE_CLI_OPTIONS = {
     ),
     "wf_train_ratio": Arg(
         "--wf-train-ratio",
-        help="Ratio of training data per window, range 0.5-0.9 "
-        "(default: %(default)s).",
+        help="Ratio of training data per window, range 0.5-0.9 (default: %(default)s).",
         type=float,
         metavar="FLOAT",
         default=0.75,
     ),
     "wf_embargo_days": Arg(
         "--wf-embargo-days",
-        help="Embargo days between train and test windows for purging "
-        "(default: %(default)d).",
+        help="Embargo days between train and test windows for purging (default: %(default)d).",
         type=int,
         metavar="INT",
         default=7,
     ),
     "wf_holdout_months": Arg(
         "--wf-holdout-months",
-        help="Reserve N months at end as final holdout. "
-        "0 = no holdout (default: %(default)d).",
+        help="Reserve N months at end as final holdout. 0 = no holdout (default: %(default)d).",
         type=int,
         metavar="INT",
         default=0,
     ),
     "wf_min_test_trades": Arg(
         "--wf-min-test-trades",
-        help="Minimum trades per test window for significance "
-        "(default: %(default)d).",
+        help="Minimum trades per test window for significance (default: %(default)d).",
         type=check_int_positive,
         metavar="INT",
         default=30,
@@ -916,5 +912,13 @@ AVAILABLE_CLI_OPTIONS = {
         type=str,
         choices=["rolling", "anchored"],
         default="rolling",
+    ),
+    "wf_multi_seed": Arg(
+        "--wf-multi-seed",
+        help="Run N extra hyperopts with different seeds on the last window "
+        "to check convergence. 0 = disabled. Default: %(default)d.",
+        type=int,
+        default=0,
+        metavar="N",
     ),
 }

@@ -15,7 +15,10 @@ from freqtrade.enums import RunMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.walk_forward import (
     MCResult,
+    MultiSeedResult,
     OOSEquityCurve,
+    PerturbResult,
+    RegimeAnalysis,
     WalkForward,
     WalkForwardWindow,
     WindowResult,
@@ -1910,3 +1913,517 @@ class TestExportPhase2:
             data = rapidjson.load(f)
         assert data["monte_carlo"] is None
         assert data["oos_equity"] is None
+
+
+# ------------------------------------------------------------------
+# Phase 3: Regime analysis
+# ------------------------------------------------------------------
+
+
+class TestRegimeAnalysis:
+    @staticmethod
+    def _make_result(regime: str, profit: float, dd: float = 5.0) -> WindowResult:
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2020, 1, 1, tzinfo=UTC),
+            train_end=datetime(2020, 6, 1, tzinfo=UTC),
+            test_start=datetime(2020, 6, 8, tzinfo=UTC),
+            test_end=datetime(2020, 9, 1, tzinfo=UTC),
+        )
+        return WindowResult(
+            window=w,
+            test_metrics={"profit_pct": profit, "max_dd_pct": dd},
+            market_context={"regime": regime},
+        )
+
+    def test_regime_basic(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = [
+            self._make_result("bull", 10.0),
+            self._make_result("bull", 8.0),
+            self._make_result("bear", -5.0),
+            self._make_result("range", 2.0),
+        ]
+        regime = wf._analyze_regimes(results)
+        assert "bull" in regime.regime_stats
+        assert "bear" in regime.regime_stats
+        assert "range" in regime.regime_stats
+        assert regime.regime_stats["bull"]["windows"] == 2
+        assert regime.regime_stats["bull"]["avg_profit"] > 0
+        assert regime.worst_regime == "bear"
+        assert regime.regime_dependent is True
+
+    def test_regime_all_profitable(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = [
+            self._make_result("bull", 10.0),
+            self._make_result("bear", 3.0),
+            self._make_result("range", 5.0),
+        ]
+        regime = wf._analyze_regimes(results)
+        assert regime.regime_dependent is False
+
+    def test_regime_empty(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        regime = wf._analyze_regimes([])
+        assert regime.regime_stats == {}
+        assert regime.regime_dependent is False
+
+    def test_regime_no_context(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2020, 1, 1, tzinfo=UTC),
+            train_end=datetime(2020, 6, 1, tzinfo=UTC),
+            test_start=datetime(2020, 6, 8, tzinfo=UTC),
+            test_end=datetime(2020, 9, 1, tzinfo=UTC),
+        )
+        results = [WindowResult(window=w, test_metrics={"profit_pct": 5.0})]
+        regime = wf._analyze_regimes(results)
+        assert regime.regime_stats == {}
+
+
+# ------------------------------------------------------------------
+# Phase 3: Parameter perturbation
+# ------------------------------------------------------------------
+
+
+class TestPerturbParams:
+    def test_perturb_basic(self):
+        consensus = {"buy": {"rsi": 30, "vol": 2.5}}
+        search_ranges = {"rsi": (10.0, 50.0), "vol": (1.0, 5.0)}
+        variants = WalkForward._perturb_params(consensus, search_ranges, 0.05, 10, seed=42)
+        assert len(variants) == 10
+        for v in variants:
+            assert "buy" in v
+            assert "rsi" in v["buy"]
+            assert "vol" in v["buy"]
+            assert 10 <= v["buy"]["rsi"] <= 50
+            assert 1.0 <= v["buy"]["vol"] <= 5.0
+
+    def test_perturb_deterministic(self):
+        consensus = {"buy": {"rsi": 30}}
+        ranges = {"rsi": (10.0, 50.0)}
+        v1 = WalkForward._perturb_params(consensus, ranges, 0.05, 5, seed=99)
+        v2 = WalkForward._perturb_params(consensus, ranges, 0.05, 5, seed=99)
+        assert v1 == v2
+
+    def test_perturb_int_stays_int(self):
+        consensus = {"buy": {"rsi": 30}}
+        ranges = {"rsi": (10.0, 50.0)}
+        variants = WalkForward._perturb_params(consensus, ranges, 0.10, 20, seed=42)
+        for v in variants:
+            assert isinstance(v["buy"]["rsi"], int)
+
+    def test_perturb_clamps_to_range(self):
+        consensus = {"buy": {"rsi": 49}}
+        ranges = {"rsi": (10.0, 50.0)}
+        variants = WalkForward._perturb_params(consensus, ranges, 0.50, 100, seed=42)
+        for v in variants:
+            assert 10 <= v["buy"]["rsi"] <= 50
+
+    def test_perturb_non_numeric_passthrough(self):
+        consensus = {"buy": {"rsi": 30, "method": "ema"}}
+        ranges = {"rsi": (10.0, 50.0)}
+        variants = WalkForward._perturb_params(consensus, ranges, 0.05, 5, seed=42)
+        for v in variants:
+            assert v["buy"]["method"] == "ema"
+
+
+# ------------------------------------------------------------------
+# Phase 3: Regime warnings
+# ------------------------------------------------------------------
+
+
+class TestRegimeWarnings:
+    def test_regime_dependent_warning(self):
+        regime = RegimeAnalysis(
+            regime_stats={
+                "bull": {"windows": 3, "avg_profit": 8.0, "pct_profitable": 1.0},
+                "bear": {"windows": 2, "avg_profit": -4.0, "pct_profitable": 0.0},
+            },
+            worst_regime="bear",
+            regime_dependent=True,
+        )
+        warnings = WalkForward._regime_warnings(regime)
+        assert any("bear" in w for w in warnings)
+        assert any("tip #69" in w for w in warnings)
+
+    def test_single_regime_warning(self):
+        regime = RegimeAnalysis(
+            regime_stats={"bull": {"windows": 5, "avg_profit": 10.0}},
+            worst_regime="bull",
+            regime_dependent=False,
+        )
+        warnings = WalkForward._regime_warnings(regime)
+        assert any("Only bull" in w for w in warnings)
+
+    def test_no_regime_warnings(self):
+        regime = RegimeAnalysis(
+            regime_stats={
+                "bull": {"windows": 2, "avg_profit": 5.0},
+                "bear": {"windows": 2, "avg_profit": 3.0},
+            },
+            worst_regime="bear",
+            regime_dependent=False,
+        )
+        warnings = WalkForward._regime_warnings(regime)
+        assert len(warnings) == 0
+
+
+# ------------------------------------------------------------------
+# Phase 3: Perturbation warnings
+# ------------------------------------------------------------------
+
+
+class TestPerturbWarnings:
+    def test_low_profitable_warning(self):
+        perturb = PerturbResult(
+            n_perturbations=60,
+            pct_profitable=0.50,
+            sensitivity=1.0,
+            profit_p5=-2.0,
+            profit_p50=1.0,
+            profit_p95=5.0,
+        )
+        warnings = WalkForward._perturb_warnings(perturb)
+        assert any("50%" in w for w in warnings)
+        assert any("tip #81" in w for w in warnings)
+
+    def test_high_sensitivity_warning(self):
+        perturb = PerturbResult(
+            n_perturbations=60,
+            pct_profitable=0.90,
+            sensitivity=3.5,
+            profit_p5=0.5,
+            profit_p50=2.0,
+            profit_p95=4.0,
+        )
+        warnings = WalkForward._perturb_warnings(perturb)
+        assert any("sensitivity" in w for w in warnings)
+
+    def test_clean_perturb(self):
+        perturb = PerturbResult(
+            n_perturbations=60,
+            pct_profitable=0.85,
+            sensitivity=0.8,
+            profit_p5=1.0,
+            profit_p50=3.0,
+            profit_p95=6.0,
+        )
+        warnings = WalkForward._perturb_warnings(perturb)
+        assert len(warnings) == 0
+
+
+# ------------------------------------------------------------------
+# Phase 3: Multi-seed warnings
+# ------------------------------------------------------------------
+
+
+class TestMultiSeedWarnings:
+    def test_low_convergence_warning(self):
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.40, seed_params=[])
+        warnings = WalkForward._multi_seed_warnings(ms)
+        assert any("40%" in w for w in warnings)
+        assert any("tip #76" in w for w in warnings)
+
+    def test_good_convergence(self):
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.80, seed_params=[])
+        warnings = WalkForward._multi_seed_warnings(ms)
+        assert len(warnings) == 0
+
+
+# ------------------------------------------------------------------
+# Phase 3: Verdict checks #11 and #12
+# ------------------------------------------------------------------
+
+
+class TestPhase3Verdict:
+    @staticmethod
+    def _make_base_results():
+        windows = []
+        for i in range(5):
+            w = WalkForwardWindow(
+                index=i,
+                train_start=datetime(2020, 1, 1, tzinfo=UTC),
+                train_end=datetime(2020, 6, 1, tzinfo=UTC),
+                test_start=datetime(2020, 6, 8, tzinfo=UTC),
+                test_end=datetime(2020, 9, 1, tzinfo=UTC),
+            )
+            windows.append(
+                WindowResult(
+                    window=w,
+                    train_metrics={"profit_pct": 10, "trades": 100, "max_dd_pct": 5},
+                    test_metrics={
+                        "profit_pct": 5,
+                        "calmar": 1.5,
+                        "max_dd_pct": 4,
+                        "trades": 60,
+                        "sharpe": 1.2,
+                        "profit_factor": 1.5,
+                    },
+                    wfe=0.6,
+                    test_trade_count=60,
+                )
+            )
+        return windows
+
+    def test_verdict_with_perturb_pass(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_base_results()
+        stability = {"rsi": {"stable": True}, "vol": {"stable": True}}
+        perturb = PerturbResult(
+            n_perturbations=60,
+            pct_profitable=0.85,
+            sensitivity=0.5,
+            profit_p5=1.0,
+            profit_p50=3.0,
+            profit_p95=6.0,
+        )
+        _, checks = wf._compute_verdict(
+            results,
+            stability,
+            0.98,
+            2,
+            [0.01] * 300,
+            perturb=perturb,
+        )
+        check_dict = {name: ok for name, ok, _ in checks}
+        assert "param_robust" in check_dict
+        assert check_dict["param_robust"] is True
+
+    def test_verdict_with_perturb_fail(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_base_results()
+        stability = {"rsi": {"stable": True}}
+        perturb = PerturbResult(
+            n_perturbations=60,
+            pct_profitable=0.50,
+            sensitivity=2.5,
+            profit_p5=-3.0,
+            profit_p50=0.5,
+            profit_p95=4.0,
+        )
+        _, checks = wf._compute_verdict(
+            results,
+            stability,
+            0.98,
+            1,
+            [0.01] * 300,
+            perturb=perturb,
+        )
+        check_dict = {name: ok for name, ok, _ in checks}
+        assert check_dict["param_robust"] is False
+
+    def test_verdict_with_multi_seed_pass(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_base_results()
+        stability = {"rsi": {"stable": True}}
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.80, seed_params=[])
+        _, checks = wf._compute_verdict(
+            results,
+            stability,
+            0.98,
+            1,
+            [0.01] * 300,
+            multi_seed=ms,
+        )
+        check_dict = {name: ok for name, ok, _ in checks}
+        assert "seed_convergence" in check_dict
+        assert check_dict["seed_convergence"] is True
+
+    def test_verdict_with_multi_seed_fail(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_base_results()
+        stability = {"rsi": {"stable": True}}
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.40, seed_params=[])
+        _, checks = wf._compute_verdict(
+            results,
+            stability,
+            0.98,
+            1,
+            [0.01] * 300,
+            multi_seed=ms,
+        )
+        check_dict = {name: ok for name, ok, _ in checks}
+        assert check_dict["seed_convergence"] is False
+
+    def test_verdict_no_phase3(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_base_results()
+        stability = {"rsi": {"stable": True}}
+        _, checks = wf._compute_verdict(
+            results,
+            stability,
+            0.98,
+            1,
+            [0.01] * 300,
+        )
+        check_names = {name for name, _, _ in checks}
+        assert "param_robust" not in check_names
+        assert "seed_convergence" not in check_names
+
+
+# ------------------------------------------------------------------
+# Phase 3: Export JSON with Phase 3 fields
+# ------------------------------------------------------------------
+
+
+class TestExportPhase3:
+    def test_export_with_phase3(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"profit_pct": 10},
+                test_metrics={"profit_pct": 5},
+            )
+        ]
+        regime = RegimeAnalysis(
+            regime_stats={
+                "bull": {"windows": 3, "avg_profit": 8.0, "avg_dd": 4.0, "pct_profitable": 1.0}
+            },
+            worst_regime="bull",
+            regime_dependent=False,
+        )
+        perturb = PerturbResult(
+            n_perturbations=60,
+            profit_p5=1.0,
+            profit_p50=3.5,
+            profit_p95=7.0,
+            pct_profitable=0.85,
+            sensitivity=0.9,
+        )
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.80, seed_params=[])
+
+        path = wf._export_results_json(
+            results,
+            {},
+            {"buy": {"rsi": 30}},
+            regime=regime,
+            perturb=perturb,
+            multi_seed=ms,
+        )
+        with path.open("r") as f:
+            data = rapidjson.load(f)
+
+        assert data["regime_analysis"] is not None
+        assert data["regime_analysis"]["worst_regime"] == "bull"
+        assert data["perturbation"] is not None
+        assert data["perturbation"]["n_perturbations"] == 60
+        assert data["perturbation"]["pct_profitable"] == 0.85
+        assert data["multi_seed"] is not None
+        assert data["multi_seed"]["n_seeds"] == 5
+        assert data["multi_seed"]["convergence_pct"] == 0.80
+
+    def test_export_no_phase3(self, walkforward_conf, tmp_path):
+        wf = WalkForward(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"profit_pct": 10},
+                test_metrics={"profit_pct": 5},
+            )
+        ]
+        path = wf._export_results_json(results, {}, {"buy": {"rsi": 30}})
+        with path.open("r") as f:
+            data = rapidjson.load(f)
+        assert data["regime_analysis"] is None
+        assert data["perturbation"] is None
+        assert data["multi_seed"] is None
+
+
+# ------------------------------------------------------------------
+# Phase 3: Grade extraction
+# ------------------------------------------------------------------
+
+
+class TestGradeFromChecks:
+    def test_all_pass(self):
+        checks = [("profitable_windows", True, ""), ("dsr", True, ""), ("sqn", True, "")]
+        assert WalkForward._grade_from_checks(checks) == "A"
+
+    def test_critical_fail(self):
+        checks = [
+            ("profitable_windows", False, ""),
+            ("dsr", True, ""),
+            ("sqn", True, ""),
+            ("wfe", True, ""),
+        ]
+        assert WalkForward._grade_from_checks(checks) == "D"
+
+    def test_critical_fail_with_low_pass_rate(self):
+        checks = [
+            ("profitable_windows", False, ""),
+            ("dsr", False, ""),
+            ("sqn", False, ""),
+            ("wfe", False, ""),
+        ]
+        assert WalkForward._grade_from_checks(checks) == "F"
+
+    def test_most_pass(self):
+        checks = [
+            ("profitable_windows", True, ""),
+            ("dsr", True, ""),
+            ("sqn", True, ""),
+            ("wfe", False, ""),
+        ]
+        assert WalkForward._grade_from_checks(checks) == "B"
+
+
+# ------------------------------------------------------------------
+# Phase 3: Log phase3
+# ------------------------------------------------------------------
+
+
+class TestLogPhase3:
+    def test_log_regime(self, caplog):
+        regime = RegimeAnalysis(
+            regime_stats={
+                "bull": {"windows": 3, "avg_profit": 8.0},
+                "bear": {"windows": 2, "avg_profit": -2.0},
+            },
+            worst_regime="bear",
+            regime_dependent=True,
+        )
+        WalkForward._log_phase3(regime, None, None)
+        assert "Regime breakdown" in caplog.text
+
+    def test_log_perturb(self, caplog):
+        perturb = PerturbResult(
+            n_perturbations=60,
+            profit_p5=1.0,
+            profit_p50=3.0,
+            profit_p95=6.0,
+            pct_profitable=0.85,
+            sensitivity=0.9,
+        )
+        WalkForward._log_phase3(None, perturb, None)
+        assert "Perturbation" in caplog.text
+        assert "85%" in caplog.text
+
+    def test_log_multi_seed(self, caplog):
+        ms = MultiSeedResult(n_seeds=5, convergence_pct=0.80, seed_params=[])
+        WalkForward._log_phase3(None, None, ms)
+        assert "Multi-seed" in caplog.text
+        assert "80%" in caplog.text
+
+    def test_log_all_none(self, caplog):
+        WalkForward._log_phase3(None, None, None)
+        assert "Regime" not in caplog.text
+        assert "Perturbation" not in caplog.text
+        assert "Multi-seed" not in caplog.text

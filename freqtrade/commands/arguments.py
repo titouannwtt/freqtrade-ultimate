@@ -300,6 +300,7 @@ ARGS_WALK_FORWARD = [
     "wf_holdout_months",
     "wf_min_test_trades",
     "wf_mode",
+    "wf_multi_seed",
 ]
 
 # Command level configs - keep at the bottom of the above definitions

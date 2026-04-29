@@ -86,6 +86,36 @@ class OOSEquityCurve:
     n_trades: int = 0
 
 
+@dataclass
+class RegimeAnalysis:
+    """OOS performance breakdown by market regime."""
+
+    regime_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    worst_regime: str = ""
+    regime_dependent: bool = False
+
+
+@dataclass
+class PerturbResult:
+    """Parameter perturbation test results."""
+
+    n_perturbations: int = 0
+    profit_p5: float = 0.0
+    profit_p50: float = 0.0
+    profit_p95: float = 0.0
+    pct_profitable: float = 0.0
+    sensitivity: float = 0.0
+
+
+@dataclass
+class MultiSeedResult:
+    """Multi-seed hyperopt convergence results."""
+
+    n_seeds: int = 0
+    convergence_pct: float = 0.0
+    seed_params: list[dict[str, Any]] = field(default_factory=list)
+
+
 class WalkForward:
     """
     Walk-forward analysis: N sequential cycles of
@@ -875,6 +905,159 @@ class WalkForward:
         return mc.return_dd_p5 / mc.return_dd_p50
 
     # ------------------------------------------------------------------
+    # Regime analysis (Phase 3C)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _analyze_regimes(all_results: list[WindowResult]) -> RegimeAnalysis:
+        """Group OOS windows by market regime and detect regime dependency."""
+        buckets: dict[str, list[WindowResult]] = {}
+        for r in all_results:
+            regime = (r.market_context or {}).get("regime", "")
+            if regime:
+                buckets.setdefault(regime, []).append(r)
+
+        if not buckets:
+            return RegimeAnalysis()
+
+        stats: dict[str, dict[str, Any]] = {}
+        for regime, results in sorted(buckets.items()):
+            profits = [r.test_metrics.get("profit_pct", 0) for r in results]
+            dds = [r.test_metrics.get("max_dd_pct", 0) for r in results]
+            n_profitable = sum(1 for p in profits if p > 0)
+            stats[regime] = {
+                "windows": len(results),
+                "avg_profit": round(float(np.mean(profits)), 2),
+                "avg_dd": round(float(np.mean(dds)), 2),
+                "pct_profitable": round(n_profitable / len(results), 2),
+            }
+
+        profitable_regimes = [r for r, s in stats.items() if s["avg_profit"] > 0]
+        losing_regimes = [r for r, s in stats.items() if s["avg_profit"] <= 0]
+        worst = min(stats, key=lambda r: stats[r]["avg_profit"]) if stats else ""
+        dependent = len(profitable_regimes) > 0 and len(losing_regimes) > 0
+
+        return RegimeAnalysis(
+            regime_stats=stats,
+            worst_regime=worst,
+            regime_dependent=dependent,
+        )
+
+    # ------------------------------------------------------------------
+    # Parameter perturbation (Phase 3A)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _perturb_params(
+        consensus: dict[str, Any],
+        search_ranges: dict[str, tuple[float, float]],
+        noise_pct: float,
+        n: int,
+        seed: int = 42,
+    ) -> list[dict[str, Any]]:
+        """Generate n perturbed copies of consensus params."""
+        rng = np.random.RandomState(seed)
+        perturbed_list: list[dict[str, Any]] = []
+        for _ in range(n):
+            variant: dict[str, Any] = {}
+            for space, params in consensus.items():
+                if not isinstance(params, dict):
+                    continue
+                variant[space] = {}
+                for key, val in params.items():
+                    if isinstance(val, int | float):
+                        noise = rng.normal(0, noise_pct)
+                        new_val = val * (1.0 + noise)
+                        if key in search_ranges:
+                            lo, hi = search_ranges[key]
+                            new_val = max(lo, min(hi, new_val))
+                        if isinstance(val, int):
+                            variant[space][key] = round(new_val)
+                        else:
+                            variant[space][key] = round(new_val, 6)
+                    else:
+                        variant[space][key] = val
+            perturbed_list.append(variant)
+        return perturbed_list
+
+    def _run_perturbation_test(
+        self,
+        consensus: dict[str, Any],
+        search_ranges: dict[str, tuple[float, float]],
+        oos_timerange: str,
+        strategy_json: Path | None,
+        exchange: Any | None = None,
+    ) -> PerturbResult:
+        """Backtest 60 perturbed param sets on the full OOS period."""
+        variants_5 = self._perturb_params(consensus, search_ranges, 0.05, 30, seed=100)
+        variants_10 = self._perturb_params(consensus, search_ranges, 0.10, 30, seed=200)
+        all_variants = variants_5 + variants_10
+
+        profits: list[float] = []
+        resolver_logger = logging.getLogger("freqtrade.resolvers")
+        prev_level = resolver_logger.level
+        resolver_logger.setLevel(logging.WARNING)
+        try:
+            for variant in all_variants:
+                self._restore_params(variant, strategy_json)
+                result = self._run_backtest(oos_timerange, exchange=exchange)
+                profits.append(result.get("profit_pct", 0))
+        finally:
+            resolver_logger.setLevel(prev_level)
+
+        if not profits:
+            return PerturbResult()
+
+        arr = np.array(profits)
+        median = float(np.median(arr))
+        std = float(np.std(arr))
+        sensitivity = std / abs(median) if abs(median) > 1e-8 else 99.0
+        n_profitable = sum(1 for p in profits if p > 0)
+
+        return PerturbResult(
+            n_perturbations=len(profits),
+            profit_p5=round(float(np.percentile(arr, 5)), 2),
+            profit_p50=round(median, 2),
+            profit_p95=round(float(np.percentile(arr, 95)), 2),
+            pct_profitable=round(n_profitable / len(profits), 2),
+            sensitivity=round(sensitivity, 4),
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-seed hyperopt (Phase 3B)
+    # ------------------------------------------------------------------
+
+    def _run_multi_seed_check(
+        self,
+        window: WalkForwardWindow,
+        n_seeds: int,
+        strategy_json: Path | None,
+    ) -> MultiSeedResult:
+        """Run N extra hyperopts with different seeds on the same window."""
+        seed_params: list[dict[str, Any]] = []
+        for i in range(n_seeds):
+            self._delete_strategy_json(strategy_json)
+            seed = 1000 + i
+            ho_result = self._run_hyperopt_window(window, base_seed=seed)
+            params = self._save_window_params(-(i + 1), strategy_json)
+            seed_params.append(ho_result.get("params", params))
+
+        if not seed_params:
+            return MultiSeedResult()
+
+        search_ranges = self._get_search_ranges()
+        stability = self._analyze_param_stability(seed_params, search_ranges)
+        total = len(stability)
+        stable = sum(1 for v in stability.values() if v.get("stable"))
+        convergence = stable / total if total else 0.0
+
+        return MultiSeedResult(
+            n_seeds=n_seeds,
+            convergence_pct=round(convergence, 2),
+            seed_params=seed_params,
+        )
+
+    # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
 
@@ -907,6 +1090,9 @@ class WalkForward:
         all_oos_profits: list[float] | None = None,
         mc: MCResult | None = None,
         oos_equity: OOSEquityCurve | None = None,
+        regime: RegimeAnalysis | None = None,
+        perturb: PerturbResult | None = None,
+        multi_seed: MultiSeedResult | None = None,
     ) -> Path:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = self._wfa_dir / (f"{self.strategy_name}_wfa_results_{ts}.json")
@@ -927,6 +1113,8 @@ class WalkForward:
             len(stability),
             oos_profits,
             mc=mc,
+            perturb=perturb,
+            multi_seed=multi_seed,
         )
 
         data: dict[str, Any] = {
@@ -967,6 +1155,29 @@ class WalkForward:
                 "n_trades": oos_equity.n_trades,
             }
             if oos_equity and oos_equity.n_trades > 0
+            else None,
+            "regime_analysis": {
+                "regime_stats": regime.regime_stats,
+                "worst_regime": regime.worst_regime,
+                "regime_dependent": regime.regime_dependent,
+            }
+            if regime and regime.regime_stats
+            else None,
+            "perturbation": {
+                "n_perturbations": perturb.n_perturbations,
+                "profit_p5": perturb.profit_p5,
+                "profit_p50": perturb.profit_p50,
+                "profit_p95": perturb.profit_p95,
+                "pct_profitable": perturb.pct_profitable,
+                "sensitivity": round(perturb.sensitivity, 4),
+            }
+            if perturb and perturb.n_perturbations > 0
+            else None,
+            "multi_seed": {
+                "n_seeds": multi_seed.n_seeds,
+                "convergence_pct": multi_seed.convergence_pct,
+            }
+            if multi_seed and multi_seed.n_seeds > 0
             else None,
             "windows": [],
             "holdout": None,
@@ -1100,6 +1311,9 @@ class WalkForward:
         run_count: int,
         n_params: int = 0,
         mc: MCResult | None = None,
+        regime: RegimeAnalysis | None = None,
+        perturb: PerturbResult | None = None,
+        multi_seed: MultiSeedResult | None = None,
     ) -> list[str]:
         warnings: list[str] = []
 
@@ -1151,6 +1365,13 @@ class WalkForward:
         if mc and mc.n_simulations > 0:
             warnings.extend(self._mc_warnings(mc))
 
+        if regime:
+            warnings.extend(self._regime_warnings(regime))
+        if perturb and perturb.n_perturbations > 0:
+            warnings.extend(self._perturb_warnings(perturb))
+        if multi_seed and multi_seed.n_seeds > 0:
+            warnings.extend(self._multi_seed_warnings(multi_seed))
+
         return warnings
 
     @staticmethod
@@ -1174,6 +1395,45 @@ class WalkForward:
             )
         return warnings
 
+    @staticmethod
+    def _regime_warnings(regime: RegimeAnalysis) -> list[str]:
+        warnings: list[str] = []
+        if regime.regime_dependent:
+            profitable = [r for r, s in regime.regime_stats.items() if s["avg_profit"] > 0]
+            warnings.append(
+                f"Strategy profitable only in {', '.join(profitable)} — "
+                f"fails in {regime.worst_regime} (tip #69)"
+            )
+        if len(regime.regime_stats) == 1:
+            only = next(iter(regime.regime_stats))
+            warnings.append(f"Only {only} windows tested — unknown behavior in other regimes")
+        return warnings
+
+    @staticmethod
+    def _perturb_warnings(perturb: PerturbResult) -> list[str]:
+        warnings: list[str] = []
+        if perturb.pct_profitable < 0.70:
+            warnings.append(
+                f"Only {perturb.pct_profitable:.0%} of param perturbations "
+                f"remain profitable — narrow peak (tip #81)"
+            )
+        if perturb.sensitivity > 2.0:
+            warnings.append(
+                f"Param sensitivity {perturb.sensitivity:.1f} — "
+                f"results depend heavily on exact values"
+            )
+        return warnings
+
+    @staticmethod
+    def _multi_seed_warnings(ms: MultiSeedResult) -> list[str]:
+        warnings: list[str] = []
+        if ms.convergence_pct < 0.60:
+            warnings.append(
+                f"Multi-seed: only {ms.convergence_pct:.0%} params converge — "
+                f"noisy optimization surface (tip #76)"
+            )
+        return warnings
+
     # ------------------------------------------------------------------
     # Verdict
     # ------------------------------------------------------------------
@@ -1194,6 +1454,8 @@ class WalkForward:
         n_params: int,
         all_oos_profits: list[float],
         mc: MCResult | None = None,
+        perturb: PerturbResult | None = None,
+        multi_seed: MultiSeedResult | None = None,
     ) -> tuple[str, list[tuple[str, bool, str]]]:
         checks: list[tuple[str, bool, str]] = []
 
@@ -1318,26 +1580,47 @@ class WalkForward:
                 )
             )
 
-        # Grade
+        # 11. Param perturbation (tip #81: >= 70% profitable under noise)
+        if perturb and perturb.n_perturbations > 0:
+            checks.append(
+                (
+                    "param_robust",
+                    perturb.pct_profitable >= 0.70,
+                    f"Perturbation: {perturb.pct_profitable:.0%} profitable",
+                )
+            )
+
+        # 12. Multi-seed convergence (tip #76: >= 60% params stable)
+        if multi_seed and multi_seed.n_seeds > 0:
+            checks.append(
+                (
+                    "seed_convergence",
+                    multi_seed.convergence_pct >= 0.60,
+                    f"Seed convergence: {multi_seed.convergence_pct:.0%}",
+                )
+            )
+
+        grade = self._grade_from_checks(checks)
+        return grade, checks
+
+    @staticmethod
+    def _grade_from_checks(checks: list[tuple[str, bool, str]]) -> str:
         passed = sum(1 for _, ok, _ in checks if ok)
         total = len(checks)
         critical_names = {"profitable_windows", "dsr", "sqn", "mc_robust"}
         has_critical_fail = any(not ok and name in critical_names for name, ok, _ in checks)
 
         if has_critical_fail and passed < total * 0.3:
-            grade = "F"
-        elif has_critical_fail:
-            grade = "D"
-        elif passed == total:
-            grade = "A"
-        elif passed >= total * 0.75:
-            grade = "B"
-        elif passed >= total * 0.5:
-            grade = "C"
-        else:
-            grade = "D"
-
-        return grade, checks
+            return "F"
+        if has_critical_fail:
+            return "D"
+        if passed == total:
+            return "A"
+        if passed >= total * 0.75:
+            return "B"
+        if passed >= total * 0.5:
+            return "C"
+        return "D"
 
     # ------------------------------------------------------------------
     # Report
@@ -1401,6 +1684,9 @@ class WalkForward:
         kurtosis: float = 3.0,
         mc: MCResult | None = None,
         oos_equity: OOSEquityCurve | None = None,
+        regime: RegimeAnalysis | None = None,
+        perturb: PerturbResult | None = None,
+        multi_seed: MultiSeedResult | None = None,
     ) -> None:
         sep = "=" * 70
         n = len(all_results)
@@ -1418,8 +1704,8 @@ class WalkForward:
         for r in all_results:
             w = r.window
             ctx = r.market_context or {}
-            regime = ctx.get("regime", "")
-            regime_str = f"  [{regime}]" if regime else ""
+            win_regime = ctx.get("regime", "")
+            regime_str = f"  [{win_regime}]" if win_regime else ""
             wfe_str = f"  WFE {r.wfe:.0%}" if r.wfe != 0 else ""
             logger.info(
                 f"  W{w.index + 1}  "
@@ -1431,6 +1717,8 @@ class WalkForward:
         self._log_holdout_and_oos(all_results, oos_profits)
 
         self._log_mc_and_equity(mc, oos_equity)
+
+        self._log_phase3(regime, perturb, multi_seed)
 
         logger.info("")
         logger.info("  Consensus (weighted by Calmar):")
@@ -1462,6 +1750,8 @@ class WalkForward:
             n_params,
             oos_profits,
             mc=mc,
+            perturb=perturb,
+            multi_seed=multi_seed,
         )
         logger.info("")
         logger.info(f"  VERDICT: {grade} — {self.VERDICT_LABELS.get(grade, '')}")
@@ -1505,6 +1795,77 @@ class WalkForward:
                 f"K-ratio {oos_equity.k_ratio:.2f} | "
                 f"{oos_equity.n_trades} trades"
             )
+
+    @staticmethod
+    def _log_phase3(
+        regime: RegimeAnalysis | None,
+        perturb: PerturbResult | None,
+        multi_seed: MultiSeedResult | None,
+    ) -> None:
+        if regime and regime.regime_stats:
+            parts = [
+                f"{r} {s['windows']}W {s['avg_profit']:+.1f}%"
+                for r, s in regime.regime_stats.items()
+            ]
+            logger.info(f"  Regime breakdown: {' | '.join(parts)}")
+
+        if perturb and perturb.n_perturbations > 0:
+            logger.info(
+                f"  Perturbation ({perturb.n_perturbations} variants): "
+                f"p5/p50/p95: {perturb.profit_p5:+.1f}% / "
+                f"{perturb.profit_p50:+.1f}% / {perturb.profit_p95:+.1f}% | "
+                f"{perturb.pct_profitable:.0%} profitable | "
+                f"sensitivity {perturb.sensitivity:.2f}"
+            )
+
+        if multi_seed and multi_seed.n_seeds > 0:
+            logger.info(
+                f"  Multi-seed ({multi_seed.n_seeds} seeds): "
+                f"{multi_seed.convergence_pct:.0%} convergence"
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 3 orchestration
+    # ------------------------------------------------------------------
+
+    def _run_phase3(
+        self,
+        consensus: dict[str, Any],
+        search_ranges: dict[str, tuple[float, float]],
+        strategy_json: Path | None,
+        original_json_bytes: bytes | None,
+        exchange: Any | None = None,
+    ) -> tuple[RegimeAnalysis | None, PerturbResult | None, MultiSeedResult | None]:
+        regime = self._analyze_regimes(self.results)
+
+        perturb: PerturbResult | None = None
+        if consensus and search_ranges:
+            first_test = min(r.window.test_start for r in self.results)
+            last_test = max(r.window.test_end for r in self.results)
+            oos_timerange = f"{first_test.strftime('%Y%m%d')}-{last_test.strftime('%Y%m%d')}"
+            logger.info("Running parameter perturbation test (60 variants)...")
+            perturb = self._run_perturbation_test(
+                consensus,
+                search_ranges,
+                oos_timerange,
+                strategy_json,
+                exchange=exchange,
+            )
+            self._restore_original_json(strategy_json, original_json_bytes)
+
+        multi_seed: MultiSeedResult | None = None
+        n_multi_seeds = self.config.get("wf_multi_seed", 0)
+        if n_multi_seeds > 0 and len(self.results) > 0:
+            last_window = self.results[-1].window
+            logger.info(f"Running multi-seed check ({n_multi_seeds} seeds) on last window...")
+            multi_seed = self._run_multi_seed_check(
+                last_window,
+                n_multi_seeds,
+                strategy_json,
+            )
+            self._restore_original_json(strategy_json, original_json_bytes)
+
+        return regime, perturb, multi_seed
 
     # ------------------------------------------------------------------
     # Holdout
@@ -1732,6 +2093,14 @@ class WalkForward:
         # OOS equity curve concatenation
         oos_equity = self._concat_oos_equity(self.results, starting_balance=starting_balance)
 
+        regime, perturb, multi_seed = self._run_phase3(
+            consensus,
+            search_ranges,
+            strategy_json,
+            original_json_bytes,
+            exchange,
+        )
+
         self._run_holdout(
             consensus, default_params, strategy_json, original_json_bytes, exchange=exchange
         )
@@ -1750,6 +2119,9 @@ class WalkForward:
             all_oos_profits=all_oos_profits,
             mc=mc,
             oos_equity=oos_equity,
+            regime=regime,
+            perturb=perturb,
+            multi_seed=multi_seed,
         )
 
         # Log and get run count
@@ -1762,6 +2134,9 @@ class WalkForward:
             run_count,
             n_params=n_params,
             mc=mc,
+            regime=regime,
+            perturb=perturb,
+            multi_seed=multi_seed,
         )
 
         # Report
@@ -1777,4 +2152,7 @@ class WalkForward:
             kurtosis=kurtosis,
             mc=mc,
             oos_equity=oos_equity,
+            regime=regime,
+            perturb=perturb,
+            multi_seed=multi_seed,
         )
