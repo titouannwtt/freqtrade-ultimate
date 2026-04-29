@@ -872,65 +872,84 @@ AVAILABLE_CLI_OPTIONS = {
     # Walk-forward analysis
     "wf_windows": Arg(
         "--wf-windows",
-        help="Number of walk-forward windows (default: %(default)d).",
+        help="Number of walk-forward windows. More windows = more "
+        "validation but shorter test periods. 3-5 for 1-2 years "
+        "of data, 5-8 for 3+ years. Default: %(default)d.",
         type=check_int_positive,
         metavar="INT",
         default=5,
     ),
     "wf_train_ratio": Arg(
         "--wf-train-ratio",
-        help="Ratio of training data per window, range 0.5-0.9 (default: %(default)s).",
+        help="Fraction of each window used for training (optimization). "
+        "0.75 = 75%% train, 25%% test. Lower values give longer test "
+        "periods but less training data. Range: 0.5-0.9. Default: %(default)s.",
         type=float,
         metavar="FLOAT",
         default=0.75,
     ),
     "wf_embargo_days": Arg(
         "--wf-embargo-days",
-        help="Embargo days between train and test windows for purging (default: %(default)d).",
+        help="Gap (in days) between training and test data to prevent "
+        "lookahead bias through lagged indicators. 7 days is safe "
+        "for daily timeframes, use 1-2 for intraday. Default: %(default)d.",
         type=int,
         metavar="INT",
         default=7,
     ),
     "wf_holdout_months": Arg(
         "--wf-holdout-months",
-        help="Reserve N months at end as final holdout. 0 = no holdout (default: %(default)d).",
+        help="Reserve N months at the end as a final hold-out, never "
+        "touched by the optimizer. Provides an independent final "
+        "check. 2-3 months recommended if used. 0 = disabled. Default: %(default)d.",
         type=int,
         metavar="INT",
         default=0,
     ),
     "wf_min_test_trades": Arg(
         "--wf-min-test-trades",
-        help="Minimum trades per test window for significance (default: %(default)d).",
+        help="Minimum trades per test window for statistical "
+        "significance. Below 30 is unreliable. Default: %(default)d.",
         type=check_int_positive,
         metavar="INT",
         default=30,
     ),
     "wf_mode": Arg(
         "--wf-mode",
-        help="Window mode: rolling (fixed-size sliding) or "
-        "anchored (train grows from start). Default: %(default)s.",
+        help="Window mode. 'rolling': fixed-size sliding windows "
+        "(recommended). 'anchored': train period grows from start "
+        "(more data, less stationarity). 'cpcv': Combinatorial "
+        "Purged Cross-Validation — tests all possible data splits, "
+        "gives probability of loss. Default: %(default)s.",
         type=str,
         choices=["rolling", "anchored", "cpcv"],
         default="rolling",
     ),
     "wf_multi_seed": Arg(
         "--wf-multi-seed",
-        help="Run N extra hyperopts with different seeds on the last window "
-        "to check convergence. 0 = disabled. Default: %(default)d.",
+        help="Run N extra hyperopts with different random seeds on "
+        "the last window. If different seeds find very different "
+        "params, the optimization surface is noisy. "
+        "0 = disabled. Default: %(default)d.",
         type=int,
         default=0,
         metavar="N",
     ),
     "wf_cpcv_groups": Arg(
         "--wf-cpcv-groups",
-        help="Number of groups for CPCV mode (default: %(default)d).",
+        help="Number of time-blocks for CPCV mode. C(N,K) "
+        "combinations total — e.g. C(6,2)=15. Higher N = more "
+        "combinations but shorter blocks. Only used with "
+        "--wf-mode=cpcv. Default: %(default)d.",
         type=int,
         default=6,
         metavar="N",
     ),
     "wf_cpcv_test_groups": Arg(
         "--wf-cpcv-test-groups",
-        help="Number of test groups held out per CPCV combination (default: %(default)d).",
+        help="Test blocks held out per CPCV combination. K=2 with "
+        "N=6 gives C(6,2)=15 combinations and 5 backtest paths. "
+        "Only used with --wf-mode=cpcv. Default: %(default)d.",
         type=int,
         default=2,
         metavar="K",

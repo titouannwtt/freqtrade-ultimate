@@ -554,6 +554,14 @@ class WalkForward:
             f"{self.config.get('epochs', 150)} epochs/window"
         )
         logger.info("=" * 70)
+        logger.info("  Walk-forward = optimize on past data, test on unseen future, repeat.")
+        logger.info(
+            f"  Embargo = {self.embargo_days}d gap between train/test to prevent data leakage."
+        )
+        logger.info(
+            f"  Each window: {self.train_ratio:.0%} train / {1 - self.train_ratio:.0%} test"
+        )
+        logger.info("")
 
         for w in windows:
             embargo_str = f" [{self.embargo_days}d embargo]"
@@ -1959,12 +1967,25 @@ class WalkForward:
             )
             expectancy = float(np.mean(arr))
             logger.info("")
+            sqn_label = self._threshold_label("sqn", sqn)
             logger.info(
                 f"  OOS aggregate: {total_profit:+.1f}% | "
                 f"{total_trades} trades | "
                 f"SQN {sqn:.1f} | "
                 f"Expectancy {expectancy:+.4f}"
             )
+            logger.info(f"    (SQN = edge quality, {sqn_label}; Expectancy = avg profit/trade)")
+
+    @staticmethod
+    def _threshold_label(slug: str, value: float) -> str:
+        from freqtrade.optimize.wfa_glossary import METRIC_GLOSSARY
+
+        entry = METRIC_GLOSSARY.get(slug, {})
+        label = ""
+        for thresh_val, thresh_label, _ in entry.get("thresholds", []):
+            if value >= thresh_val:
+                label = thresh_label
+        return label or "N/A"
 
     @staticmethod
     def _fmt_metrics(m: dict[str, Any]) -> str:
@@ -2046,6 +2067,7 @@ class WalkForward:
             dsr_label = "significant" if dsr > 0.95 else "weak" if dsr > 0.5 else "not significant"
             skew_str = f", skew={skewness:.1f}, kurt={kurtosis:.1f}" if abs(skewness) > 0.01 else ""
             logger.info(f"  DSR: {dsr:.3f} ({dsr_label}{skew_str}) — {n_trials} trials")
+            logger.info(f"    (Sharpe adjusted for multiple testing — {dsr_label})")
 
         # Verdict
         grade, checks = self._compute_verdict(
@@ -2069,7 +2091,28 @@ class WalkForward:
             for w in warnings:
                 logger.info(f"  ! {w}")
 
+        self._log_next_steps(grade)
         logger.info(sep)
+
+    def _log_next_steps(self, grade: str) -> None:
+        from freqtrade.optimize.wfa_glossary import VERDICT_GUIDE
+
+        guide = VERDICT_GUIDE.get(grade, "")
+        logger.info("")
+        logger.info("  NEXT STEPS:")
+        logger.info(f"  {guide}")
+        logger.info("")
+        logger.info(f"  Output files (in {self._wfa_dir}):")
+        logger.info(f"    - Consensus params: {self.strategy_name}_consensus_*.json")
+        logger.info(f"    - Full results:     {self.strategy_name}_wfa_results_*.json")
+        logger.info(f"    - HTML report:      {self.strategy_name}_wfa_report_*.html")
+        if grade in ("A", "B"):
+            logger.info("")
+            logger.info("  To dry-run with consensus params:")
+            logger.info(
+                f"    cp {self._wfa_dir}/{self.strategy_name}_consensus_*.json "
+                f"user_data/strategies/{self.strategy_name}.json"
+            )
 
     @staticmethod
     def _log_mc_and_equity(
@@ -2091,15 +2134,19 @@ class WalkForward:
                 f"{mc.return_dd_p5:.2f} / {mc.return_dd_p50:.2f} / {mc.return_dd_p95:.2f} | "
                 f"Consec loss p95: {mc.max_consec_loss_p95}"
             )
+            carver_label = WalkForward._threshold_label("carver_discount", discount)
             logger.info(f"  Carver discount: {discount:.2f} (return/DD p5/p50)")
+            logger.info(f"    (worst-case / median risk ratio — {carver_label})")
 
         if oos_equity and oos_equity.n_trades > 0:
+            k_label = WalkForward._threshold_label("k_ratio", oos_equity.k_ratio)
             logger.info(
                 f"  OOS Equity: {oos_equity.total_return_pct:+.1f}% | "
                 f"Max DD {oos_equity.max_dd_pct:.1f}% | "
                 f"K-ratio {oos_equity.k_ratio:.2f} | "
                 f"{oos_equity.n_trades} trades"
             )
+            logger.info(f"    (K-ratio = equity curve linearity — {k_label})")
 
     @staticmethod
     def _log_phase3(
@@ -2115,6 +2162,7 @@ class WalkForward:
             logger.info(f"  Regime breakdown: {' | '.join(parts)}")
 
         if perturb and perturb.n_perturbations > 0:
+            sens_label = WalkForward._threshold_label("sensitivity", perturb.sensitivity)
             logger.info(
                 f"  Perturbation ({perturb.n_perturbations} variants): "
                 f"p5/p50/p95: {perturb.profit_p5:+.1f}% / "
@@ -2122,27 +2170,35 @@ class WalkForward:
                 f"{perturb.pct_profitable:.0%} profitable | "
                 f"sensitivity {perturb.sensitivity:.2f}"
             )
+            logger.info(f"    (nudge params +/-10% — does profit survive? {sens_label})")
 
         if multi_seed and multi_seed.n_seeds > 0:
+            conv_label = WalkForward._threshold_label("convergence", multi_seed.convergence_pct)
             logger.info(
                 f"  Multi-seed ({multi_seed.n_seeds} seeds): "
                 f"{multi_seed.convergence_pct:.0%} convergence"
             )
+            logger.info(f"    (different random seeds — same params? {conv_label})")
 
     @staticmethod
     def _log_cpcv(cpcv: CPCVResult | None) -> None:
         if cpcv and cpcv.n_combinations > 0:
             logger.info(
-                f"  CPCV ({cpcv.n_combinations} combos, "
-                f"N={cpcv.n_groups} K={cpcv.n_test_groups}): "
-                f"Avg return {cpcv.avg_return:+.1f}% | "
+                f"  CPCV — Combinatorial Purged Cross-Validation "
+                f"({cpcv.n_combinations} combos, "
+                f"N={cpcv.n_groups} K={cpcv.n_test_groups}):"
+            )
+            logger.info(
+                f"    Avg return {cpcv.avg_return:+.1f}% | "
                 f"Sharpe {cpcv.sharpe_of_paths:.2f} | "
                 f"P(loss) {cpcv.prob_of_loss:.0%}"
             )
+            loss_label = WalkForward._threshold_label("prob_of_loss", cpcv.prob_of_loss)
+            logger.info(f"    (P(loss) = fraction of paths losing money — {loss_label})")
             if cpcv.path_returns:
                 arr = np.array(cpcv.path_returns)
                 logger.info(
-                    f"           p5/p50/p95: "
+                    f"    p5/p50/p95: "
                     f"{float(np.percentile(arr, 5)):+.1f}% / "
                     f"{float(np.percentile(arr, 50)):+.1f}% / "
                     f"{float(np.percentile(arr, 95)):+.1f}%"
@@ -2305,6 +2361,7 @@ class WalkForward:
         if warnings:
             for w in warnings:
                 logger.info(f"  ! {w}")
+        self._log_next_steps(grade)
 
     def start(self) -> None:
         if self.wf_mode == "cpcv":
