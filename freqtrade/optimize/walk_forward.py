@@ -54,6 +54,8 @@ class WindowResult:
     market_context: dict[str, float] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
     test_trade_count: int = 0
+    test_trade_profits: list[float] = field(default_factory=list)
+    wfe: float = 0.0
 
 
 class WalkForward:
@@ -432,6 +434,7 @@ class WalkForward:
             if trades:
                 profits = [t.get("profit_abs", 0) for t in trades]
                 strat_results.update(self._compute_concentration(profits))
+                strat_results["trade_profits"] = profits
 
         Backtesting.cleanup()
         return strat_results
@@ -713,6 +716,17 @@ class WalkForward:
                 deg[key] = 0.0
         return deg
 
+    @staticmethod
+    def _compute_wfe(train_pct: float, test_pct: float, train_days: int, test_days: int) -> float:
+        """Walk-Forward Efficiency (Pardo): annualized OOS return / annualized IS return."""
+        if train_days < 1 or test_days < 1:
+            return 0.0
+        ann_train = (1.0 + train_pct / 100.0) ** (365.0 / train_days) - 1.0
+        ann_test = (1.0 + test_pct / 100.0) ** (365.0 / test_days) - 1.0
+        if abs(ann_train) < 1e-8:
+            return 0.0
+        return ann_test / ann_train
+
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
@@ -734,11 +748,7 @@ class WalkForward:
                 default=hyperopt_serializer,
                 number_mode=HYPER_PARAMS_FILE_FORMAT,
             )
-        logger.info(f"Consensus params exported to {filename}")
-        logger.info(
-            "To apply consensus params to the live strategy, copy this file to "
-            "the strategy's co-located JSON path."
-        )
+        logger.info(f"Consensus exported: {filename.name}")
         return filename
 
     def _export_results_json(
@@ -747,9 +757,27 @@ class WalkForward:
         stability: dict[str, dict[str, Any]],
         consensus: dict[str, Any],
         dsr: float | None = None,
+        all_oos_profits: list[float] | None = None,
     ) -> Path:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = self._wfa_dir / (f"{self.strategy_name}_wfa_results_{ts}.json")
+
+        oos_profits = all_oos_profits or []
+        oos_sqn = 0.0
+        oos_expectancy = 0.0
+        if len(oos_profits) > 1:
+            arr = np.array(oos_profits)
+            std = float(np.std(arr))
+            oos_sqn = sqrt(len(arr)) * float(np.mean(arr)) / max(std, 1e-10)
+            oos_expectancy = float(np.mean(arr))
+
+        grade, checks = self._compute_verdict(
+            all_results,
+            stability,
+            dsr,
+            len(stability),
+            oos_profits,
+        )
 
         data: dict[str, Any] = {
             "strategy": self.strategy_name,
@@ -761,6 +789,12 @@ class WalkForward:
             "embargo_days": self.embargo_days,
             "timestamp": datetime.now(UTC).isoformat(),
             "deflated_sharpe_ratio": dsr,
+            "oos_aggregate": {
+                "total_trades": len(oos_profits),
+                "sqn": round(oos_sqn, 2),
+                "expectancy": round(oos_expectancy, 6),
+            },
+            "verdict": {"grade": grade, "checks": {n: ok for n, ok, _ in checks}},
             "windows": [],
             "holdout": None,
             "param_stability": stability,
@@ -773,6 +807,7 @@ class WalkForward:
                     "index": r.window.index + 1,
                     "train_range": r.window.train_timerange_str(),
                     "test_range": r.window.test_timerange_str(),
+                    "wfe": round(r.wfe, 4),
                     "train_metrics": r.train_metrics,
                     "test_metrics": r.test_metrics,
                     "baseline_metrics": r.baseline_metrics,
@@ -797,7 +832,7 @@ class WalkForward:
                 default=hyperopt_serializer,
                 number_mode=HYPER_PARAMS_FILE_FORMAT,
             )
-        logger.info(f"Full WFA results exported to {filename}")
+        logger.info(f"Results exported: {filename.name}")
         return filename
 
     def _log_wfa_run(
@@ -843,39 +878,66 @@ class WalkForward:
     # Warning flags
     # ------------------------------------------------------------------
 
+    def _per_window_warnings(
+        self,
+        r: WindowResult,
+        n_params: int,
+    ) -> list[str]:
+        warnings: list[str] = []
+        wi = r.window.index + 1
+
+        if r.test_trade_count < self.min_test_trades:
+            warnings.append(
+                f"W{wi}: test trades ({r.test_trade_count}) < minimum ({self.min_test_trades})"
+            )
+        top1 = r.test_metrics.get("top1_pct", 0)
+        if top1 > 50:
+            warnings.append(f"W{wi}: top-1 trade = {top1:.0f}% of profit — concentrated")
+        hhi = r.test_metrics.get("hhi", 0)
+        if hhi > 0.15:
+            warnings.append(f"W{wi}: HHI {hhi:.3f} — profit depends on few trades")
+        test_dd = r.test_metrics.get("max_dd_pct", 0)
+        train_dd = r.train_metrics.get("max_dd_pct", 0)
+        if train_dd > 0.1 and test_dd / train_dd > 1.5:
+            warnings.append(
+                f"W{wi}: DD ratio OOS/IS = {test_dd / train_dd:.1f}x > 1.5x — fragile (Davey)"
+            )
+        sqn = r.test_metrics.get("sqn", 0)
+        if sqn > 5.0:
+            warnings.append(f"W{wi}: SQN {sqn:.1f} > 5.0 — suspiciously good (Van Tharp)")
+        if r.test_metrics.get("expectancy", 0) < 0 and r.test_trade_count > 0:
+            warnings.append(f"W{wi}: negative expectancy in OOS")
+
+        if n_params > 0:
+            train_trades = r.train_metrics.get("trades", 0)
+            ratio = train_trades / n_params
+            if ratio < 10:
+                warnings.append(
+                    f"W{wi}: {train_trades} train trades / "
+                    f"{n_params} params = {ratio:.0f}:1 — noise-fitting risk "
+                    f"(Chan, need >10:1)"
+                )
+
+        return warnings
+
     def _generate_warning_flags(
         self,
         all_results: list[WindowResult],
         stability: dict[str, dict[str, Any]],
         run_count: int,
+        n_params: int = 0,
     ) -> list[str]:
         warnings: list[str] = []
 
         for r in all_results:
-            if r.test_trade_count < self.min_test_trades:
-                warnings.append(
-                    f"Window {r.window.index + 1} test trades "
-                    f"({r.test_trade_count}) < minimum "
-                    f"({self.min_test_trades})"
-                )
-            top1 = r.test_metrics.get("top1_pct", 0)
-            if top1 > 50:
-                warnings.append(
-                    f"Window {r.window.index + 1}: top-1 trade = "
-                    f"{top1:.0f}% of profit — concentrated"
-                )
-            hhi = r.test_metrics.get("hhi", 0)
-            if hhi > 0.15:
-                warnings.append(
-                    f"Window {r.window.index + 1}: HHI = {hhi:.3f} — profit depends on few trades"
-                )
+            warnings.extend(self._per_window_warnings(r, n_params))
 
         unstable = [k for k, v in stability.items() if v.get("unstable", False)]
         if unstable:
             warnings.append(
                 f"Unstable parameters (std/range > "
                 f"{PARAM_STABILITY_UNSTABLE:.0%}): "
-                f"{', '.join(unstable)} -- consider freezing (tip #81)"
+                f"{', '.join(unstable)} — consider freezing (tip #81)"
             )
 
         if not self.config.get("timeframe_detail"):
@@ -883,104 +945,239 @@ class WalkForward:
 
         if run_count > 1:
             warnings.append(
-                f"This is WFA run #{run_count} on {self.strategy_name}. "
-                f"More tests = higher chance of false positive by "
-                f"chance (tip #76, #180)"
+                f"WFA run #{run_count} on {self.strategy_name} — "
+                f"more tests = higher false positive risk (tip #76, #180)"
+            )
+
+        total_oos_trades = sum(r.test_metrics.get("trades", 0) for r in all_results)
+        if total_oos_trades < 200:
+            warnings.append(
+                f"Total OOS trades: {total_oos_trades} < 200 — insufficient sample (Aronson)"
+            )
+
+        pf_values = [
+            r.test_metrics.get("profit_factor", 0)
+            for r in all_results
+            if r.test_metrics.get("profit_factor", 0) > 0
+        ]
+        if pf_values and float(np.mean(pf_values)) < 1.2:
+            warnings.append(
+                f"Avg OOS profit factor: {float(np.mean(pf_values)):.2f} "
+                f"< 1.2 — marginal edge (Davey)"
+            )
+
+        profitable = sum(1 for r in all_results if r.test_metrics.get("profit_pct", 0) > 0)
+        n = len(all_results)
+        if n > 0 and profitable / n < 0.5:
+            warnings.append(
+                f"Only {profitable}/{n} OOS windows profitable "
+                f"({profitable / n:.0%}) — below 50% threshold (Pardo)"
             )
 
         return warnings
 
     # ------------------------------------------------------------------
+    # Verdict
+    # ------------------------------------------------------------------
+
+    VERDICT_LABELS = {
+        "A": "Deploy — all criteria met",
+        "B": "Proceed to dry-run",
+        "C": "Investigate — mixed signals",
+        "D": "Rework — most criteria failed",
+        "F": "Reject — critical failure",
+    }
+
+    def _compute_verdict(
+        self,
+        all_results: list[WindowResult],
+        stability: dict[str, dict[str, Any]],
+        dsr: float | None,
+        n_params: int,
+        all_oos_profits: list[float],
+    ) -> tuple[str, list[tuple[str, bool, str]]]:
+        checks: list[tuple[str, bool, str]] = []
+
+        n = len(all_results)
+
+        # 1. Windows profitables (Pardo: >= 60%)
+        profitable = sum(1 for r in all_results if r.test_metrics.get("profit_pct", 0) > 0)
+        pct = profitable / n if n else 0
+        checks.append(
+            (
+                "profitable_windows",
+                pct >= 0.6,
+                f"{profitable}/{n} windows profitable ({pct:.0%})",
+            )
+        )
+
+        # 2. WFE (Pardo: > 50%)
+        wfe_values = [r.wfe for r in all_results if r.wfe != 0]
+        wfe_med = float(np.median(wfe_values)) if wfe_values else 0.0
+        checks.append(
+            (
+                "wfe",
+                wfe_med > 0.5,
+                f"WFE median {wfe_med:.0%}",
+            )
+        )
+
+        # 3. DSR (Lopez de Prado: > 0.95)
+        checks.append(
+            (
+                "dsr",
+                dsr is not None and dsr > 0.95,
+                f"DSR {dsr:.3f}" if dsr is not None else "DSR N/A",
+            )
+        )
+
+        # 4. Total OOS trades (Aronson: >= 200)
+        total_trades = sum(r.test_metrics.get("trades", 0) for r in all_results)
+        checks.append(
+            (
+                "oos_trades",
+                total_trades >= 200,
+                f"OOS trades: {total_trades}",
+            )
+        )
+
+        # 5. SQN (Van Tharp: 0 < sqn < 5.0)
+        if len(all_oos_profits) > 1:
+            std = float(np.std(all_oos_profits))
+            sqn = sqrt(len(all_oos_profits)) * float(np.mean(all_oos_profits)) / max(std, 1e-10)
+            sqn_ok = 0 < sqn < 5.0
+        else:
+            sqn = 0.0
+            sqn_ok = False
+        checks.append(("sqn", sqn_ok, f"SQN {sqn:.1f}"))
+
+        # 6. Param stability (Clenow: >= 70% stable)
+        total_p = len(stability)
+        stable_p = sum(1 for v in stability.values() if v.get("stable"))
+        stable_pct = stable_p / total_p if total_p else 0
+        checks.append(
+            (
+                "param_stability",
+                stable_pct >= 0.7,
+                f"{stable_p}/{total_p} params stable ({stable_pct:.0%})",
+            )
+        )
+
+        # 7. DD ratio OOS/IS (Davey: < 1.5x)
+        max_dd_ratio = 0.0
+        for r in all_results:
+            t_dd = r.train_metrics.get("max_dd_pct", 0)
+            o_dd = r.test_metrics.get("max_dd_pct", 0)
+            if t_dd > 0.1:
+                max_dd_ratio = max(max_dd_ratio, o_dd / t_dd)
+        checks.append(
+            (
+                "dd_ratio",
+                max_dd_ratio < 1.5 or max_dd_ratio == 0,
+                f"Max DD ratio {max_dd_ratio:.1f}x",
+            )
+        )
+
+        # 8. Avg profit factor (Davey: >= 1.2)
+        pfs = [
+            r.test_metrics.get("profit_factor", 0)
+            for r in all_results
+            if r.test_metrics.get("profit_factor", 0) > 0
+        ]
+        avg_pf = float(np.mean(pfs)) if pfs else 0.0
+        checks.append(
+            (
+                "profit_factor",
+                avg_pf >= 1.2,
+                f"Avg PF {avg_pf:.2f}",
+            )
+        )
+
+        # 9. Trades/params ratio (Chan: >= 10:1)
+        if n_params > 0:
+            min_ratio = min(
+                (r.train_metrics.get("trades", 0) / n_params for r in all_results),
+                default=0,
+            )
+        else:
+            min_ratio = float("inf")
+        checks.append(
+            (
+                "trades_params",
+                min_ratio >= 10,
+                f"Min trades/params {min_ratio:.0f}:1" if min_ratio < float("inf") else "N/A",
+            )
+        )
+
+        # Grade
+        passed = sum(1 for _, ok, _ in checks if ok)
+        total = len(checks)
+        critical_names = {"profitable_windows", "dsr", "sqn"}
+        has_critical_fail = any(not ok and name in critical_names for name, ok, _ in checks)
+
+        if has_critical_fail and passed < total * 0.3:
+            grade = "F"
+        elif has_critical_fail:
+            grade = "D"
+        elif passed == total:
+            grade = "A"
+        elif passed >= total * 0.75:
+            grade = "B"
+        elif passed >= total * 0.5:
+            grade = "C"
+        else:
+            grade = "D"
+
+        return grade, checks
+
+    # ------------------------------------------------------------------
     # Report
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _log_metrics_line(label: str, m: dict[str, Any]) -> None:
-        line = (
-            f"  {label} | "
-            f"Profit: {m.get('profit_pct', 0):+.1f}% | "
-            f"Calmar: {m.get('calmar', 0):.2f} | "
-            f"DD: {m.get('max_dd_pct', 0):.1f}% | "
-            f"Trades: {m.get('trades', 0)}"
-        )
-        if m.get("hhi"):
-            line += f" | HHI: {m['hhi']:.3f}"
-        if m.get("top1_pct"):
-            line += f" | Top1: {m['top1_pct']:.0f}%"
-        logger.info(line)
-
-    def _log_window_result(self, r: WindowResult) -> None:
-        w = r.window
-        logger.info("")
-        logger.info(
-            f"--- Window {w.index + 1}: "
-            f"Train {w.train_start:%Y-%m-%d} -> "
-            f"{w.train_end:%Y-%m-%d} | "
-            f"Test {w.test_start:%Y-%m-%d} -> "
-            f"{w.test_end:%Y-%m-%d} ---"
-        )
-
-        ctx = r.market_context
-        if ctx:
-            regime = ctx.get("regime", "?")
-            logger.info(
-                f"  Market: {regime} | "
-                f"BTC {ctx.get('btc_change_pct', 0):+.1f}% | "
-                f"ATR {ctx.get('atr_pct', 0):.1f}% | "
-                f"Vol {ctx.get('volatility_ann_pct', 0):.0f}%"
-            )
-
-        for label, m in [
-            ("Train", r.train_metrics),
-            ("Test ", r.test_metrics),
-            ("Base ", r.baseline_metrics),
-        ]:
-            if m:
-                self._log_metrics_line(label, m)
-
-        deg = self._compute_degradation(r.train_metrics, r.test_metrics)
-        if deg:
-            parts = [f"{k}: {v:+.0%}" for k, v in deg.items() if abs(v) > 0.001]
-            if parts:
-                logger.info(f"  Degradation: {', '.join(parts)}")
-
-    @staticmethod
-    def _log_stability(
-        stability: dict[str, dict[str, Any]],
+    def _log_holdout_and_oos(
+        self,
+        all_results: list[WindowResult],
+        oos_profits: list[float],
     ) -> None:
-        if not stability:
-            return
-        logger.info("")
-        logger.info(f"{'=' * 25} PARAMETER STABILITY {'=' * 25}")
-        for name, s in stability.items():
-            if s.get("unstable"):
-                flag = "UNSTABLE"
-            elif s.get("stable"):
-                flag = "stable"
-            else:
-                flag = "marginal"
-
+        if self.holdout_result:
+            ho = self.holdout_result
             logger.info(
-                f"  {name:30s} | "
-                f"median: {s['median']:8.4f} | "
-                f"std/range: {s['std_over_range']:.1%} | "
-                f"{flag:>10s} | "
-                f"{s['values']}"
+                f"  HO  "
+                f"{ho.window.test_start:%m-%d} -> {ho.window.test_end:%m-%d}  "
+                f"{self._fmt_metrics(ho.test_metrics)}"
+            )
+            if ho.baseline_metrics:
+                bl_profit = ho.baseline_metrics.get("profit_pct", 0)
+                logger.info(f"      Baseline: {bl_profit:+.1f}%")
+
+        if oos_profits:
+            total_profit = sum(r.test_metrics.get("profit_pct", 0) for r in all_results)
+            total_trades = len(oos_profits)
+            arr = np.array(oos_profits)
+            std = float(np.std(arr))
+            sqn = (
+                sqrt(total_trades) * float(np.mean(arr)) / max(std, 1e-10)
+                if total_trades > 1
+                else 0.0
+            )
+            expectancy = float(np.mean(arr))
+            logger.info("")
+            logger.info(
+                f"  OOS aggregate: {total_profit:+.1f}% | "
+                f"{total_trades} trades | "
+                f"SQN {sqn:.1f} | "
+                f"Expectancy {expectancy:+.4f}"
             )
 
-    def _log_holdout(self) -> None:
-        if not self.holdout_result:
-            return
-        logger.info("")
-        logger.info(f"{'=' * 25} HOLDOUT FINAL {'=' * 31}")
-        ho = self.holdout_result
-        logger.info(f"  Period: {ho.window.test_start:%Y-%m-%d} -> {ho.window.test_end:%Y-%m-%d}")
-        for label, m in [
-            ("Consensus", ho.test_metrics),
-            ("Baseline ", ho.baseline_metrics),
-        ]:
-            if m:
-                self._log_metrics_line(label, m)
+    @staticmethod
+    def _fmt_metrics(m: dict[str, Any]) -> str:
+        parts = [
+            f"Profit {m.get('profit_pct', 0):+.1f}%",
+            f"Calmar {m.get('calmar', 0):.2f}",
+            f"DD {m.get('max_dd_pct', 0):.1f}%",
+            f"{m.get('trades', 0)} trades",
+        ]
+        return "  ".join(parts)
 
     def _format_report(
         self,
@@ -989,56 +1186,80 @@ class WalkForward:
         consensus: dict[str, Any],
         warnings: list[str],
         dsr: float | None = None,
+        all_oos_profits: list[float] | None = None,
+        n_params: int = 0,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
     ) -> None:
         sep = "=" * 70
+        n = len(all_results)
+        mode = self.wf_mode
+        epochs = self.config.get("epochs", 150)
+        loss = self.config.get("hyperopt_loss", "N/A")
+        oos_profits = all_oos_profits or []
 
         logger.info("")
         logger.info(sep)
-        logger.info(f"Walk-Forward Analysis Results - {self.strategy_name}")
-        mode = self.wf_mode
-        logger.info(
-            f"Loss: {self.config.get('hyperopt_loss', 'N/A')} | "
-            f"{len(all_results)} windows ({mode}) | "
-            f"{self.config.get('epochs', 150)} epochs/window"
-        )
+        logger.info(f"  WFA Results — {self.strategy_name}")
+        logger.info(f"  {loss} | {n} windows ({mode}) | {epochs} epochs/win")
         logger.info(sep)
 
         for r in all_results:
-            self._log_window_result(r)
+            w = r.window
+            ctx = r.market_context or {}
+            regime = ctx.get("regime", "")
+            regime_str = f"  [{regime}]" if regime else ""
+            wfe_str = f"  WFE {r.wfe:.0%}" if r.wfe != 0 else ""
+            logger.info(
+                f"  W{w.index + 1}  "
+                f"{w.test_start:%m-%d} -> {w.test_end:%m-%d}  "
+                f"{self._fmt_metrics(r.test_metrics)}"
+                f"{wfe_str}{regime_str}"
+            )
 
-        self._log_stability(stability)
+        self._log_holdout_and_oos(all_results, oos_profits)
 
         logger.info("")
-        logger.info(f"{'=' * 25} CONSENSUS PARAMS {'=' * 28}")
-        logger.info("  (weighted by test-period Calmar ratio)")
+        logger.info("  Consensus (weighted by Calmar):")
         for space, params in consensus.items():
             if isinstance(params, dict) and params:
                 parts = [f"{k}={v}" for k, v in params.items()]
-                logger.info(f"  {space}: {', '.join(parts)}")
+                logger.info(f"    {space}: {', '.join(parts)}")
+
+        marginal = [
+            k for k, v in stability.items() if not v.get("stable") and not v.get("unstable")
+        ]
+        unstable = [k for k, v in stability.items() if v.get("unstable")]
+        if unstable:
+            logger.info(f"  Unstable params: {', '.join(unstable)}")
+        if marginal:
+            logger.info(f"  Marginal params: {', '.join(marginal)}")
 
         if dsr is not None:
-            logger.info("")
-            logger.info(f"{'=' * 25} DEFLATED SHARPE {'=' * 29}")
-            logger.info(
-                f"  DSR p-value: {dsr:.3f} "
-                f"({'significant' if dsr > 0.95 else 'weak' if dsr > 0.5 else 'not significant'})"
-            )
-            n_trials = self.config.get("epochs", 150) * len(all_results)
-            logger.info(f"  Corrected for {n_trials} total trials")
+            n_trials = epochs * n
+            dsr_label = "significant" if dsr > 0.95 else "weak" if dsr > 0.5 else "not significant"
+            skew_str = f", skew={skewness:.1f}, kurt={kurtosis:.1f}" if abs(skewness) > 0.01 else ""
+            logger.info(f"  DSR: {dsr:.3f} ({dsr_label}{skew_str}) — {n_trials} trials")
 
-        self._log_holdout()
+        # Verdict
+        grade, checks = self._compute_verdict(
+            all_results,
+            stability,
+            dsr,
+            n_params,
+            oos_profits,
+        )
+        logger.info("")
+        logger.info(f"  VERDICT: {grade} — {self.VERDICT_LABELS.get(grade, '')}")
+        for _name, ok, desc in checks:
+            mark = "✓" if ok else "✗"
+            logger.info(f"    {mark} {desc}")
 
         if warnings:
             logger.info("")
-            logger.info(f"{'=' * 25} WARNING FLAGS {'=' * 31}")
             for w in warnings:
-                logger.info(f"  * {w}")
+                logger.info(f"  ! {w}")
 
-        logger.info("")
-        logger.info(
-            "Note: 5 windows = indication, not statistical proof. "
-            "Dry-run remains mandatory (tip #28)."
-        )
         logger.info(sep)
 
     # ------------------------------------------------------------------
@@ -1058,15 +1279,22 @@ class WalkForward:
         if not holdout_window or not consensus:
             return
 
-        logger.info("")
-        logger.info("Running holdout backtest with consensus params...")
-        self._restore_params(consensus, strategy_json)
-        ho_test = self._run_backtest(holdout_window.test_timerange_str(), exchange=exchange)
+        logger.info("Running holdout backtest...")
+        resolver_logger = logging.getLogger("freqtrade.resolvers")
+        prev_level = resolver_logger.level
+        resolver_logger.setLevel(logging.WARNING)
+        try:
+            self._restore_params(consensus, strategy_json)
+            ho_test = self._run_backtest(holdout_window.test_timerange_str(), exchange=exchange)
 
-        ho_baseline: dict[str, Any] = {}
-        if default_params:
-            self._restore_params(default_params, strategy_json)
-            ho_baseline = self._run_backtest(holdout_window.test_timerange_str(), exchange=exchange)
+            ho_baseline: dict[str, Any] = {}
+            if default_params:
+                self._restore_params(default_params, strategy_json)
+                ho_baseline = self._run_backtest(
+                    holdout_window.test_timerange_str(), exchange=exchange
+                )
+        finally:
+            resolver_logger.setLevel(prev_level)
 
         self.holdout_result = WindowResult(
             window=holdout_window,
@@ -1156,6 +1384,30 @@ class WalkForward:
 
                     market_ctx = self._compute_market_context(window.test_start, window.test_end)
 
+                    trade_profits = test_metrics.pop("trade_profits", [])
+                    train_days = (window.train_end - window.train_start).days
+                    test_days = (window.test_end - window.test_start).days
+                    wfe = self._compute_wfe(
+                        train_metrics.get("profit_pct", 0),
+                        test_metrics.get("profit_pct", 0),
+                        train_days,
+                        test_days,
+                    )
+
+                    # SQN + expectancy per window
+                    if len(trade_profits) > 1:
+                        tp_arr = np.array(trade_profits)
+                        tp_std = float(np.std(tp_arr))
+                        tp_mean = float(np.mean(tp_arr))
+                        test_metrics["sqn"] = (
+                            sqrt(len(tp_arr)) * tp_mean / tp_std if tp_std > 1e-10 else 0.0
+                        )
+                        test_metrics["expectancy"] = tp_mean
+                        wins = tp_arr[tp_arr > 0]
+                        losses = tp_arr[tp_arr < 0]
+                        test_metrics["avg_win"] = float(wins.mean()) if len(wins) else 0.0
+                        test_metrics["avg_loss"] = float(losses.mean()) if len(losses) else 0.0
+
                     result = WindowResult(
                         window=window,
                         train_metrics=train_metrics,
@@ -1164,6 +1416,8 @@ class WalkForward:
                         market_context=market_ctx,
                         params=params,
                         test_trade_count=test_metrics.get("trades", 0),
+                        test_trade_profits=trade_profits,
+                        wfe=wfe,
                     )
                     self.results.append(result)
                     dashboard.complete_window(result)
@@ -1176,7 +1430,7 @@ class WalkForward:
         finally:
             self._restore_original_json(strategy_json, original_json_bytes)
             if strategy_json:
-                logger.info(f"Restored original strategy JSON: {strategy_json}")
+                logger.debug(f"Restored original strategy JSON: {strategy_json}")
 
         if not self.results:
             logger.warning("No windows completed. Nothing to report.")
@@ -1192,7 +1446,12 @@ class WalkForward:
             all_params[: len(self.results)], weights=calmar_weights
         )
 
-        # Deflated Sharpe Ratio
+        # Aggregate OOS trade profits
+        all_oos_profits: list[float] = []
+        for r in self.results:
+            all_oos_profits.extend(r.test_trade_profits)
+
+        # Deflated Sharpe Ratio (with empirical skew/kurtosis)
         sharpes = [r.test_metrics.get("sharpe", 0) for r in self.results]
         avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
         n_trials = self.config.get("epochs", 150) * len(self.results)
@@ -1201,7 +1460,23 @@ class WalkForward:
             if self.results
             else 0
         )
-        dsr = self._deflated_sharpe_ratio(avg_sharpe, n_trials, max(avg_trades, 2))
+        skewness = 0.0
+        kurtosis = 3.0
+        if len(all_oos_profits) > 2:
+            arr = np.array(all_oos_profits)
+            mu = float(np.mean(arr))
+            std = float(np.std(arr))
+            if std > 1e-10:
+                z = (arr - mu) / std
+                skewness = float(np.mean(z**3))
+                kurtosis = float(np.mean(z**4))
+        dsr = self._deflated_sharpe_ratio(
+            avg_sharpe,
+            n_trials,
+            max(avg_trades, 2),
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
 
         self._run_holdout(
             consensus, default_params, strategy_json, original_json_bytes, exchange=exchange
@@ -1210,14 +1485,37 @@ class WalkForward:
         # Export consensus JSON (to wfa_dir only, never overwrites live JSON)
         self._export_consensus_json(consensus)
 
+        n_params = len(search_ranges)
+
         # Export full results
-        self._export_results_json(self.results, stability, consensus, dsr=dsr)
+        self._export_results_json(
+            self.results,
+            stability,
+            consensus,
+            dsr=dsr,
+            all_oos_profits=all_oos_profits,
+        )
 
         # Log and get run count
         run_count = self._log_wfa_run(self.results, stability)
 
         # Warnings
-        warnings = self._generate_warning_flags(self.results, stability, run_count)
+        warnings = self._generate_warning_flags(
+            self.results,
+            stability,
+            run_count,
+            n_params=n_params,
+        )
 
         # Report
-        self._format_report(self.results, stability, consensus, warnings, dsr=dsr)
+        self._format_report(
+            self.results,
+            stability,
+            consensus,
+            warnings,
+            dsr=dsr,
+            all_oos_profits=all_oos_profits,
+            n_params=n_params,
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )

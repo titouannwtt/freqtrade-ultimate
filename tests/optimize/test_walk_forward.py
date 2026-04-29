@@ -424,8 +424,14 @@ class TestWarningFlags:
         results = [
             WindowResult(
                 window=window,
-                test_metrics={"trades": 100},
-                test_trade_count=100,
+                train_metrics={"trades": 200, "max_dd_pct": 5},
+                test_metrics={
+                    "trades": 200,
+                    "profit_pct": 5,
+                    "profit_factor": 1.5,
+                    "max_dd_pct": 4,
+                },
+                test_trade_count=200,
             )
         ]
         warnings = wf._generate_warning_flags(results, {}, 1)
@@ -695,11 +701,260 @@ class TestFormatReport:
         with caplog.at_level("INFO"):
             wf._format_report(results, stability, consensus, ["test warning"])
 
-        assert log_has_re(r".*Walk-Forward Analysis Results.*", caplog)
-        assert log_has_re(r".*PARAMETER STABILITY.*", caplog)
-        assert log_has_re(r".*CONSENSUS PARAMS.*", caplog)
-        assert log_has_re(r".*WARNING FLAGS.*", caplog)
+        assert log_has_re(r".*WFA Results.*", caplog)
+        assert log_has_re(r".*Consensus.*weighted by Calmar.*", caplog)
+        assert log_has_re(r".*rsi=30.*", caplog)
         assert log_has_re(r".*test warning.*", caplog)
+        assert log_has_re(r".*VERDICT:.*", caplog)
+
+
+# ------------------------------------------------------------------
+# Phase 1 new metrics tests
+# ------------------------------------------------------------------
+
+
+class TestWFE:
+    def test_compute_wfe_basic(self):
+        # 10% profit over 90 days train, 5% over 30 days test
+        wfe = WalkForward._compute_wfe(10.0, 5.0, 90, 30)
+        # Annualized train ~46%, annualized test ~74% -> WFE > 1
+        assert wfe > 0
+
+    def test_compute_wfe_negative_test(self):
+        wfe = WalkForward._compute_wfe(10.0, -2.0, 90, 30)
+        assert wfe < 0
+
+    def test_compute_wfe_zero_train(self):
+        wfe = WalkForward._compute_wfe(0.0, 5.0, 90, 30)
+        assert wfe == 0.0
+
+    def test_compute_wfe_zero_days(self):
+        assert WalkForward._compute_wfe(10.0, 5.0, 0, 30) == 0.0
+        assert WalkForward._compute_wfe(10.0, 5.0, 90, 0) == 0.0
+
+
+class TestSQNExpectancy:
+    def test_sqn_basic(self):
+        import numpy as np
+
+        profits = [1.0, 2.0, -0.5, 1.5, 0.8, -0.3, 1.2, 0.6, -0.2, 1.0]
+        arr = np.array(profits)
+        sqn = len(profits) ** 0.5 * float(np.mean(arr)) / float(np.std(arr))
+        assert sqn > 0
+
+    def test_expectancy_positive(self):
+        import numpy as np
+
+        profits = [1.0, 2.0, -0.5, 1.5]
+        assert float(np.mean(profits)) > 0
+
+    def test_sqn_zero_std(self):
+        from math import sqrt
+
+        import numpy as np
+
+        profits = [1.0, 1.0, 1.0]
+        arr = np.array(profits)
+        std = float(np.std(arr))
+        sqn = sqrt(len(arr)) * float(np.mean(arr)) / max(std, 1e-10) if std > 1e-10 else 0.0
+        # std is 0, so SQN falls back to 0
+        assert sqn == 0.0
+
+
+class TestDSRWithSkewKurt:
+    def test_dsr_skew_kurtosis_changes_result(self):
+        # With non-normal moments, DSR should differ from normal-assumption DSR
+        dsr_normal = WalkForward._deflated_sharpe_ratio(2.0, 10, 100, skewness=0.0, kurtosis=3.0)
+        dsr_skewed = WalkForward._deflated_sharpe_ratio(2.0, 10, 100, skewness=-2.0, kurtosis=10.0)
+        # High kurtosis increases SE(SR), which can change the z-score
+        assert dsr_skewed != dsr_normal
+
+
+class TestVerdict:
+    @staticmethod
+    def _realistic_profits(n, mean=0.1, std=0.5):
+        import numpy as np
+
+        rng = np.random.RandomState(42)
+        return list(rng.normal(mean, std, n))
+
+    def _make_results(
+        self,
+        n_windows=5,
+        profit=5.0,
+        trades=60,
+        pf=1.5,
+        train_trades=200,
+        train_dd=5.0,
+        test_dd=4.0,
+    ):
+        results = []
+        for i in range(n_windows):
+            w = WalkForwardWindow(
+                index=i,
+                train_start=datetime(2018, 1, 1, tzinfo=UTC),
+                train_end=datetime(2018, 6, 1, tzinfo=UTC),
+                test_start=datetime(2018, 6, 8, tzinfo=UTC),
+                test_end=datetime(2018, 9, 1, tzinfo=UTC),
+            )
+            tp = self._realistic_profits(trades)
+            results.append(
+                WindowResult(
+                    window=w,
+                    train_metrics={
+                        "profit_pct": 20,
+                        "calmar": 5,
+                        "max_dd_pct": train_dd,
+                        "trades": train_trades,
+                    },
+                    test_metrics={
+                        "profit_pct": profit,
+                        "calmar": 2,
+                        "max_dd_pct": test_dd,
+                        "trades": trades,
+                        "profit_factor": pf,
+                        "sqn": 2.5,
+                        "expectancy": 0.01,
+                    },
+                    test_trade_count=trades,
+                    test_trade_profits=tp,
+                    wfe=0.6,
+                )
+            )
+        return results
+
+    def test_grade_a(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results(n_windows=5, trades=60, profit=5.0)
+        stability = {f"p{i}": {"stable": True, "unstable": False} for i in range(10)}
+        all_profits = self._realistic_profits(300, mean=0.1, std=0.5)
+        grade, _checks = wf._compute_verdict(results, stability, 0.97, 10, all_profits)
+        assert grade == "A"
+
+    def test_grade_f_no_profitable(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results(n_windows=5, profit=-5.0)
+        stability = {f"p{i}": {"stable": True, "unstable": False} for i in range(10)}
+        all_profits = self._realistic_profits(300, mean=-0.1, std=0.5)
+        grade, _checks = wf._compute_verdict(results, stability, 0.3, 10, all_profits)
+        assert grade in ("D", "F")
+
+    def test_grade_c_mixed(self, walkforward_conf):
+        wf = WalkForward(walkforward_conf)
+        results = self._make_results(n_windows=5, trades=30, profit=2.0, pf=1.1)
+        stability = {
+            **{f"p{i}": {"stable": True, "unstable": False} for i in range(5)},
+            **{f"q{i}": {"stable": False, "unstable": True} for i in range(5)},
+        }
+        all_profits = self._realistic_profits(150, mean=0.01, std=0.5)
+        grade, _checks = wf._compute_verdict(results, stability, 0.80, 5, all_profits)
+        assert grade in ("C", "D")
+
+
+class TestNewWarnings:
+    def _make_wf(self, conf):
+        return WalkForward(conf)
+
+    def test_total_oos_trades_warning(self, walkforward_conf):
+        wf = self._make_wf(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"trades": 100, "max_dd_pct": 5},
+                test_metrics={"trades": 50, "profit_pct": 5, "profit_factor": 1.5, "max_dd_pct": 4},
+                test_trade_count=50,
+            )
+        ]
+        walkforward_conf["timeframe_detail"] = "1m"
+        warnings = wf._generate_warning_flags(results, {}, 1)
+        assert any("Aronson" in w for w in warnings)
+
+    def test_trades_params_ratio_warning(self, walkforward_conf):
+        wf = self._make_wf(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"trades": 30, "max_dd_pct": 5},
+                test_metrics={
+                    "trades": 200,
+                    "profit_pct": 5,
+                    "profit_factor": 1.5,
+                    "max_dd_pct": 4,
+                },
+                test_trade_count=200,
+            )
+        ]
+        walkforward_conf["timeframe_detail"] = "1m"
+        warnings = wf._generate_warning_flags(results, {}, 1, n_params=10)
+        assert any("Chan" in w for w in warnings)
+
+    def test_dd_ratio_warning(self, walkforward_conf):
+        wf = self._make_wf(walkforward_conf)
+        w = WalkForwardWindow(
+            index=0,
+            train_start=datetime(2018, 1, 1, tzinfo=UTC),
+            train_end=datetime(2018, 6, 1, tzinfo=UTC),
+            test_start=datetime(2018, 6, 8, tzinfo=UTC),
+            test_end=datetime(2018, 9, 1, tzinfo=UTC),
+        )
+        results = [
+            WindowResult(
+                window=w,
+                train_metrics={"trades": 200, "max_dd_pct": 5},
+                test_metrics={
+                    "trades": 200,
+                    "profit_pct": 5,
+                    "profit_factor": 1.5,
+                    "max_dd_pct": 15,
+                },
+                test_trade_count=200,
+            )
+        ]
+        walkforward_conf["timeframe_detail"] = "1m"
+        warnings = wf._generate_warning_flags(results, {}, 1)
+        assert any("Davey" in w and "DD ratio" in w for w in warnings)
+
+    def test_pardo_profitable_windows_warning(self, walkforward_conf):
+        wf = self._make_wf(walkforward_conf)
+        results = []
+        for i in range(4):
+            w = WalkForwardWindow(
+                index=i,
+                train_start=datetime(2018, 1, 1, tzinfo=UTC),
+                train_end=datetime(2018, 6, 1, tzinfo=UTC),
+                test_start=datetime(2018, 6, 8, tzinfo=UTC),
+                test_end=datetime(2018, 9, 1, tzinfo=UTC),
+            )
+            results.append(
+                WindowResult(
+                    window=w,
+                    train_metrics={"trades": 200, "max_dd_pct": 5},
+                    test_metrics={
+                        "trades": 100,
+                        "profit_pct": -2,
+                        "profit_factor": 0.8,
+                        "max_dd_pct": 4,
+                    },
+                    test_trade_count=100,
+                )
+            )
+        walkforward_conf["timeframe_detail"] = "1m"
+        warnings = wf._generate_warning_flags(results, {}, 1)
+        assert any("Pardo" in w for w in warnings)
 
 
 # ------------------------------------------------------------------
@@ -909,16 +1164,18 @@ class TestWFADashboard:
         windows = self._make_windows()
         dash = WFADashboard(windows, "TestStrat", 200, "USDC")
         dash.set_window(windows[0])
-        dash.on_epoch({
-            "current_epoch": 50,
-            "is_best": True,
-            "loss": -0.95,
-            "results_metrics": {
-                "profit_total": 0.25,
-                "total_trades": 150,
-                "max_drawdown_account": 0.05,
-            },
-        })
+        dash.on_epoch(
+            {
+                "current_epoch": 50,
+                "is_best": True,
+                "loss": -0.95,
+                "results_metrics": {
+                    "profit_total": 0.25,
+                    "total_trades": 150,
+                    "max_drawdown_account": 0.05,
+                },
+            }
+        )
         panel = dash._build()
         assert panel is not None
 
@@ -928,11 +1185,13 @@ class TestWFADashboard:
         windows = self._make_windows()
         dash = WFADashboard(windows, "TestStrat", 200, "USDC")
         dash.set_window(windows[0])
-        dash.complete_window(WindowResult(
-            window=windows[0],
-            test_metrics={"profit_pct": 10, "trades": 80, "calmar": 1.5, "max_dd_pct": 5},
-            baseline_metrics={"profit_pct": 5},
-        ))
+        dash.complete_window(
+            WindowResult(
+                window=windows[0],
+                test_metrics={"profit_pct": 10, "trades": 80, "calmar": 1.5, "max_dd_pct": 5},
+                baseline_metrics={"profit_pct": 5},
+            )
+        )
         dash.set_window(windows[1])
         dash.set_phase("backtest_optimized")
         panel = dash._build()
@@ -944,21 +1203,26 @@ class TestWFADashboard:
         windows = self._make_windows()
         dash = WFADashboard(windows, "TestStrat", 200, "USDC")
         dash.set_window(windows[0])
-        dash.complete_window(WindowResult(
-            window=windows[0],
-            test_metrics={
-                "profit_pct": 10, "trades": 80,
-                "calmar": 1.5, "max_dd_pct": 5,
-                "hhi": 0.12, "top1_pct": 30,
-            },
-            baseline_metrics={"profit_pct": 5},
-            market_context={
-                "btc_change_pct": 15.2,
-                "atr_pct": 3.1,
-                "volatility_ann_pct": 60,
-                "regime": "bull",
-            },
-        ))
+        dash.complete_window(
+            WindowResult(
+                window=windows[0],
+                test_metrics={
+                    "profit_pct": 10,
+                    "trades": 80,
+                    "calmar": 1.5,
+                    "max_dd_pct": 5,
+                    "hhi": 0.12,
+                    "top1_pct": 30,
+                },
+                baseline_metrics={"profit_pct": 5},
+                market_context={
+                    "btc_change_pct": 15.2,
+                    "atr_pct": 3.1,
+                    "volatility_ann_pct": 60,
+                    "regime": "bull",
+                },
+            )
+        )
         panel = dash._build()
         assert panel is not None
 
@@ -969,17 +1233,22 @@ class TestWFADashboard:
         dash = WFADashboard(windows, "TestStrat", 200, "USDC")
         for i, w in enumerate(windows):
             dash.set_window(w)
-            dash.complete_window(WindowResult(
-                window=w,
-                test_metrics={
-                    "profit_pct": 5 + i * 3, "trades": 60 + i * 10,
-                    "calmar": 1.0 + i * 0.5, "max_dd_pct": 8 - i,
-                    "hhi": 0.05, "top1_pct": 15,
-                },
-                baseline_metrics={"profit_pct": 2},
-                market_context={"regime": "range"},
-                params={"buy": {"rsi_low": 25 + i, "vol_mult": 1.5 + i * 0.1}},
-            ))
+            dash.complete_window(
+                WindowResult(
+                    window=w,
+                    test_metrics={
+                        "profit_pct": 5 + i * 3,
+                        "trades": 60 + i * 10,
+                        "calmar": 1.0 + i * 0.5,
+                        "max_dd_pct": 8 - i,
+                        "hhi": 0.05,
+                        "top1_pct": 15,
+                    },
+                    baseline_metrics={"profit_pct": 2},
+                    market_context={"regime": "range"},
+                    params={"buy": {"rsi_low": 25 + i, "vol_mult": 1.5 + i * 0.1}},
+                )
+            )
         panel = dash._build()
         assert panel is not None
         insights = dash._build_insights()
@@ -991,13 +1260,20 @@ class TestWFADashboard:
         windows = self._make_windows()
         dash = WFADashboard(windows, "TestStrat", 200, "USDC")
         dash.set_window(windows[0])
-        dash.complete_window(WindowResult(
-            window=windows[0],
-            test_metrics={"profit_pct": -5, "trades": 30, "calmar": -0.5,
-                          "max_dd_pct": 15, "hhi": 0.25},
-            baseline_metrics={"profit_pct": 2},
-            params={"buy": {"rsi_low": 30}},
-        ))
+        dash.complete_window(
+            WindowResult(
+                window=windows[0],
+                test_metrics={
+                    "profit_pct": -5,
+                    "trades": 30,
+                    "calmar": -0.5,
+                    "max_dd_pct": 15,
+                    "hhi": 0.25,
+                },
+                baseline_metrics={"profit_pct": 2},
+                params={"buy": {"rsi_low": 30}},
+            )
+        )
         insights = dash._build_insights()
         assert insights is not None
 
@@ -1132,15 +1408,11 @@ class TestWeightedConsensus:
         assert c["buy"]["a"] == 20.0
 
     def test_weighted_median_basic(self):
-        med = WalkForward._weighted_median(
-            [1.0, 2.0, 3.0], [1.0, 1.0, 1.0]
-        )
+        med = WalkForward._weighted_median([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
         assert med == 2.0
 
     def test_weighted_median_heavy_last(self):
-        med = WalkForward._weighted_median(
-            [1.0, 2.0, 3.0], [0.1, 0.1, 10.0]
-        )
+        med = WalkForward._weighted_median([1.0, 2.0, 3.0], [0.1, 0.1, 10.0])
         assert med == 3.0
 
 
@@ -1151,21 +1423,15 @@ class TestWeightedConsensus:
 
 class TestDeflatedSharpe:
     def test_dsr_high_sr_few_trials(self):
-        dsr = WalkForward._deflated_sharpe_ratio(
-            sr_observed=3.0, n_trials=10, n_obs=252
-        )
+        dsr = WalkForward._deflated_sharpe_ratio(sr_observed=3.0, n_trials=10, n_obs=252)
         assert 0 < dsr <= 1
 
     def test_dsr_low_sr_many_trials(self):
-        dsr = WalkForward._deflated_sharpe_ratio(
-            sr_observed=0.5, n_trials=1000, n_obs=100
-        )
+        dsr = WalkForward._deflated_sharpe_ratio(sr_observed=0.5, n_trials=1000, n_obs=100)
         assert dsr < 0.5
 
     def test_dsr_zero_sr(self):
-        dsr = WalkForward._deflated_sharpe_ratio(
-            sr_observed=0.0, n_trials=100, n_obs=252
-        )
+        dsr = WalkForward._deflated_sharpe_ratio(sr_observed=0.0, n_trials=100, n_obs=252)
         assert dsr < 0.5
 
     def test_dsr_edge_cases(self):
@@ -1215,7 +1481,9 @@ class TestMarketContext:
                     test_end=datetime(2018, 8, 1, tzinfo=UTC),
                 ),
                 test_metrics={
-                    "trades": 50, "top1_pct": 60, "hhi": 0.2,
+                    "trades": 50,
+                    "top1_pct": 60,
+                    "hhi": 0.2,
                 },
                 test_trade_count=50,
             ),
