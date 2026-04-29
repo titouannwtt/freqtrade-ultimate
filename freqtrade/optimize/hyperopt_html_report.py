@@ -82,6 +82,10 @@ class HyperoptHTMLReport:
         return f"<details><summary>{html.escape(summary)}</summary><div>{body}</div></details>"
 
     @staticmethod
+    def _L(en: str, fr: str) -> str:
+        return f'<span lang="en">{en}</span><span lang="fr">{fr}</span>'
+
+    @staticmethod
     def _fmt(value: float, decimals: int = 2) -> str:
         try:
             return f"{value:.{decimals}f}"
@@ -156,6 +160,7 @@ class HyperoptHTMLReport:
         sampler = self._esc(self.d.get("sampler") or "TPESampler")
         ts = self._esc(self.d.get("timestamp", ""))
         total_epochs = self.d.get("total_epochs", 0)
+        L = self._L
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -164,8 +169,15 @@ class HyperoptHTMLReport:
 <style>{self._css()}</style>
 </head>
 <body>
+<div class="lang-bar">
+  {L("Language", "Langue")}:
+  <select onchange="document.documentElement.lang=this.value">
+    <option value="en">English</option>
+    <option value="fr">Français</option>
+  </select>
+</div>
 <div class="container">
-<h1>Hyperopt Report — {strategy}</h1>
+<h1>{L("Hyperopt Report", "Rapport Hyperopt")} — {strategy}</h1>
 <p class="meta">
   {loss} | {sampler} | {total_epochs} epochs | {ts}
 </p>"""
@@ -227,6 +239,18 @@ details > div {
   padding: 8px 0 8px 16px; color: #bbb; font-size: 0.85em; line-height: 1.6;
 }
 .best-rank { color: #00d4ff; font-weight: bold; }
+[lang="fr"] { display: none; }
+html:lang(fr) [lang="en"] { display: none; }
+html:lang(fr) [lang="fr"] { display: inline; }
+.lang-bar {
+  position: fixed; top: 10px; right: 20px; z-index: 100;
+  background: #16213e; border: 1px solid #2a2a4a; border-radius: 6px;
+  padding: 4px 8px; font-size: 0.85em;
+}
+.lang-bar select {
+  background: #0f0f23; color: #e0e0e0; border: 1px solid #2a2a4a;
+  border-radius: 4px; padding: 2px 6px; font-size: 0.9em; cursor: pointer;
+}
 .mini-section {
   background: #16213e; padding: 12px 16px; border-radius: 6px;
   margin: 10px 0; font-size: 0.88em; line-height: 1.6;
@@ -243,7 +267,8 @@ details > div {
 
     @staticmethod
     def _section_intro() -> str:
-        what_is = (
+        L = HyperoptHTMLReport._L
+        what_en = (
             "Hyperopt runs your strategy hundreds or thousands of times with different "
             "parameter combinations, looking for the set that optimizes a loss function "
             "(e.g. Calmar ratio, Sharpe). The result is the single best epoch — the "
@@ -261,10 +286,31 @@ details > div {
             "<strong>Parameter Agreement</strong> = stable params are more trustworthy. "
             "Hover over underlined terms for definitions."
         )
+        what_fr = (
+            "Hyperopt lance votre stratégie des centaines ou milliers de fois avec "
+            "différentes combinaisons de paramètres, cherchant celle qui optimise une "
+            "fonction de perte (ex. ratio Calmar, Sharpe). Le résultat est le meilleur "
+            "epoch — le jeu de paramètres qui a minimisé la perte sur vos données."
+            "<br><br>"
+            "<strong>Attention :</strong> Les résultats hyperopt sont in-sample — "
+            "l'optimiseur a vu les mêmes données sur lesquelles il est évalué. Un bon "
+            "résultat ne garantit pas la rentabilité en live. Validez toujours avec une "
+            "analyse walk-forward ou un dry-run avant d'engager du capital réel."
+            "<br><br>"
+            "<strong>Lire ce rapport :</strong> "
+            "<strong>Meilleur Epoch</strong> = les métriques des paramètres optimisés. "
+            "<strong>Top 10</strong> = les 10 meilleurs epochs par perte — vérifiez la cohérence. "
+            "<strong>Convergence</strong> = comment l'optimiseur s'est amélioré. "
+            "<strong>Accord des paramètres</strong> = les paramètres stables sont plus fiables. "
+            "Survolez les termes soulignés pour les définitions."
+        )
+        body = L(what_en, what_fr)
+        summary_en = "What is hyperopt and how to read this report?"
+        summary_fr = "Qu'est-ce que l'hyperopt et comment lire ce rapport ?"
         return (
-            '<div class="intro">'
-            + HyperoptHTMLReport._details("What is hyperopt and how to read this report?", what_is)
-            + "</div>"
+            '<div class="intro"><details><summary>'
+            + L(html.escape(summary_en), html.escape(summary_fr))
+            + f"</summary><div>{body}</div></details></div>"
         )
 
     def _section_best_epoch(self) -> str:
@@ -300,20 +346,21 @@ details > div {
                 f'<span class="kv-value">{value}</span></span>'
             )
 
+        L = self._L
         rows = [
             kv("Trades", str(total_trades)),
-            kv("W / D / L", f"{wins} / {draws} / {losses}"),
+            kv(L("W / D / L", "V / N / D"), f"{wins} / {draws} / {losses}"),
             kv(
-                self._tip("expectancy", "Win rate"),
+                L(self._tip("expectancy", "Win rate"), self._tip("expectancy", "Taux de gain")),
                 f'<span class="{p_cls}">{winrate:.1%}</span>',
             ),
             kv(
-                "Total Profit",
+                L("Total Profit", "Profit total"),
                 f'<span class="{p_cls}">{sign}{self._fmt(profit_pct)}%'
                 f" ({self._fmt(profit_abs)} {sc})</span>",
             ),
             kv(
-                "Avg Profit / Trade",
+                L("Avg Profit / Trade", "Profit moy. / Trade"),
                 f'<span class="{p_cls}">{sign}{self._fmt(profit_mean_pct, 3)}%</span>',
             ),
             kv(
@@ -330,25 +377,32 @@ details > div {
             ),
             kv("Sortino", self._fmt(sortino)),
             kv(
-                self._tip("pf", "Profit Factor") + self._threshold_badge("pf", pf),
+                L(self._tip("pf", "Profit Factor"), self._tip("pf", "Facteur de profit"))
+                + self._threshold_badge("pf", pf),
                 self._fmt(pf),
             ),
             kv(
-                self._tip("dd", "Max Drawdown"),
+                L(self._tip("dd", "Max Drawdown"), self._tip("dd", "Drawdown max.")),
                 f"{self._fmt(dd_pct)}% ({self._fmt(dd_abs)} {sc})" + self._benchmark_tag("dd"),
             ),
             kv(
-                self._tip("expectancy", "Expectancy"),
+                L(self._tip("expectancy", "Expectancy"), self._tip("expectancy", "Espérance")),
                 f"{self._fmt(expectancy)} {sc}",
             ),
-            kv("Expectancy Ratio", self._fmt(expectancy_ratio)),
-            kv("Avg Holding", holding),
+            kv(L("Expectancy Ratio", "Ratio d'espérance"), self._fmt(expectancy_ratio)),
+            kv(L("Avg Holding", "Durée moyenne"), holding),
         ]
         skew_html = self._skew_kurtosis_badges()
         if skew_html:
             rows.append(skew_html)
 
-        return '<div class="section"><h2>Best Epoch — Summary</h2>' + "".join(rows) + "</div>"
+        return (
+            '<div class="section"><h2>'
+            + L("Best Epoch — Summary", "Meilleur Epoch — Résumé")
+            + "</h2>"
+            + "".join(rows)
+            + "</div>"
+        )
 
     def _section_best_params(self) -> str:
         best_params = self.d.get("best_params", {})
@@ -371,12 +425,17 @@ details > div {
                     f"<td><code>{self._esc(str(v))}</code></td></tr>\n"
                 )
 
+        L = self._L
         return (
-            '<div class="section"><h2>Best Parameters</h2>'
-            "<table>"
-            "<tr><th>Space</th><th>Parameter</th><th>Value</th></tr>"
-            f"{rows}"
-            "</table></div>"
+            '<div class="section"><h2>'
+            + L("Best Parameters", "Meilleurs paramètres")
+            + "</h2><table><tr><th>"
+            + L("Space", "Espace")
+            + "</th><th>"
+            + L("Parameter", "Paramètre")
+            + "</th><th>"
+            + L("Value", "Valeur")
+            + f"</th></tr>{rows}</table></div>"
         )
 
     def _section_top10_table(self) -> str:
@@ -407,10 +466,13 @@ details > div {
                 f"<td>{self._fmt(pf)}</td></tr>\n"
             )
 
+        L = self._L
         return (
             '<div class="section"><h2>Top 10 Epochs</h2>'
             "<table>"
-            f"<tr><th>Rank</th><th>Loss</th><th>Trades</th><th>Profit%</th>"
+            f"<tr><th>{L('Rank', 'Rang')}</th>"
+            f"<th>{L('Loss', 'Perte')}</th>"
+            f"<th>Trades</th><th>Profit%</th>"
             f"<th>{self._tip('dd', 'Max DD%')}</th>"
             f"<th>{self._tip('calmar', 'Calmar')}</th>"
             f"<th>Sharpe</th>"
@@ -424,8 +486,11 @@ details > div {
         if len(all_losses) < 2:
             return ""
         dd_data = self.d.get("epoch_dd_data") or []
+        L = self._L
         return (
-            '<div class="section"><h2>Convergence Chart</h2>'
+            '<div class="section"><h2>'
+            + L("Convergence Chart", "Graphique de convergence")
+            + "</h2>"
             + self._svg_convergence(all_losses, dd_data)
             + "</div>"
         )
@@ -623,20 +688,40 @@ details > div {
                     f"<td style='color:#888;font-size:0.8em'>{vals_str}</td></tr>\n"
                 )
 
-        explainer = self._details(
-            "How to read this section",
+        L = self._L
+        explainer_en = (
             "Parameters that stay consistent across the top-10 epochs are 'stable' "
             "(std/range &lt; 15%) — the optimizer found a real pattern. "
             "'Unstable' params (std/range &gt; 30%) vary wildly, suggesting the "
             "optimizer is fitting noise. Consider freezing unstable params at "
-            "sensible defaults.",
+            "sensible defaults."
+        )
+        explainer_fr = (
+            "Les paramètres cohérents dans le top-10 sont 'stables' "
+            "(éc.-type/étendue &lt; 15%) — l'optimiseur a trouvé un vrai pattern. "
+            "Les paramètres 'instables' (éc.-type/étendue &gt; 30%) varient beaucoup, "
+            "signe que l'optimiseur fit du bruit. Figez les paramètres instables "
+            "à des valeurs par défaut raisonnables."
+        )
+        explainer = (
+            "<details><summary>"
+            + L("How to read this section", "Comment lire cette section")
+            + "</summary><div>"
+            + L(explainer_en, explainer_fr)
+            + "</div></details>"
         )
         return (
-            '<div class="section"><h2>Top-10 Parameter Agreement</h2>'
+            '<div class="section"><h2>'
+            + L("Top-10 Parameter Agreement", "Accord des paramètres Top-10")
+            + "</h2>"
             f"{explainer}"
             "<table>"
-            "<tr><th>Parameter</th><th>Mean</th><th>Std</th>"
-            "<th>Std/Range</th><th>Status</th><th>Values</th></tr>"
+            f"<tr><th>{L('Parameter', 'Paramètre')}</th>"
+            f"<th>{L('Mean', 'Moyenne')}</th>"
+            f"<th>{L('Std', 'Éc.-type')}</th>"
+            f"<th>{L('Std/Range', 'Éc.-type/Étendue')}</th>"
+            f"<th>{L('Status', 'Statut')}</th>"
+            f"<th>{L('Values', 'Valeurs')}</th></tr>"
             f"{rows}"
             "</table></div>"
         )
@@ -650,22 +735,27 @@ details > div {
         if not st:
             return ""
         sc = self._esc(self.d.get("stake_currency", "USDC"))
+        L = self._L
         fragile_badge = (
-            ' <span style="color:#ef4444;font-weight:bold">FRAGILE — luck, not edge</span>'
+            ' <span style="color:#ef4444;font-weight:bold">'
+            + L("FRAGILE — luck, not edge", "FRAGILE — chance, pas un edge")
+            + "</span>"
             if st["fragile"]
             else ""
         )
+        tip_en = self._tip("profit_concentration", "Concentration Risk")
+        tip_fr = self._tip("profit_concentration", "Risque de concentration")
         return (
             '<div class="section">'
-            f"<h2>{self._tip('profit_concentration', 'Concentration Risk')}"
-            " — Sans Top Trade Test</h2>"
+            f"<h2>{L(tip_en, tip_fr)}"
+            f" — {L('Sans Top Trade Test', 'Test sans meilleur trade')}</h2>"
             '<div class="mini-section">'
-            f"Total profit: <strong>{self._fmt(st['total_profit'])}"
-            f" {sc}</strong><br>"
-            f"Without best trade: {self._fmt(st['without_top1'])}"
-            f" {sc} ({st['without_top1_pct']:.1f}%)<br>"
-            f"Without top 2 trades: {self._fmt(st['without_top2'])}"
-            f" {sc} ({st['without_top2_pct']:.1f}%)"
+            f"{L('Total profit', 'Profit total')}: "
+            f"<strong>{self._fmt(st['total_profit'])} {sc}</strong><br>"
+            f"{L('Without best trade', 'Sans le meilleur trade')}: "
+            f"{self._fmt(st['without_top1'])} {sc} ({st['without_top1_pct']:.1f}%)<br>"
+            f"{L('Without top 2 trades', 'Sans les 2 meilleurs trades')}: "
+            f"{self._fmt(st['without_top2'])} {sc} ({st['without_top2_pct']:.1f}%)"
             f"{fragile_badge}"
             "</div></div>"
         )
@@ -674,8 +764,13 @@ details > div {
         pairs = self.d.get("pair_profit_distribution", [])
         if not pairs:
             return ""
+        L = self._L
         return (
-            '<div class="section"><h2>Profit by Pair</h2>' + self._svg_pair_bars(pairs) + "</div>"
+            '<div class="section"><h2>'
+            + L("Profit by Pair", "Profit par paire")
+            + "</h2>"
+            + self._svg_pair_bars(pairs)
+            + "</div>"
         )
 
     @staticmethod
@@ -718,20 +813,27 @@ details > div {
         bvm = self.d.get("best_vs_median_gap")
         if not bvm:
             return ""
+        L = self._L
         badge = ""
         if bvm["outlier"]:
             badge = (
-                ' <span style="color:#eab308;font-size:0.85em">'
-                "(outlier — may be the luckiest, not the best)</span>"
+                ' <span style="color:#eab308;font-size:0.85em">('
+                + L(
+                    "outlier — may be the luckiest, not the best",
+                    "outlier — peut-être le plus chanceux, pas le meilleur",
+                )
+                + ")</span>"
             )
         return (
             '<div class="section">'
-            "<h2>Best vs. Median Top-10</h2>"
+            "<h2>" + L("Best vs. Median Top-10", "Meilleur vs. Médiane Top-10") + "</h2>"
             '<div class="mini-section">'
-            f"Best epoch profit: <strong>{bvm['best_profit']:.2f}%"
-            f"</strong> | Median top-10: "
-            f"<strong>{bvm['median_profit']:.2f}%</strong>"
-            f" | Gap: <strong>{bvm['gap_ratio']:.2f}x</strong>"
+            + L("Best epoch profit", "Profit du meilleur epoch")
+            + f": <strong>{bvm['best_profit']:.2f}%"
+            f"</strong> | "
+            + L("Median top-10", "Médiane top-10")
+            + f": <strong>{bvm['median_profit']:.2f}%</strong>"
+            f" | " + L("Gap", "Écart") + f": <strong>{bvm['gap_ratio']:.2f}x</strong>"
             f"{badge}"
             "</div></div>"
         )
@@ -740,7 +842,10 @@ details > div {
         bands = self.d.get("dispersion_bands") or {}
         if not bands:
             return ""
-        parts = ['<div class="section"><h2>Top-10 Dispersion</h2>']
+        L = self._L
+        parts = [
+            '<div class="section"><h2>' + L("Top-10 Dispersion", "Dispersion Top-10") + "</h2>"
+        ]
         labels = {
             "profit": "Profit %",
             "drawdown": "Max DD %",
@@ -791,8 +896,11 @@ details > div {
         hist = self.d.get("loss_histogram")
         if not hist or not hist.get("bins"):
             return ""
+        L = self._L
         return (
-            '<div class="section"><h2>Loss Distribution</h2>'
+            '<div class="section"><h2>'
+            + L("Loss Distribution", "Distribution des pertes")
+            + "</h2>"
             + self._svg_loss_histogram(hist)
             + "</div>"
         )
@@ -863,9 +971,11 @@ details > div {
         params = sorted({c["param_a"] for c in corr} | {c["param_b"] for c in corr})
         if len(params) < 2:
             return ""
+        L = self._L
         return (
-            '<div class="section">'
-            "<h2>Parameter Correlation (Top-10)</h2>"
+            '<div class="section"><h2>'
+            + L("Parameter Correlation (Top-10)", "Corrélation des paramètres (Top-10)")
+            + "</h2>"
             + self._svg_correlation_heatmap(corr, params)
             + "</div>"
         )
@@ -873,8 +983,8 @@ details > div {
     @staticmethod
     def _svg_correlation_heatmap(corr: list[dict], params: list[str]) -> str:
         n = len(params)
-        cell = 45
-        pad_l, pad_t = 100, 80
+        cell = 50
+        pad_l, pad_t = 110, 110
         w = pad_l + n * cell + 10
         h = pad_t + n * cell + 10
         idx = {p: i for i, p in enumerate(params)}
@@ -895,18 +1005,18 @@ details > div {
 
         elems = []
         for i, p in enumerate(params):
-            lbl = html.escape(p[:12])
-            x = pad_l + i * cell + cell // 2
+            lbl = html.escape(p[:16])
+            cx = pad_l + i * cell + cell // 2
             elems.append(
-                f'<text x="{x}" y="{pad_t - 8}" fill="#bbb" '
-                f'font-size="9" text-anchor="middle" '
-                f'transform="rotate(-45 {x} {pad_t - 8})">'
+                f'<text x="{cx}" y="{pad_t - 10}" fill="#bbb" '
+                f'font-size="10" text-anchor="end" '
+                f'transform="rotate(-50 {cx} {pad_t - 10})">'
                 f"{lbl}</text>"
             )
-            y = pad_t + i * cell + cell // 2 + 3
+            y = pad_t + i * cell + cell // 2 + 4
             elems.append(
-                f'<text x="{pad_l - 6}" y="{y}" fill="#bbb" '
-                f'font-size="9" text-anchor="end">{lbl}</text>'
+                f'<text x="{pad_l - 8}" y="{y}" fill="#bbb" '
+                f'font-size="10" text-anchor="end">{lbl}</text>'
             )
         for i in range(n):
             for j in range(n):
@@ -938,9 +1048,13 @@ details > div {
         lines = pc.get("lines", [])
         if len(params) < 2 or len(lines) < 3:
             return ""
+        L = self._L
         return (
-            '<div class="section">'
-            "<h2>Parallel Coordinates (Top-10)</h2>" + self._svg_parallel_coords(pc) + "</div>"
+            '<div class="section"><h2>'
+            + L("Parallel Coordinates (Top-10)", "Coordonnées parallèles (Top-10)")
+            + "</h2>"
+            + self._svg_parallel_coords(pc)
+            + "</div>"
         )
 
     @staticmethod
@@ -1011,15 +1125,16 @@ details > div {
         one_liner = self._esc(entry.get("one_liner", ""))
         best_for = self._esc(entry.get("best_for", ""))
         metrics = self._esc(entry.get("metrics", ""))
+        L = self._L
         parts = [
-            '<div class="section"><h2>Loss Function</h2>'
+            '<div class="section"><h2>' + L("Loss Function", "Fonction de perte") + "</h2>"
             f'<div class="explain-box">'
             f"<strong>{self._esc(loss_name)}</strong> — {one_liner}",
         ]
         if best_for:
-            parts.append(f"<br><strong>Best for:</strong> {best_for}")
+            parts.append(f"<br><strong>{L('Best for', 'Idéal pour')}:</strong> {best_for}")
         if metrics:
-            parts.append(f"<br><strong>Metrics:</strong> {metrics}")
+            parts.append(f"<br><strong>{L('Metrics', 'Métriques')}:</strong> {metrics}")
         parts.append("</div></div>")
         return "".join(parts)
 
@@ -1030,8 +1145,9 @@ details > div {
             return ""
         one_liner = self._esc(entry.get("one_liner", ""))
         explanation = self._esc(entry.get("explanation", ""))
+        L = self._L
         return (
-            '<div class="section"><h2>Sampler</h2>'
+            '<div class="section"><h2>' + L("Sampler", "Échantillonneur") + "</h2>"
             f'<div class="explain-box">'
             f"<strong>{self._esc(sampler_name)}</strong> — {one_liner}"
             f"<br><br>{explanation}"
@@ -1048,47 +1164,84 @@ details > div {
         strategy_raw = self.d.get("strategy", "Strategy")
         strategy = self._esc(strategy_raw)
 
+        L = self._L
         if profit_total <= 0:
-            guidance = (
+            guidance_en = (
                 "The best epoch is not profitable. This is a clear signal the parameters "
                 "found do not produce an edge on this data. Do NOT deploy. Consider: "
                 "expanding the timerange, reducing the number of optimized parameters, "
                 "switching loss function, or revisiting the strategy logic itself."
             )
+            guidance_fr = (
+                "Le meilleur epoch n'est pas rentable. Les paramètres trouvés ne produisent "
+                "pas d'edge sur ces données. NE PAS déployer. Envisagez : élargir le timerange, "
+                "réduire le nombre de paramètres optimisés, changer de fonction de perte, "
+                "ou revoir la logique de la stratégie."
+            )
         elif calmar < 0.5:
-            guidance = (
+            guidance_en = (
                 "Profit is positive but the Calmar ratio is below 0.5 — the drawdown is "
                 "too large relative to the return. Try CalmarHyperOptLoss if not already "
                 "used, tighten the stoploss space, or increase min-trades to force the "
                 "optimizer to find solutions with more statistical confidence."
             )
+            guidance_fr = (
+                "Le profit est positif mais le ratio Calmar est inférieur à 0.5 — le drawdown "
+                "est trop important par rapport au rendement. Essayez CalmarHyperOptLoss, "
+                "resserrez l'espace stoploss, ou augmentez min-trades pour forcer l'optimiseur "
+                "à trouver des solutions avec plus de confiance statistique."
+            )
         elif total_trades < max(min_trades, 30):
-            guidance = (
+            guidance_en = (
                 f"Only {total_trades} trades — not enough statistical confidence. "
                 "Increase --hyperopt-min-trades or shorten the timeframe. Metrics from "
                 "fewer than 30 trades can be dominated by a handful of lucky positions."
             )
+            guidance_fr = (
+                f"Seulement {total_trades} trades — pas assez de confiance statistique. "
+                "Augmentez --hyperopt-min-trades ou raccourcissez le timeframe. Les métriques "
+                "avec moins de 30 trades peuvent être dominées par quelques positions chanceuses."
+            )
         else:
-            guidance = (
+            guidance_en = (
                 "Results look reasonable. Copy the best parameters to your strategy JSON "
                 f"(user_data/strategies/{strategy_raw}.json). Validate with a live dry-run "
                 "at minimal size before scaling capital. Monitor Calmar and win rate "
                 "against these in-sample numbers — sustained divergence signals regime change."
             )
+            guidance_fr = (
+                "Les résultats sont raisonnables. Copiez les meilleurs paramètres dans le JSON "
+                f"de votre stratégie (user_data/strategies/{strategy_raw}.json). Validez avec "
+                "un dry-run live à taille minimale avant de monter en capital. Surveillez le "
+                "Calmar et le taux de gain vs ces chiffres in-sample — une divergence durable "
+                "signale un changement de régime."
+            )
 
-        output_detail = (
+        output_detail_en = (
             "<p>Optimized parameters are saved in "
-            f"<code>user_data/hyperopt_results/</code>.</p>"
+            "<code>user_data/hyperopt_results/</code>.</p>"
             "<p>To apply them, copy or symlink the JSON output to "
             f"<code>user_data/strategies/{strategy}.json</code>. "
             "Freqtrade loads this file at startup and overrides buy_params/sell_params.</p>"
         )
+        output_detail_fr = (
+            "<p>Les paramètres optimisés sont enregistrés dans "
+            "<code>user_data/hyperopt_results/</code>.</p>"
+            "<p>Pour les appliquer, copiez ou créez un lien symbolique du JSON vers "
+            f"<code>user_data/strategies/{strategy}.json</code>. "
+            "Freqtrade charge ce fichier au démarrage et écrase buy_params/sell_params.</p>"
+        )
 
         return (
-            '<div class="section"><h2>Next Steps</h2>'
-            f'<div class="next-steps"><p>{self._esc(guidance)}</p></div>'
-            + self._details("Applying the parameters", output_detail)
-            + "</div>"
+            '<div class="section"><h2>' + L("Next Steps", "Prochaines étapes") + "</h2>"
+            '<div class="next-steps"><p>'
+            + L(self._esc(guidance_en), self._esc(guidance_fr))
+            + "</p></div>"
+            + "<details><summary>"
+            + L("Applying the parameters", "Appliquer les paramètres")
+            + "</summary><div>"
+            + L(output_detail_en, output_detail_fr)
+            + "</div></details></div>"
         )
 
     @staticmethod
@@ -1101,10 +1254,17 @@ details > div {
             rows += (
                 f"<tr><td><strong>{abbrev}</strong></td><td>{name}</td><td>{one_liner}</td></tr>\n"
             )
+        L = HyperoptHTMLReport._L
         return (
             '<div class="section">'
-            "<details><summary><h2 style='display:inline'>Glossary</h2></summary><div>"
-            "<table><tr><th>Abbrev</th><th>Full Name</th><th>Description</th></tr>"
+            "<details><summary><h2 style='display:inline'>"
+            + L("Glossary", "Glossaire")
+            + "</h2></summary><div>"
+            "<table><tr><th>"
+            + L("Abbrev", "Abrév.")
+            + "</th><th>"
+            + L("Full Name", "Nom complet")
+            + "</th><th>Description</th></tr>"
             f"{rows}"
             "</table></div></details></div>"
         )
