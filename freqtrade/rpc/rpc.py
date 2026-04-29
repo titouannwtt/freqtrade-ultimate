@@ -1902,6 +1902,34 @@ class RPC:
         except Exception:  # noqa: S110
             pass
 
+        try:
+            from freqtrade.pairlist_cache.defaults import default_socket_path as pl_socket_path
+
+            pl_sock = pl_socket_path()
+            pl_stats = _query_unix(pl_sock, {"op": "stats", "req_id": "rate-metrics-pl"})
+            if pl_stats.get("ok"):
+                pl_gets = pl_stats.get("gets", 0)
+                pl_hits = pl_stats.get("hits", 0)
+                result["ftpairlist"] = {
+                    "clients": pl_stats.get("clients", 0),
+                    "gets": pl_gets,
+                    "hits": pl_hits,
+                    "puts": pl_stats.get("puts", 0),
+                    "entries": pl_stats.get("entries", 0),
+                    "hit_rate_pct": round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0,
+                }
+        except Exception:  # noqa: S110
+            pass
+
+        rate_limit = getattr(exchange, '_ft_has', {}).get('rateLimit', None)
+        if rate_limit is None:
+            rate_limit = getattr(exchange._api, 'rateLimit', None)
+        if rate_limit:
+            result["exchange_rate_limit"] = {
+                "rate_limit_ms": rate_limit,
+                "max_requests_per_min": round(60000 / rate_limit),
+            }
+
         return result
 
     def _update_market_direction(self, direction: MarketDirection) -> None:

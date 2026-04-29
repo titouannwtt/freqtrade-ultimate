@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 from threading import Lock
 
 
-RING_BUFFER_MAX = 50_000
+RING_BUFFER_MAX = 100_000
 BUCKET_SIZE_S = 10
 MAX_429_HISTORY = 200
-MAX_TIMELINE_BUCKETS = 8640
+MAX_TIMELINE_BUCKETS = 10_000
 
 
 @dataclass(slots=True)
@@ -187,8 +187,8 @@ class ExchangeMetrics:
             ]
 
     def _prune_old_buckets(self) -> None:
-        if len(self._buckets) > MAX_TIMELINE_BUCKETS:
-            cutoff = time.time() - 86400
+        if len(self._buckets) >= MAX_TIMELINE_BUCKETS:
+            cutoff = time.time() - 100_000
             to_remove = [ts for ts in self._buckets if ts < cutoff]
             for ts in to_remove:
                 del self._buckets[ts]
