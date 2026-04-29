@@ -631,4 +631,6 @@ Detailed output for all strategies one after the other will be available, so mak
 ## Next step
 
 Great, your strategy is profitable. What if the bot can give you the optimal parameters to use for your strategy?
-Your next step is to learn [how to find optimal parameters with Hyperopt](hyperopt.md)
+Your next step is to learn [how to find optimal parameters with Hyperopt](hyperopt.md).
+
+Once you have optimized parameters, validate them with [Walk-Forward Analysis](walk-forward-analysis.md) to make sure they generalize to unseen data before deploying to live.

@@ -181,6 +181,7 @@ database/
 !README.md
 !CLAUDE.md
 !.claude-tips/*.md
+!docs/*.md
 !tips.txt
 
 # Local dev artifacts

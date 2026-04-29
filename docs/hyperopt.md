@@ -849,3 +849,7 @@ Should results not match, check the following factors:
 * Pay special care to the stoploss, max_open_trades and trailing stoploss parameters, as these are often set in configuration files, which override changes to the strategy. Check the logs of your backtest to ensure that there were no parameters inadvertently set by the configuration (like `stoploss`, `max_open_trades` or `trailing_stop`).
 * Verify that you do not have an unexpected parameters JSON file overriding the parameters or the default hyperopt settings in your strategy.
 * Verify that any protections that are enabled in backtesting are also enabled when hyperopting, and vice versa. When using `--space protection`, protections are auto-enabled for hyperopting.
+
+## Validate with Walk-Forward Analysis
+
+Hyperopt finds parameters that work on your training data, but that does not mean they will work on new data. To test whether your optimized strategy generalizes, run [Walk-Forward Analysis](walk-forward-analysis.md) — it splits the data into sequential train/test windows, validates out-of-sample, and gives you an A–F confidence grade before you risk real capital.

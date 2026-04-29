@@ -7,7 +7,7 @@ I've been running Freqtrade in production for **four years now**. Over that time
 - I can iterate freely on the parts that matter to my stack (Hyperliquid, DCA, fleet monitoring) without waiting for upstream review.
 - Anyone who finds one of these changes useful can **cherry-pick it into their own setup** — or use this whole fork as a drop-in replacement. Everything here is GPL-3.0, just like upstream.
 
-Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: a **shared cache daemon (`ftcache`) that eliminates rate-limit cascades** when multiple bots share the same exchange wallet, a **shared pairlist daemon (`ftpairlists`)** that deduplicates filter computations across bots, **position guard and leverage sync** for multi-bot safety on a single wallet, automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, custom hyperopt losses (one for DCA/mean-reversion, one for momentum/trend-following), a more ergonomic hyperopt CLI, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
+Upstream Freqtrade is already excellent as a general-purpose trading framework. This fork adds the handful of things I've needed while running several bots in production: a **shared cache daemon (`ftcache`) that eliminates rate-limit cascades** when multiple bots share the same exchange wallet, a **shared pairlist daemon (`ftpairlists`)** that deduplicates filter computations across bots, **position guard and leverage sync** for multi-bot safety on a single wallet, automatic recovery when a position is closed externally (ADL, manual close on the exchange UI), first-class liquidation detection on Hyperliquid, a pairlist filter built for short-only strategies, custom hyperopt losses (one for DCA/mean-reversion, one for momentum/trend-following), a more ergonomic hyperopt CLI, a **Walk-Forward Analysis engine** that validates hyperopt results against unseen data across multiple windows, and a redirect so `freqtrade install-ui` pulls my companion FreqUI fork.
 
 <p align="center">
   <img src=".readme_illustrations/frequi-dashboard-overview.png" alt="FreqUI fork dashboard — pulled automatically by 'freqtrade install-ui' in this fork" width="900">
@@ -36,6 +36,7 @@ Six concrete motivations on top of the rationale above:
 4. **A more powerful hyperopt CLI.** Vanilla Freqtrade hardcodes the Optuna sampler. This fork adds a `--sampler` flag that lets you pick from six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) without editing your strategy — useful for A/B testing convergence approaches across different loss functions.
 5. **Sensible defaults for a full stack.** Launch scripts with auto-restart, a download script for recent data, ready-to-use backtest configs for 6 exchanges, and live config templates with API key placeholders.
 6. **Multi-bot infrastructure (`ftcache` + `ftpairlists`).** Running N bots on the same wallet means N × 40+ pairs × multiple timeframes = hundreds of competing API calls per cycle. The exchange sees them all as one user and rate-limits aggressively, causing cascading 429 failures. This fork solves it with two shared daemons: **`ftcache`** serializes all exchange traffic through a single rate-limited connection (priority queue, shared tickers/positions caches, token-bucket rate limiter, Feather persistence), and **`ftpairlists`** deduplicates pairlist filter computations across bots. Result on a 4-bot production setup: 429 errors dropped from ~50/hour to 0, pairlist refresh from 15 min to 3 min, total API calls reduced by ~75%. Comes with **position guard** (blocks conflicting entries across bots) and **leverage sync** (detects cross-bot leverage changes).
+7. **Walk-Forward Analysis.** A full `freqtrade walk-forward` command that validates hyperopt results by splitting data into sequential train/test windows, running Monte Carlo drawdown simulations, testing parameter robustness via perturbation and multi-seed convergence, and optionally running Combinatorial Purged Cross-Validation (CPCV). Produces an A–F verdict grade, an interactive HTML report with tooltips and metric explanations, and a consensus parameter JSON ready to deploy. See the [Walk-Forward Analysis documentation](docs/walk-forward-analysis.md).
 
 ### What's added on top of upstream freqtrade/stable
 
@@ -113,6 +114,17 @@ Concrete list of fork-only changes (48 code files, +6500 / -30 lines vs. `upstre
 | `freqtrade/commands/arguments.py` | +1 line | Wires `--sampler` into `ARGS_HYPEROPT`. |
 | `freqtrade/configuration/configuration.py` | +1 line | Logs the selected sampler when `--sampler` is used. |
 | `freqtrade/optimize/hyperopt/hyperopt_optimizer.py` | 1-line change | `get_optimizer()` uses the CLI-selected sampler when present, falls back to the strategy's default otherwise. |
+
+#### Walk-Forward Analysis
+
+| File | Added | Purpose |
+|------|-------|---------|
+| `freqtrade/optimize/walk_forward.py` | +2600 lines | **Full WFA engine** — 4-phase validation pipeline: sequential train/test windows, Monte Carlo drawdown simulation, parameter perturbation + multi-seed robustness, optional CPCV. Computes 17 metrics (WFE, SQN, DSR, Calmar, HHI, K-ratio, Carver discount, etc.), produces an A–F verdict, exports consensus parameters + JSON results + interactive HTML report. |
+| `freqtrade/optimize/wfa_html_report.py` | +500 lines | **Self-contained HTML report generator** — CSS-only tooltips on every metric, collapsible `<details>` explainers per section, threshold-colored badges, SVG equity curve with axis labels, verdict-specific "What To Do Next" section, full glossary. No JavaScript dependencies. |
+| `freqtrade/optimize/wfa_glossary.py` | +250 lines | **Centralized metric glossary** — single source of truth for 17 metric definitions, thresholds, one-liners, explanations, and sources. Imported by both console output and HTML report. |
+| `freqtrade/commands/cli_options.py` | +85 lines | Nine `--wf-*` CLI options with detailed help strings, practical guidance, and examples. |
+| `docs/walk-forward-analysis.md` | +460 lines | **Full documentation** — what WFA is, quick start, 4-phase explanation, metric reference table, parameter guidance, decision tree by grade, command reference, FAQ. |
+| `tests/optimize/test_walk_forward.py` | +214 tests | Comprehensive test suite covering all 4 phases, edge cases, and report generation. |
 
 #### FreqUI integration
 
@@ -206,6 +218,26 @@ freqtrade hyperopt --strategy MyStrategy --spaces buy sell --epochs 500 --sample
 ```
 
 Rule of thumb: TPE converges faster on single-objective losses, NSGA-III keeps more diversity across the Pareto front.
+
+#### Using Walk-Forward Analysis
+
+Validate your hyperopt results before deploying to live:
+
+```bash
+# Basic rolling WFA — 5 windows, 75% train / 25% test
+freqtrade walk-forward --strategy MyStrategy --timerange 20230101-20250101 \
+  --wf-windows 5 --wf-train-ratio 0.75 --wf-embargo-days 7 --config config.json
+
+# With robustness checks (multi-seed convergence)
+freqtrade walk-forward --strategy MyStrategy --timerange 20230101-20250101 \
+  --wf-windows 5 --wf-multi-seed 3 --config config.json
+
+# Full CPCV validation (slower, most rigorous)
+freqtrade walk-forward --strategy MyStrategy --timerange 20230101-20250101 \
+  --wf-mode cpcv --wf-cpcv-groups 6 --wf-cpcv-test-groups 2 --config config.json
+```
+
+Produces an A–F verdict, an interactive HTML report, and a consensus parameter JSON. See the [full documentation](docs/walk-forward-analysis.md) for details on all metrics and how to read the report.
 
 #### Using `TrendRegularityFilter`
 
@@ -327,6 +359,7 @@ Au-delà de ça, six motivations concrètes :
 4. **Un CLI hyperopt plus puissant.** Freqtrade vanilla hardcode le sampler Optuna. Ce fork ajoute un flag `--sampler` qui permet de choisir parmi six samplers (TPE, NSGA-II, NSGA-III, CMA-ES, GP, QMC) sans éditer la stratégie — utile pour A/B tester les approches de convergence selon la loss function utilisée.
 5. **Stack complet utilisable d'emblée.** Scripts de lancement avec auto-restart, script de téléchargement des données récentes, configs de backtest prêtes à l'emploi pour 6 exchanges, et templates de configs live avec placeholders pour les clés API.
 6. **Infrastructure multi-bots (`ftcache` + `ftpairlists`).** Quand tu fais tourner N bots sur le même wallet, c'est N × 40+ paires × plusieurs timeframes = des centaines d'appels API concurrents par cycle. L'exchange voit tout comme un seul utilisateur et rate-limit agressivement, provoquant des cascades d'erreurs 429. Ce fork résout ça avec deux daemons partagés : **`ftcache`** sérialise tout le trafic exchange via une seule connexion rate-limitée (file de priorité, caches tickers/positions partagés, token-bucket, persistance Feather), et **`ftpairlists`** déduplique les calculs de filtres pairlist entre bots. Résultat sur un setup de production à 4 bots : erreurs 429 passées de ~50/h à 0, refresh pairlist de 15 min à 3 min, appels API totaux réduits de ~75%. Livré avec un **position guard** (bloque les entrées conflictuelles entre bots) et un **leverage sync** (détecte les changements de levier cross-bots).
+7. **Walk-Forward Analysis.** Une commande complète `freqtrade walk-forward` qui valide les résultats d'hyperopt en découpant les données en fenêtres train/test séquentielles, lance des simulations Monte Carlo pour stress-tester le drawdown, teste la robustesse des paramètres par perturbation et convergence multi-seed, et optionnellement exécute un CPCV (Combinatorial Purged Cross-Validation). Produit un verdict A–F, un rapport HTML interactif avec tooltips et explications, et un JSON de paramètres consensus prêt à déployer. Voir la [documentation Walk-Forward Analysis](docs/walk-forward-analysis.md).
 
 ### Ce que ce fork apporte vs. upstream freqtrade/stable
 
@@ -404,6 +437,17 @@ Liste concrète des changements (48 fichiers de code, +6500 / -30 lignes vs. `up
 | `freqtrade/commands/arguments.py` | +1 ligne | Branche `--sampler` dans `ARGS_HYPEROPT`. |
 | `freqtrade/configuration/configuration.py` | +1 ligne | Log du sampler choisi quand `--sampler` est utilisé. |
 | `freqtrade/optimize/hyperopt/hyperopt_optimizer.py` | 1 ligne modifiée | `get_optimizer()` utilise le sampler CLI si présent, fallback sur le défaut de la stratégie sinon. |
+
+#### Walk-Forward Analysis
+
+| Fichier | Ajouté | Rôle |
+|---------|--------|------|
+| `freqtrade/optimize/walk_forward.py` | +2600 lignes | **Moteur WFA complet** — pipeline de validation en 4 phases : fenêtres train/test séquentielles, simulation Monte Carlo des drawdowns, perturbation de paramètres + convergence multi-seed, CPCV optionnel. Calcule 17 métriques (WFE, SQN, DSR, Calmar, HHI, K-ratio, Carver discount, etc.), produit un verdict A–F, exporte les paramètres consensus + JSON résultats + rapport HTML interactif. |
+| `freqtrade/optimize/wfa_html_report.py` | +500 lignes | **Générateur de rapport HTML autonome** — tooltips CSS sur chaque métrique, sections dépliables `<details>`, badges colorés par seuil, courbe d'equity SVG avec labels d'axes, section "Quoi faire ensuite" par verdict, glossaire complet. Aucune dépendance JavaScript. |
+| `freqtrade/optimize/wfa_glossary.py` | +250 lignes | **Glossaire centralisé** — source unique pour les 17 définitions de métriques, seuils, résumés, explications et sources. Importé par la console et le rapport HTML. |
+| `freqtrade/commands/cli_options.py` | +85 lignes | Neuf options CLI `--wf-*` avec aide détaillée, guidance pratique et exemples. |
+| `docs/walk-forward-analysis.md` | +460 lignes | **Documentation complète** — qu'est-ce que le WFA, quick start, explication des 4 phases, table de référence des métriques, guidance paramètres, arbre de décision par note, référence des commandes, FAQ. |
+| `tests/optimize/test_walk_forward.py` | +214 tests | Suite de tests couvrant les 4 phases, cas limites et génération de rapport. |
 
 #### Intégration FreqUI
 
