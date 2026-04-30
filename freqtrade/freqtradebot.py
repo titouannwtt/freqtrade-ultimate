@@ -677,6 +677,25 @@ class FreqtradeBot(LoggingMixin):
             Trade.session.refresh(trade)
             if not trade.is_open:
                 # Trade was just closed
+                # In futures mode, check if this was actually a liquidation
+                # (the exit_reason may have been set to "sold_on_exchange" above,
+                # but the actual exchange fills may have liquidation markers)
+                if self.trading_mode == TradingMode.FUTURES:
+                    try:
+                        liq_fills = self.exchange.fetch_liquidation_fills(
+                            trade.pair, trade.open_date_utc
+                        )
+                        if liq_fills:
+                            trade.exit_reason = ExitType.LIQUIDATION.value
+                            logger.warning(
+                                f"Position for {trade.pair} was LIQUIDATED on exchange. "
+                                f"Trade: {trade}"
+                            )
+                    except Exception:
+                        logger.warning(
+                            f"Error checking for liquidation of {trade.pair}.",
+                            exc_info=True,
+                        )
                 trade.close_date = trade.date_last_filled_utc
                 self.order_close_notify(
                     trade,
