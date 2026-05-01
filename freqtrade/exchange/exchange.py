@@ -6,11 +6,13 @@ Cryptocurrency Exchanges support
 import asyncio
 import inspect
 import logging
+import pickle
 import signal
 from collections.abc import Coroutine, Generator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from math import floor, isnan
+from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, TypeGuard, TypeVar
 
@@ -314,6 +316,7 @@ class Exchange:
         if self.trading_mode != TradingMode.SPOT and load_leverage_tiers:
             self.fill_leverage_tiers()
         self.ft_additional_exchange_init()
+        self._load_persisted_klines()
 
     def __del__(self):
         """
@@ -322,6 +325,8 @@ class Exchange:
         self.close()
 
     def close(self):
+        if getattr(self, "_klines", None):
+            self.persist_klines()
         if self._exchange_ws:
             self._exchange_ws.cleanup()
         logger.debug("Exchange object destroyed, closing async loop")
@@ -352,6 +357,96 @@ class Exchange:
 
         if self.loop and not self.loop.is_closed():
             self.loop.close()
+
+    def _klines_cache_path(self) -> Path:
+        """Build the path for the klines cache file."""
+        datadir = self._config.get("datadir", Path.home() / ".freqtrade")
+        cache_dir = Path(datadir) / "klines_cache"
+        exchange_name = self._config.get("exchange", {}).get("name", "unknown")
+        trading_mode = self._config.get("trading_mode", "spot")
+        return cache_dir / f"{exchange_name}_{trading_mode}.pkl"
+
+    def persist_klines(self) -> None:
+        """Save klines and refresh times to disk for fast restart."""
+        try:
+            runmode = self._config.get("runmode")
+            if runmode not in TRADE_MODES:
+                return
+            if not self._klines:
+                return
+
+            cache_path = self._klines_cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            data = {
+                "klines": self._klines,
+                "pairs_last_refresh_time": self._pairs_last_refresh_time,
+                "saved_at": dt_ts(),
+            }
+            with cache_path.open("wb") as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            logger.info(
+                f"Persisted klines cache: {len(self._klines)} pairs "
+                f"to {cache_path} ({cache_path.stat().st_size / 1024:.0f} KB)"
+            )
+        except Exception:
+            logger.warning("Failed to persist klines cache.", exc_info=True)
+
+    def _load_persisted_klines(self) -> None:
+        """Load klines from disk cache if available and not too stale."""
+        try:
+            runmode = self._config.get("runmode")
+            if runmode not in TRADE_MODES:
+                return
+
+            cache_path = self._klines_cache_path()
+            if not cache_path.exists():
+                return
+
+            with cache_path.open("rb") as f:
+                data = pickle.load(f)  # noqa: S301
+
+            saved_at = data.get("saved_at", 0)
+            now = dt_ts()
+            cache_age_sec = (now - saved_at) / 1000
+
+            # Determine max staleness: startup_candle_count * timeframe_seconds * 2
+            timeframe = self._config.get("timeframe", "5m")
+            tf_secs = timeframe_to_seconds(timeframe)
+            startup_count = self._config.get("startup_candle_count", 0)
+            max_age_sec = max(startup_count * tf_secs * 2, tf_secs * 100)
+
+            if cache_age_sec > max_age_sec:
+                logger.info(
+                    f"Klines cache too stale ({cache_age_sec:.0f}s > "
+                    f"{max_age_sec:.0f}s max), discarding."
+                )
+                cache_path.unlink(missing_ok=True)
+                return
+
+            cached_klines = data.get("klines", {})
+            cached_refresh = data.get("pairs_last_refresh_time", {})
+
+            if not cached_klines:
+                return
+
+            restored = 0
+            for key, df in cached_klines.items():
+                if key not in self._klines and not df.empty:
+                    self._klines[key] = df
+                    # Restore last refresh time so _build_ohlcv_dl_jobs sees
+                    # the data as "recently refreshed" and only downloads delta
+                    if key in cached_refresh:
+                        self._pairs_last_refresh_time[key] = cached_refresh[key]
+                    restored += 1
+
+            logger.info(
+                f"Restored {restored} pairs from klines cache "
+                f"(age: {cache_age_sec:.0f}s, file: {cache_path})"
+            )
+        except Exception:
+            logger.warning("Failed to load klines cache.", exc_info=True)
 
     def _init_async_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.new_event_loop()
@@ -556,6 +651,17 @@ class Exchange:
         markets = self.markets
         if not markets:
             raise OperationalException("Markets were not loaded.")
+        if not isinstance(markets, dict):
+            logger.error(
+                "self._markets is %s — forcing direct reload",
+                type(markets).__name__,
+            )
+            self.reload_markets(force=True)
+            markets = self.markets
+            if not isinstance(markets, dict):
+                raise OperationalException(
+                    f"Markets still not a dict after reload ({type(markets).__name__})"
+                )
 
         if base_currencies:
             markets = {k: v for k, v in markets.items() if v["base"] in base_currencies}

@@ -3,10 +3,12 @@ Freqtrade is the main module of this bot. It contains the FreqtradeBot class.
 """
 
 import logging
+import os
 import traceback
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
+from pathlib import Path
 from threading import Lock
 from time import sleep
 from typing import Any
@@ -90,10 +92,6 @@ class FreqtradeBot(LoggingMixin):
         # Init objects
         self.config = config
 
-        # Start API server early so FreqUI is reachable during exchange/pairlist init
-        if config.get("api_server", {}).get("enabled", False):
-            from freqtrade.rpc.api_server import ApiServer
-            ApiServer(config)
         exchange_config: ExchangeConfig = deepcopy(config["exchange"])
         # Remove credentials from original exchange config to avoid accidental credential exposure
         remove_exchange_credentials(config["exchange"], True)
@@ -101,6 +99,22 @@ class FreqtradeBot(LoggingMixin):
         self.exchange = ExchangeResolver.load_exchange(
             self.config, exchange_config=exchange_config, load_leverage_tiers=True
         )
+
+        # Register with fleet orchestrator (ftcache extension)
+        ftcache_client = getattr(self.exchange, '_ftcache_client', None)
+        if ftcache_client and ftcache_client:
+            config_files = config.get("config_files", [""])
+            ftcache_client.set_bot_identity({
+                "bot_id": config.get("bot_name", ""),
+                "config_file": Path(config_files[0]).name if config_files else "",
+                "exchange": config["exchange"]["name"],
+                "trading_mode": config.get("trading_mode", "spot"),
+                "strategy": config.get("strategy", ""),
+                "timeframe": config.get("timeframe", "15m"),
+                "dry_run": config.get("dry_run", False),
+                "api_port": config.get("api_server", {}).get("listen_port", 0),
+                "pid": os.getpid(),
+            })
 
         self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
 
@@ -130,6 +144,12 @@ class FreqtradeBot(LoggingMixin):
         self.pairlists = PairListManager(self.exchange, self.config, self.dataprovider)
 
         self.dataprovider.add_pairlisthandler(self.pairlists)
+
+        # Start API server after all bot components are initialized
+        # to avoid FreqUI polling endpoints that reference uninitialized attributes
+        if config.get("api_server", {}).get("enabled", False):
+            from freqtrade.rpc.api_server import ApiServer
+            ApiServer(config)
 
         # Attach Dataprovider to strategy instance
         self.strategy.dp = self.dataprovider

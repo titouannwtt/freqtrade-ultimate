@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import heapq
 import json
 import logging
@@ -31,6 +32,7 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,23 +62,36 @@ def tf_to_ms(tf: str) -> int:
 # -------------------------------------------------------------------- token bucket
 
 
+class RateLimitShed(Exception):
+    """Raised when a non-critical acquire is refused during backoff."""
+
+
 class TokenBucket:
     """Async token-bucket rate limiter with priority queue and adaptive back-off.
 
     Priority levels (lower = higher priority):
-        0 = CRITICAL  (pairs with open positions)
-        1 = HIGH      (live candle fetches from live bots)
-        2 = NORMAL    (historic warmup fetches)
-        3 = LOW       (dry_run bots)
+        0 = CRITICAL  (order placement, exits — NEVER shed)
+        1 = HIGH      (fetch_order, fetch_positions for open trades)
+        2 = NORMAL    (tickers, balances, markets)
+        3 = LOW       (dry_run bots, leverage tiers, funding)
 
-    Within the same priority level, requests from bots with more capital
-    are served first (via the ``-capital`` trick in the heap tuple).
+    During a 429 backoff:
+      - CRITICAL/HIGH: still queued and served (slower rate)
+      - NORMAL/LOW: immediately refused (circuit breaker)
+    After backoff expires, rate ramps back up over 10s instead of
+    dumping the entire queue at once.
     """
 
     CRITICAL = 0
     HIGH = 1
     NORMAL = 2
     LOW = 3
+
+    # Requests at or above this priority are shed during backoff
+    _SHED_THRESHOLD = NORMAL
+
+    _BACKOFF_DURATIONS = [30, 60, 120, 240]  # escalating on consecutive 429s
+    _BACKOFF_COOLDOWN_S = 300  # reset escalation after 5 min without 429
 
     def __init__(self, rate_per_s: float, burst: float) -> None:
         self.rate_per_s = rate_per_s
@@ -86,29 +101,60 @@ class TokenBucket:
         self._lock = asyncio.Lock()
         self._backoff_until = 0.0
         self._backoff_factor = 1.0
+        self._rampup_until = 0.0
+        self._consecutive_backoffs = 0
+        self._last_backoff_trigger = 0.0
         # Priority queue: (priority, -capital, counter, cost, future)
         self._waiters: list[tuple[int, float, int, float, asyncio.Future]] = []
-        self._counter = 0  # monotonic tiebreaker for heap stability
+        self._counter = 0
         self._drain_task: asyncio.Task | None = None
+        # Stats
+        self.shed_count = 0
+        self.backoff_count = 0
+
+    @property
+    def backoff_active(self) -> bool:
+        return time.monotonic() < self._backoff_until
+
+    @property
+    def backoff_remaining_s(self) -> float:
+        return max(0.0, self._backoff_until - time.monotonic())
+
+    def _effective_rate(self) -> float:
+        now = time.monotonic()
+        rate = self.rate_per_s / self._backoff_factor
+        # Ramp-up: after backoff expires, start at 25% and linearly
+        # increase to 100% to avoid a burst triggering another 429.
+        if self._rampup_until > now and self._backoff_until <= now:
+            rampup_total = self._rampup_until - self._backoff_until
+            if rampup_total > 0:
+                rampup_progress = 1.0 - (self._rampup_until - now) / rampup_total
+                ramp_factor = 0.25 + 0.75 * max(0.0, rampup_progress)
+                rate *= ramp_factor
+        return rate
 
     def _refill(self) -> None:
         now = time.monotonic()
         elapsed = now - self._last_refill
         self._last_refill = now
-        effective_rate = self.rate_per_s / self._backoff_factor
-        self.tokens = min(self.burst, self.tokens + elapsed * effective_rate)
+        self.tokens = min(self.burst, self.tokens + elapsed * self._effective_rate())
 
     async def acquire(
         self, cost: float = 1.0, priority: int = 2, capital: float = 0.0,
     ) -> None:
+        # Circuit breaker: shed non-critical requests during backoff
+        if priority >= self._SHED_THRESHOLD and self.backoff_active:
+            self.shed_count += 1
+            raise RateLimitShed(
+                f"request shed (priority={priority}) during 429 backoff "
+                f"({self.backoff_remaining_s:.0f}s remaining)"
+            )
+
         async with self._lock:
             self._refill()
-            # Fast path: no waiters queued and enough tokens available
             if not self._waiters and self.tokens >= cost:
                 self.tokens -= cost
                 return
-        # Slow path: register in the priority queue and wait for the
-        # drain loop to grant us a token.
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         entry = (priority, -capital, self._counter, cost, future)
@@ -121,14 +167,27 @@ class TokenBucket:
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(self._drain_loop())
 
+    _POST_BACKOFF_MAX_BURST = 5
+
     async def _drain_loop(self) -> None:
-        min_spacing = 1.0 / self.rate_per_s
+        served_since_backoff = 0
         while self._waiters:
             async with self._lock:
                 now = time.monotonic()
                 if now < self._backoff_until:
+                    self._shed_low_priority_waiters()
                     wait = self._backoff_until - now
                 else:
+                    if self._backoff_factor > 1.0:
+                        self._shed_low_priority_waiters()
+                        self._backoff_factor = max(1.0, self._backoff_factor / 2.0)
+                        served_since_backoff = 0
+                        if self._backoff_factor <= 1.0:
+                            logger.info("back-off fully relaxed, resuming normal rate")
+                        else:
+                            logger.info(
+                                "back-off relaxed to %.1fx", self._backoff_factor,
+                            )
                     self._refill()
                     if self._waiters:
                         entry = self._waiters[0]
@@ -139,21 +198,68 @@ class TokenBucket:
                             future = entry[4]
                             if not future.done():
                                 future.set_result(None)
-                            await asyncio.sleep(min_spacing)
+                            served_since_backoff += 1
+                            effective_rate = self._effective_rate()
+                            spacing = 1.0 / max(effective_rate, 0.1)
+                            if served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
+                                spacing = max(spacing, 2.0)
+                            await asyncio.sleep(spacing)
                             continue
-                    # Not enough tokens — compute how long to wait
-                    effective_rate = self.rate_per_s / self._backoff_factor
+                    effective_rate = self._effective_rate()
                     needed = (self._waiters[0][3] - self.tokens) if self._waiters else 1.0
                     wait = needed / max(effective_rate, 0.001)
             await asyncio.sleep(wait)
 
-    def trigger_backoff(self, duration_s: float = 60.0, factor: float = 2.0) -> None:
-        self._backoff_factor = max(self._backoff_factor, factor)
-        self._backoff_until = time.monotonic() + duration_s
+    def _shed_low_priority_waiters(self) -> None:
+        """Cancel all NORMAL/LOW waiters during backoff — they should not wait."""
+        kept: list[tuple[int, float, int, float, asyncio.Future]] = []
+        for entry in self._waiters:
+            priority, _cap, _cnt, _cost, future = entry
+            if priority >= self._SHED_THRESHOLD:
+                if not future.done():
+                    future.set_exception(RateLimitShed("shed during backoff"))
+                self.shed_count += 1
+            else:
+                kept.append(entry)
+        if len(kept) < len(self._waiters):
+            shed_n = len(self._waiters) - len(kept)
+            logger.info("shed %d low-priority waiters during backoff", shed_n)
+            self._waiters = kept
+            heapq.heapify(self._waiters)
+
+    def trigger_backoff(
+        self, factor: float = 2.0, event_log: EventLog | None = None,
+        exchange: str = "",
+    ) -> None:
+        now = time.monotonic()
+        if now < self._backoff_until:
+            return
+        # Reset escalation if enough time passed since last 429
+        if (now - self._last_backoff_trigger) > self._BACKOFF_COOLDOWN_S:
+            self._consecutive_backoffs = 0
+        idx = min(self._consecutive_backoffs, len(self._BACKOFF_DURATIONS) - 1)
+        duration_s = self._BACKOFF_DURATIONS[idx]
+        self._consecutive_backoffs += 1
+        self._last_backoff_trigger = now
+        self._backoff_factor = min(max(self._backoff_factor, factor), 4.0)
+        self._backoff_until = now + duration_s
+        rampup_s = min(duration_s * 0.5, 30.0)
+        self._rampup_until = now + duration_s + rampup_s
+        self.backoff_count += 1
         logger.warning(
-            "rate-limit back-off triggered: factor=%.1fx for %.0fs",
+            "rate-limit back-off triggered: factor=%.1fx for %.0fs "
+            "(level %d/%d, NORMAL/LOW requests will be shed)",
             self._backoff_factor, duration_s,
+            idx + 1, len(self._BACKOFF_DURATIONS),
         )
+        if event_log:
+            event_log.emit(
+                "backoff_start", exchange=exchange,
+                duration_s=duration_s,
+                level=idx + 1,
+                factor=self._backoff_factor,
+            )
+        self._shed_low_priority_waiters()
 
     def relax_backoff(self) -> None:
         if self._backoff_factor > 1.0:
@@ -178,10 +284,14 @@ class ExchangeFetcher:
         "kucoin": "swap",
     }
 
-    def __init__(self, exchange: str, trading_mode: str, budget: TokenBucket) -> None:
+    def __init__(
+        self, exchange: str, trading_mode: str, budget: TokenBucket,
+        event_log: EventLog | None = None,
+    ) -> None:
         self.exchange = exchange
         self.trading_mode = trading_mode
         self.budget = budget
+        self._event_log = event_log
         self._client: Any = None
         self._lock = asyncio.Lock()
 
@@ -191,7 +301,7 @@ class ExchangeFetcher:
         async with self._lock:
             if self._client is not None:
                 return self._client
-            import ccxt.async_support as ccxt_async  # noqa: PLC0415
+            import ccxt.async_support as ccxt_async
             if not hasattr(ccxt_async, self.exchange):
                 raise RuntimeError(f"ccxt has no exchange '{self.exchange}'")
             config: dict[str, Any] = {"enableRateLimit": False}
@@ -206,6 +316,8 @@ class ExchangeFetcher:
             )
             return self._client
 
+    _FETCH_TIMEOUT_S = 60.0
+
     async def fetch_ohlcv(
         self, pair: str, timeframe: str, since_ms: int | None,
         limit: int | None, candle_type: str,
@@ -217,15 +329,31 @@ class ExchangeFetcher:
             params["price"] = candle_type
         await self.budget.acquire(1.0, priority=priority, capital=capital)
         try:
-            data = await client.fetch_ohlcv(
-                pair, timeframe=timeframe, since=since_ms,
-                limit=limit, params=params,
+            data = await asyncio.wait_for(
+                client.fetch_ohlcv(
+                    pair, timeframe=timeframe, since=since_ms,
+                    limit=limit, params=params,
+                ),
+                timeout=self._FETCH_TIMEOUT_S,
             )
             return data
+        except TimeoutError:
+            logger.warning(
+                "fetch_ohlcv timed out after %.0fs for %s %s",
+                self._FETCH_TIMEOUT_S, pair, timeframe,
+            )
+            raise
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
-                self.budget.trigger_backoff(60.0, 2.0)
+                if self._event_log:
+                    self._event_log.emit(
+                        "rate_limit_429", exchange=self.exchange,
+                        pair=pair, timeframe=timeframe,
+                    )
+                self.budget.trigger_backoff(
+                    2.0, event_log=self._event_log, exchange=self.exchange,
+                )
             raise
 
     async def close(self) -> None:
@@ -257,6 +385,11 @@ class DaemonStats:
     positions_puts: int = 0
     positions_gets: int = 0
     positions_cache_hits: int = 0
+    # Connection churn tracking
+    total_connects: int = 0
+    total_disconnects: int = 0
+    peak_clients: int = 0
+    short_lived_connections: int = 0
 
     def uptime_s(self) -> float:
         return time.monotonic() - self.started_monotonic
@@ -278,6 +411,224 @@ class _PositionsCacheEntry:
     """Cached positions result pushed by a bot."""
     data: list
     pushed_at: float  # time.monotonic()
+
+
+@dataclass
+class _BalancesCacheEntry:
+    """Cached balances result pushed by a bot."""
+    data: dict
+    pushed_at: float  # time.monotonic()
+
+
+@dataclass
+class _MarketsCacheEntry:
+    """Cached markets result (one fetch shared by all bots)."""
+    data: dict
+    fetched_at: float  # time.monotonic()
+
+
+@dataclass
+class _FundingRatesCacheEntry:
+    """Cached funding rates (bulk fetch, all pairs)."""
+    data: dict
+    fetched_at: float  # time.monotonic()
+
+
+@dataclass
+class _LeverageTiersCacheEntry:
+    """Cached leverage tiers (bulk fetch, all pairs)."""
+    data: dict
+    fetched_at: float  # time.monotonic()
+
+
+# -------------------------------------------------------------------- fleet registry
+
+
+@dataclass
+class BotEntry:
+    bot_id: str
+    config_file: str
+    exchange: str
+    trading_mode: str
+    strategy: str
+    timeframe: str
+    pairs_count: int
+    dry_run: bool
+    api_port: int
+    pid: int
+    connected_at: float
+    last_heartbeat: float
+    state: str
+    connection_id: int
+
+
+class BotRegistry:
+    def __init__(self) -> None:
+        self._bots: dict[str, BotEntry] = {}
+        self._conn_to_bot: dict[int, str] = {}
+
+    def register(self, bot_id: str, info: dict, conn_id: int) -> BotEntry:
+        now = time.monotonic()
+        entry = BotEntry(
+            bot_id=bot_id,
+            config_file=info.get("config_file", ""),
+            exchange=info.get("exchange", ""),
+            trading_mode=info.get("trading_mode", ""),
+            strategy=info.get("strategy", ""),
+            timeframe=info.get("timeframe", ""),
+            pairs_count=info.get("pairs_count", 0),
+            dry_run=info.get("dry_run", False),
+            api_port=info.get("api_port", 0),
+            pid=info.get("pid", 0),
+            connected_at=now,
+            last_heartbeat=now,
+            state="initializing",
+            connection_id=conn_id,
+        )
+        old = self._bots.get(bot_id)
+        if old is not None:
+            self._conn_to_bot.pop(old.connection_id, None)
+        self._bots[bot_id] = entry
+        self._conn_to_bot[conn_id] = bot_id
+        return entry
+
+    def heartbeat(self, conn_id: int) -> None:
+        bot_id = self._conn_to_bot.get(conn_id)
+        if bot_id is not None:
+            entry = self._bots.get(bot_id)
+            if entry is not None:
+                entry.last_heartbeat = time.monotonic()
+
+    def update_state(self, conn_id: int, state: str, pairs_count: int = 0) -> None:
+        bot_id = self._conn_to_bot.get(conn_id)
+        if bot_id is not None:
+            entry = self._bots.get(bot_id)
+            if entry is not None:
+                entry.state = state
+                if pairs_count > 0:
+                    entry.pairs_count = pairs_count
+
+    def unregister(self, conn_id: int, reason: str = "disconnect") -> BotEntry | None:
+        bot_id = self._conn_to_bot.pop(conn_id, None)
+        if bot_id is None:
+            return None
+        return self._bots.pop(bot_id, None)
+
+    def get_fleet_status(self) -> list[dict]:
+        now = time.monotonic()
+        result = []
+        for entry in self._bots.values():
+            result.append({
+                "bot_id": entry.bot_id,
+                "config_file": entry.config_file,
+                "exchange": entry.exchange,
+                "trading_mode": entry.trading_mode,
+                "strategy": entry.strategy,
+                "timeframe": entry.timeframe,
+                "pairs_count": entry.pairs_count,
+                "dry_run": entry.dry_run,
+                "api_port": entry.api_port,
+                "pid": entry.pid,
+                "state": entry.state,
+                "uptime_s": round(now - entry.connected_at, 1),
+                "last_heartbeat_ago_s": round(now - entry.last_heartbeat, 1),
+            })
+        return result
+
+    def count_initializing(self, exchange: str) -> int:
+        return sum(
+            1 for b in self._bots.values()
+            if b.exchange == exchange and b.state == "initializing"
+        )
+
+    @property
+    def size(self) -> int:
+        return len(self._bots)
+
+
+# -------------------------------------------------------------------- event log
+
+
+@dataclass
+class FleetEvent:
+    ts: float
+    event_type: str
+    bot_id: str | None
+    details: dict
+
+
+class EventLog:
+    _MAX_EVENTS = 10_000
+
+    def __init__(self, persist_path: Path | None = None) -> None:
+        self._events: deque[FleetEvent] = deque(maxlen=self._MAX_EVENTS)
+        self._persist_path = persist_path
+        self._unsaved: list[FleetEvent] = []
+
+    def emit(self, event_type: str, bot_id: str | None = None, **details: Any) -> None:
+        event = FleetEvent(
+            ts=time.time(),
+            event_type=event_type,
+            bot_id=bot_id,
+            details=details,
+        )
+        self._events.append(event)
+        self._unsaved.append(event)
+        logger.info(
+            "FLEET_EVENT %s bot=%s %s",
+            event_type, bot_id or "-", details,
+        )
+
+    def query(
+        self,
+        since_ts: float = 0,
+        event_types: list[str] | None = None,
+        bot_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        result = []
+        for evt in reversed(self._events):
+            if evt.ts < since_ts:
+                break
+            if event_types and evt.event_type not in event_types:
+                continue
+            if bot_id and evt.bot_id != bot_id:
+                continue
+            result.append({
+                "ts": evt.ts,
+                "event_type": evt.event_type,
+                "bot_id": evt.bot_id,
+                "details": evt.details,
+            })
+            if len(result) >= limit:
+                break
+        return result
+
+    def recent_counts(self, window_s: float = 3600) -> dict[str, int]:
+        cutoff = time.time() - window_s
+        counts: dict[str, int] = {}
+        for evt in reversed(self._events):
+            if evt.ts < cutoff:
+                break
+            counts[evt.event_type] = counts.get(evt.event_type, 0) + 1
+        return counts
+
+    def flush(self) -> int:
+        if not self._persist_path or not self._unsaved:
+            return 0
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        n = len(self._unsaved)
+        with self._persist_path.open("a") as f:
+            for evt in self._unsaved:
+                line = json.dumps({
+                    "ts": evt.ts,
+                    "type": evt.event_type,
+                    "bot": evt.bot_id,
+                    "d": evt.details,
+                }, separators=(",", ":"))
+                f.write(line + "\n")
+        self._unsaved.clear()
+        return n
 
 
 # -------------------------------------------------------------------- daemon
@@ -302,6 +653,12 @@ class Daemon:
             root=Path(global_cfg.get("persistence_path", "")),
             store=self.store,
         ) if global_cfg.get("persistence_path") else None
+        self.registry = BotRegistry()
+        events_path = Path(global_cfg.get("persistence_path", "")) / "fleet_events.jsonl"
+        self.event_log = EventLog(
+            persist_path=events_path if global_cfg.get("persistence_path") else None,
+        )
+        self._next_conn_id = 0
         self._server: asyncio.base_events.Server | None = None
         self._shutdown_event = asyncio.Event()
         self._idle_shutdown_s = float(global_cfg.get("idle_daemon_shutdown_s", 600))
@@ -311,10 +668,23 @@ class Daemon:
         self._peak_pending = 0
         # Shared caches for centralized rate limiting
         self._tickers_cache: dict[str, _TickersCacheEntry] = {}
-        self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 5.0))
+        self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 15.0))
         self._tickers_inflight: dict[str, asyncio.Event] = {}
         self._positions_cache: dict[str, _PositionsCacheEntry] = {}
         self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 3.0))
+        self._positions_inflight: dict[str, asyncio.Event] = {}
+        self._balances_cache: dict[str, _BalancesCacheEntry] = {}
+        self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))
+        self._balances_inflight: dict[str, asyncio.Event] = {}
+        self._markets_cache: dict[str, _MarketsCacheEntry] = {}
+        self._markets_ttl_s = float(global_cfg.get("markets_cache_ttl_s", 3600.0))
+        self._markets_inflight: dict[str, asyncio.Event] = {}
+        self._funding_rates_cache: dict[str, _FundingRatesCacheEntry] = {}
+        self._funding_rates_ttl_s = float(global_cfg.get("funding_rates_cache_ttl_s", 300.0))
+        self._funding_rates_inflight: dict[str, asyncio.Event] = {}
+        self._leverage_tiers_cache: dict[str, _LeverageTiersCacheEntry] = {}
+        self._leverage_tiers_ttl_s = float(global_cfg.get("leverage_tiers_cache_ttl_s", 3600.0))
+        self._leverage_tiers_inflight: dict[str, asyncio.Event] = {}
 
     # --------- helpers
 
@@ -349,10 +719,19 @@ class Daemon:
                 "tokens_available": round(bucket.tokens, 2),
                 "tokens_max": bucket.burst,
                 "refill_rate": bucket.rate_per_s,
-                "backoff_active": bucket._backoff_factor > 1.0,
+                "backoff_active": bucket.backoff_active,
                 "backoff_factor": round(bucket._backoff_factor, 2),
                 "backoff_remaining_s": round(backoff_remaining, 1),
                 "queue_depths": q_depths,
+                "shed_count": bucket.shed_count,
+                "backoff_count": bucket.backoff_count,
+                "consecutive_backoffs": bucket._consecutive_backoffs,
+                "current_backoff_duration_s": (
+                    bucket._BACKOFF_DURATIONS[
+                        min(bucket._consecutive_backoffs - 1,
+                            len(bucket._BACKOFF_DURATIONS) - 1)
+                    ] if bucket._consecutive_backoffs > 0 else 0
+                ),
             }
         if len(self.budgets) == 1:
             only_key = next(iter(result))
@@ -364,7 +743,8 @@ class Daemon:
         k = (exchange, trading_mode)
         f = self.fetchers.get(k)
         if f is None:
-            f = ExchangeFetcher(exchange, trading_mode, self._get_budget(exchange))
+            f = ExchangeFetcher(exchange, trading_mode, self._get_budget(exchange),
+                                event_log=self.event_log)
             self.fetchers[k] = f
         return f
 
@@ -600,6 +980,10 @@ class Daemon:
 
         Bots call this before any non-OHLCV REST call (create_order, etc.)
         so ALL API traffic shares one rate limit.
+
+        During a 429 backoff, NORMAL/LOW priority requests are immediately
+        refused with ``throttled: true`` so bots can skip non-essential work.
+        CRITICAL/HIGH requests (orders, exits) always go through.
         """
         exchange = req.get("exchange", "hyperliquid")
         priority = int(req.get("priority", TokenBucket.NORMAL))
@@ -607,8 +991,24 @@ class Daemon:
         cost = float(req.get("cost", 1.0))
         budget = self._get_budget(exchange)
         self.stats.acquire_total += 1
-        await budget.acquire(cost, priority=priority, capital=capital)
-        return {"req_id": req.get("req_id", ""), "ok": True}
+        try:
+            await budget.acquire(cost, priority=priority, capital=capital)
+        except RateLimitShed:
+            return {
+                "req_id": req.get("req_id", ""), "ok": False,
+                "throttled": True,
+                "backoff_remaining_s": budget.backoff_remaining_s,
+                "error_type": "RateLimitShed",
+                "error_message": (
+                    f"429 backoff active ({budget.backoff_remaining_s:.0f}s left)"
+                    f" — non-critical request shed (priority={priority})"
+                ),
+            }
+        resp: dict[str, Any] = {"req_id": req.get("req_id", ""), "ok": True}
+        if budget.backoff_active:
+            resp["backoff_active"] = True
+            resp["backoff_remaining_s"] = budget.backoff_remaining_s
+        return resp
 
     # --------- centralized rate limiter: shared tickers
 
@@ -655,7 +1055,9 @@ class Daemon:
             if market_type:
                 market_types_map = {"futures": "swap"}
                 params["type"] = market_types_map.get(market_type, market_type)
-            data = await client.fetch_tickers(params=params)
+            data = await asyncio.wait_for(
+                client.fetch_tickers(params=params), timeout=60.0,
+            )
             self._tickers_cache[cache_key] = _TickersCacheEntry(
                 data=data, fetched_at=time.monotonic(), market_type=market_type,
             )
@@ -667,7 +1069,7 @@ class Daemon:
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
-                budget.trigger_backoff(60.0, 2.0)
+                budget.trigger_backoff(2.0)
             return {
                 "req_id": req.get("req_id", ""), "ok": False,
                 "error_type": e.__class__.__name__,
@@ -688,10 +1090,18 @@ class Daemon:
         self._positions_cache[cache_key] = _PositionsCacheEntry(
             data=data, pushed_at=time.monotonic(),
         )
+        inflight = self._positions_inflight.pop(cache_key, None)
+        if inflight is not None:
+            inflight.set()
         return {"req_id": req.get("req_id", ""), "ok": True}
 
     async def _handle_positions_get(self, req: dict) -> dict:
-        """Bot reads cached positions. Returns miss if stale or absent."""
+        """Bot reads cached positions, coalescing concurrent fetches.
+
+        If cache is stale and another bot is already fetching, wait for
+        its push instead of returning a miss (which would cause a second
+        redundant API call).
+        """
         exchange = req.get("exchange", "hyperliquid")
         cache_key = exchange
         self.stats.positions_gets += 1
@@ -703,15 +1113,352 @@ class Daemon:
                 "hit": True, "data": entry.data,
                 "age_s": time.monotonic() - entry.pushed_at,
             }
+
+        inflight = self._positions_inflight.get(cache_key)
+        if inflight is not None:
+            try:
+                await asyncio.wait_for(inflight.wait(), timeout=15.0)
+                entry = self._positions_cache.get(cache_key)
+                if entry:
+                    self.stats.positions_cache_hits += 1
+                    return {
+                        "req_id": req.get("req_id", ""), "ok": True,
+                        "hit": True, "data": entry.data,
+                        "age_s": time.monotonic() - entry.pushed_at,
+                    }
+            except TimeoutError:
+                self._positions_inflight.pop(cache_key, None)
+
+        self._positions_inflight[cache_key] = asyncio.Event()
         return {
             "req_id": req.get("req_id", ""), "ok": True,
             "hit": False, "data": [],
         }
 
+    # --------- centralized rate limiter: shared balances cache
+
+    async def _handle_balances_put(self, req: dict) -> dict:
+        exchange = req.get("exchange", "hyperliquid")
+        data = req.get("data", {})
+        self._balances_cache[exchange] = _BalancesCacheEntry(
+            data=data, pushed_at=time.monotonic(),
+        )
+        inflight = self._balances_inflight.pop(exchange, None)
+        if inflight is not None:
+            inflight.set()
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
+    async def _handle_balances_get(self, req: dict) -> dict:
+        """Bot reads cached balances, coalescing concurrent fetches."""
+        exchange = req.get("exchange", "hyperliquid")
+        entry = self._balances_cache.get(exchange)
+        if entry and (time.monotonic() - entry.pushed_at) < self._balances_ttl_s:
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "hit": True, "data": entry.data,
+            }
+
+        inflight = self._balances_inflight.get(exchange)
+        if inflight is not None:
+            try:
+                await asyncio.wait_for(inflight.wait(), timeout=15.0)
+                entry = self._balances_cache.get(exchange)
+                if entry:
+                    return {
+                        "req_id": req.get("req_id", ""), "ok": True,
+                        "hit": True, "data": entry.data,
+                    }
+            except TimeoutError:
+                self._balances_inflight.pop(exchange, None)
+
+        self._balances_inflight[exchange] = asyncio.Event()
+        return {
+            "req_id": req.get("req_id", ""), "ok": True,
+            "hit": False, "data": {},
+        }
+
+    # --------- centralized: shared markets cache
+
+    async def _handle_markets(self, req: dict) -> dict:
+        """Return cached markets or fetch them (one fetch for all bots)."""
+        exchange = req.get("exchange", "hyperliquid")
+        trading_mode = req.get("trading_mode", "futures")
+        cache_key = f"{exchange}:{trading_mode}"
+        now = time.monotonic()
+
+        entry = self._markets_cache.get(cache_key)
+        if entry and (now - entry.fetched_at) < self._markets_ttl_s:
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": entry.data, "served_from": "cache",
+                "age_s": now - entry.fetched_at,
+            }
+
+        inflight = self._markets_inflight.get(cache_key)
+        if inflight is not None:
+            await inflight.wait()
+            entry = self._markets_cache.get(cache_key)
+            if entry:
+                return {
+                    "req_id": req.get("req_id", ""), "ok": True,
+                    "data": entry.data, "served_from": "cache",
+                    "age_s": time.monotonic() - entry.fetched_at,
+                }
+
+        evt = asyncio.Event()
+        self._markets_inflight[cache_key] = evt
+        try:
+            budget = self._get_budget(exchange)
+            await budget.acquire(1.0, priority=TokenBucket.NORMAL)
+            fetcher = self._get_fetcher(exchange, trading_mode)
+            client = await fetcher._ensure_client()
+            data = await asyncio.wait_for(
+                client.load_markets(), timeout=120.0,
+            )
+            if not isinstance(data, dict):
+                logger.error(
+                    "load_markets returned %s instead of dict — "
+                    "discarding (exchange=%s)",
+                    type(data).__name__, exchange,
+                )
+                return {
+                    "req_id": req.get("req_id", ""), "ok": False,
+                    "error_type": "TypeError",
+                    "error_message": f"load_markets returned {type(data).__name__}",
+                }
+            self._markets_cache[cache_key] = _MarketsCacheEntry(
+                data=data, fetched_at=time.monotonic(),
+            )
+            logger.info(
+                "markets fetched for %s/%s: %d symbols",
+                exchange, trading_mode, len(data),
+            )
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": data, "served_from": "fetch",
+            }
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RateLimit" in e.__class__.__name__:
+                budget.trigger_backoff(2.0)
+            return {
+                "req_id": req.get("req_id", ""), "ok": False,
+                "error_type": e.__class__.__name__,
+                "error_message": str(e),
+            }
+        finally:
+            evt.set()
+            self._markets_inflight.pop(cache_key, None)
+
+    # --------- centralized: shared funding rates cache
+
+    async def _handle_funding_rates(self, req: dict) -> dict:
+        """Return cached funding rates or fetch them (one bulk fetch for all bots)."""
+        exchange = req.get("exchange", "hyperliquid")
+        trading_mode = req.get("trading_mode", "futures")
+        cache_key = f"{exchange}:{trading_mode}"
+        now = time.monotonic()
+
+        entry = self._funding_rates_cache.get(cache_key)
+        if entry and (now - entry.fetched_at) < self._funding_rates_ttl_s:
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": entry.data, "served_from": "cache",
+                "age_s": now - entry.fetched_at,
+            }
+
+        inflight = self._funding_rates_inflight.get(cache_key)
+        if inflight is not None:
+            await inflight.wait()
+            entry = self._funding_rates_cache.get(cache_key)
+            if entry:
+                return {
+                    "req_id": req.get("req_id", ""), "ok": True,
+                    "data": entry.data, "served_from": "cache",
+                    "age_s": time.monotonic() - entry.fetched_at,
+                }
+
+        evt = asyncio.Event()
+        self._funding_rates_inflight[cache_key] = evt
+        try:
+            budget = self._get_budget(exchange)
+            await budget.acquire(1.0, priority=TokenBucket.NORMAL)
+            fetcher = self._get_fetcher(exchange, trading_mode)
+            client = await fetcher._ensure_client()
+            data = await asyncio.wait_for(
+                client.fetch_funding_rates(), timeout=60.0,
+            )
+            self._funding_rates_cache[cache_key] = _FundingRatesCacheEntry(
+                data=data, fetched_at=time.monotonic(),
+            )
+            logger.info(
+                "funding rates fetched for %s/%s: %d pairs",
+                exchange, trading_mode, len(data),
+            )
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": data, "served_from": "fetch",
+            }
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RateLimit" in e.__class__.__name__:
+                budget.trigger_backoff(2.0)
+            return {
+                "req_id": req.get("req_id", ""), "ok": False,
+                "error_type": e.__class__.__name__,
+                "error_message": str(e),
+            }
+        finally:
+            evt.set()
+            self._funding_rates_inflight.pop(cache_key, None)
+
+    # --------- centralized: shared leverage tiers cache
+
+    async def _handle_leverage_tiers(self, req: dict) -> dict:
+        """Return cached leverage tiers or fetch them (one bulk fetch for all bots)."""
+        exchange = req.get("exchange", "hyperliquid")
+        trading_mode = req.get("trading_mode", "futures")
+        cache_key = f"{exchange}:{trading_mode}"
+        now = time.monotonic()
+
+        entry = self._leverage_tiers_cache.get(cache_key)
+        if entry and (now - entry.fetched_at) < self._leverage_tiers_ttl_s:
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": entry.data, "served_from": "cache",
+                "age_s": now - entry.fetched_at,
+            }
+
+        inflight = self._leverage_tiers_inflight.get(cache_key)
+        if inflight is not None:
+            await inflight.wait()
+            entry = self._leverage_tiers_cache.get(cache_key)
+            if entry:
+                return {
+                    "req_id": req.get("req_id", ""), "ok": True,
+                    "data": entry.data, "served_from": "cache",
+                    "age_s": time.monotonic() - entry.fetched_at,
+                }
+
+        evt = asyncio.Event()
+        self._leverage_tiers_inflight[cache_key] = evt
+        try:
+            budget = self._get_budget(exchange)
+            await budget.acquire(1.0, priority=TokenBucket.LOW)
+            fetcher = self._get_fetcher(exchange, trading_mode)
+            client = await fetcher._ensure_client()
+            data = await asyncio.wait_for(
+                client.fetch_leverage_tiers(), timeout=120.0,
+            )
+            self._leverage_tiers_cache[cache_key] = _LeverageTiersCacheEntry(
+                data=data, fetched_at=time.monotonic(),
+            )
+            logger.info(
+                "leverage tiers fetched for %s/%s: %d pairs",
+                exchange, trading_mode, len(data),
+            )
+            return {
+                "req_id": req.get("req_id", ""), "ok": True,
+                "data": data, "served_from": "fetch",
+            }
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RateLimit" in e.__class__.__name__:
+                budget.trigger_backoff(2.0)
+            return {
+                "req_id": req.get("req_id", ""), "ok": False,
+                "error_type": e.__class__.__name__,
+                "error_message": str(e),
+            }
+        finally:
+            evt.set()
+            self._leverage_tiers_inflight.pop(cache_key, None)
+
+    # --------- fleet handlers
+
+    def _handle_register(self, req: dict, conn_id: int) -> dict:
+        bot_id = req.get("bot_id", "")
+        if not bot_id:
+            return {"req_id": req.get("req_id", ""), "ok": False,
+                    "error_message": "bot_id required"}
+        entry = self.registry.register(bot_id, req, conn_id)
+        initializing_count = self.registry.count_initializing(entry.exchange)
+        stagger_s = max(0.0, (initializing_count - 1) * 15.0)
+        self.event_log.emit("bot_connect", bot_id=bot_id,
+                            exchange=entry.exchange, strategy=entry.strategy,
+                            pid=entry.pid, config_file=entry.config_file)
+        if stagger_s > 0:
+            self.event_log.emit("stagger_applied", bot_id=bot_id,
+                                stagger_s=stagger_s,
+                                initializing_count=initializing_count)
+        logger.info(
+            "bot registered: %s (exchange=%s strategy=%s pid=%d) fleet_size=%d stagger=%.0fs",
+            bot_id, entry.exchange, entry.strategy, entry.pid,
+            self.registry.size, stagger_s,
+        )
+        return {
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "stagger_s": stagger_s,
+            "fleet_size": self.registry.size,
+        }
+
+    def _handle_unregister(self, req: dict, conn_id: int) -> dict:
+        entry = self.registry.unregister(conn_id, reason="clean_shutdown")
+        if entry:
+            self.event_log.emit("bot_disconnect", bot_id=entry.bot_id,
+                                reason="clean_shutdown",
+                                uptime_s=round(time.monotonic() - entry.connected_at, 1))
+            logger.info("bot unregistered: %s (clean shutdown)", entry.bot_id)
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
+    def _handle_state_update(self, req: dict, conn_id: int) -> dict:
+        new_state = req.get("state", "")
+        pairs_count = req.get("pairs_count", 0)
+        self.registry.update_state(conn_id, new_state, pairs_count)
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
+    def _handle_fleet_status(self, req: dict) -> dict:
+        budget_stats: dict[str, dict] = {}
+        for exchange, bucket in self.budgets.items():
+            budget_stats[exchange] = {
+                "tokens_available": round(bucket.tokens, 1),
+                "tokens_max": bucket.burst,
+                "backoff_active": bucket.backoff_active,
+                "shed_count": bucket.shed_count,
+                "backoff_count": bucket.backoff_count,
+            }
+        return {
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "daemon": {
+                "uptime_s": round(self.stats.uptime_s(), 1),
+                "socket_path": self.socket_path,
+                "active_connections": self.stats.active_clients,
+                "total_series": len(self.store.all()),
+                "total_events": len(self.event_log._events),
+            },
+            "bots": self.registry.get_fleet_status(),
+            "rate_limiters": budget_stats,
+            "recent_events_count": self.event_log.recent_counts(),
+        }
+
+    def _handle_fleet_events(self, req: dict) -> dict:
+        since_ts = req.get("since_ts", 0)
+        event_types = req.get("event_types")
+        bot_id = req.get("bot_id")
+        limit = req.get("limit", 100)
+        return {
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "events": self.event_log.query(since_ts, event_types, bot_id, limit),
+        }
+
     # --------- dispatch
 
-    async def _dispatch(self, req: dict) -> dict:
+    async def _dispatch(self, req: dict, conn_id: int = 0) -> dict:
         op = req.get("op", "fetch")
+        self.registry.heartbeat(conn_id)
         if op == "ping":
             return {
                 "req_id": req.get("req_id", ""),
@@ -719,6 +1466,16 @@ class Daemon:
                 "daemon_version": PROTOCOL_VERSION,
                 "uptime_s": self.stats.uptime_s(),
             }
+        if op == "register":
+            return self._handle_register(req, conn_id)
+        if op == "unregister":
+            return self._handle_unregister(req, conn_id)
+        if op == "state_update":
+            return self._handle_state_update(req, conn_id)
+        if op == "fleet_status":
+            return self._handle_fleet_status(req)
+        if op == "fleet_events":
+            return self._handle_fleet_events(req)
         if op == "stats":
             budget_stats = self._collect_budget_stats()
             return {
@@ -742,6 +1499,10 @@ class Daemon:
                 "positions_puts": self.stats.positions_puts,
                 "positions_gets": self.stats.positions_gets,
                 "positions_cache_hits": self.stats.positions_cache_hits,
+                "total_connects": self.stats.total_connects,
+                "total_disconnects": self.stats.total_disconnects,
+                "peak_clients": self.stats.peak_clients,
+                "short_lived_connections": self.stats.short_lived_connections,
                 **budget_stats,
             }
         if op == "acquire":
@@ -752,6 +1513,16 @@ class Daemon:
             return await self._handle_positions_put(req)
         if op == "positions_get":
             return await self._handle_positions_get(req)
+        if op == "balances_put":
+            return await self._handle_balances_put(req)
+        if op == "balances_get":
+            return await self._handle_balances_get(req)
+        if op == "markets":
+            return await self._handle_markets(req)
+        if op == "funding_rates":
+            return await self._handle_funding_rates(req)
+        if op == "leverage_tiers":
+            return await self._handle_leverage_tiers(req)
         if op == "fetch":
             self._pending_fetches += 1
             if self._pending_fetches > self._peak_pending:
@@ -771,6 +1542,9 @@ class Daemon:
                 return {
                     "req_id": req.get("req_id", ""),
                     "ok": False,
+                    "pair": req.get("pair", ""),
+                    "timeframe": req.get("timeframe", ""),
+                    "candle_type": req.get("candle_type", ""),
                     "error_type": e.__class__.__name__,
                     "error_message": str(e),
                     "pending_fetches": self._pending_fetches,
@@ -790,9 +1564,17 @@ class Daemon:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> None:
         self.stats.active_clients += 1
+        self.stats.total_connects += 1
+        if self.stats.active_clients > self.stats.peak_clients:
+            self.stats.peak_clients = self.stats.active_clients
+        connect_time = time.monotonic()
+        conn_id = self._next_conn_id
+        self._next_conn_id += 1
+        clean_disconnect = False
         peer = writer.get_extra_info("peername") or "unix"
         logger.info(
-            "client connected (%s) — active=%d", peer, self.stats.active_clients,
+            "client connected (%s) conn=%d — active=%d total=%d",
+            peer, conn_id, self.stats.active_clients, self.stats.total_connects,
         )
         try:
             while True:
@@ -804,18 +1586,46 @@ class Daemon:
                 except Exception as e:
                     logger.warning("bad json from client: %s", e)
                     continue
-                resp = await self._dispatch(req)
+                if req.get("op") == "unregister":
+                    clean_disconnect = True
+                resp = await self._dispatch(req, conn_id)
                 try:
                     writer.write(dumps(resp))
                     await writer.drain()
-                except ConnectionResetError:
+                except (ConnectionResetError, BrokenPipeError, ConnectionError):
                     break
+        except (ConnectionResetError, BrokenPipeError, ConnectionError):
+            pass
         finally:
+            if not clean_disconnect:
+                entry = self.registry.unregister(conn_id, reason="connection_lost")
+                if entry:
+                    self.event_log.emit(
+                        "bot_crash", bot_id=entry.bot_id,
+                        reason="connection_lost",
+                        uptime_s=round(time.monotonic() - entry.connected_at, 1),
+                    )
+                    logger.warning(
+                        "bot crashed: %s (connection lost after %.0fs)",
+                        entry.bot_id, time.monotonic() - entry.connected_at,
+                    )
             self.stats.active_clients -= 1
+            self.stats.total_disconnects += 1
             self.stats.last_client_disconnect_monotonic = time.monotonic()
-            logger.info(
-                "client disconnected — active=%d", self.stats.active_clients,
-            )
+            session_s = time.monotonic() - connect_time
+            if session_s < 1.0:
+                self.stats.short_lived_connections += 1
+            elif session_s < 3.0:
+                logger.warning(
+                    "short-lived connection (%.1fs) — active=%d"
+                    " (possible churn: client reconnecting per-request)",
+                    session_s, self.stats.active_clients,
+                )
+            else:
+                logger.info(
+                    "client disconnected (%.0fs session) — active=%d",
+                    session_s, self.stats.active_clients,
+                )
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -839,17 +1649,65 @@ class Daemon:
                 self._shutdown_event.set()
                 return
 
+    async def _periodic_stats(self) -> None:
+        stats_interval = float(self.global_cfg.get("stats_interval_s", 60))
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.sleep(stats_interval)
+                if self._shutdown_event.is_set():
+                    break
+                self._log_stats_summary()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("periodic stats failed: %s", e)
+
+    def _log_stats_summary(self) -> None:
+        s = self.stats
+        uptime = s.uptime_s()
+        total = s.cache_hits + s.cache_partial + s.cache_misses
+        hit_rate = (s.cache_hits / total * 100) if total > 0 else 0.0
+        budget_lines = []
+        for exchange, bucket in self.budgets.items():
+            q_total = len(bucket._waiters)
+            budget_lines.append(
+                f"{exchange}: tokens={bucket.tokens:.1f}/{bucket.burst} "
+                f"backoff={'ACTIVE' if bucket.backoff_active else 'off'} "
+                f"queue={q_total} shed={bucket.shed_count} "
+                f"429s={bucket.backoff_count} "
+                f"escalation={bucket._consecutive_backoffs}"
+            )
+        budget_str = " | ".join(budget_lines) if budget_lines else "none"
+        conn_stats = (
+            f" conn={s.total_connects}/{s.total_disconnects} "
+            f"peak={s.peak_clients}"
+        )
+        logger.info(
+            "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) "
+            "acquire=%d tickers=%d/%d pos=%d/%d pending=%d peak=%d "
+            "errors=%d%s | %s",
+            uptime, s.active_clients,
+            total, hit_rate,
+            s.acquire_total,
+            s.tickers_cache_hits, s.tickers_requests,
+            s.positions_cache_hits, s.positions_gets,
+            self._pending_fetches, self._peak_pending,
+            s.fetch_errors,
+            conn_stats,
+            budget_str,
+        )
+
     async def _periodic_flush(self) -> None:
-        if not self.persistence:
-            return
         while not self._shutdown_event.is_set():
             try:
                 await asyncio.sleep(self._flush_interval_s)
                 if self._shutdown_event.is_set():
                     break
-                n = self.persistence.flush_dirty()
-                if n:
-                    logger.debug("flushed %d dirty series", n)
+                if self.persistence:
+                    n = self.persistence.flush_dirty()
+                    if n:
+                        logger.debug("flushed %d dirty series", n)
+                self.event_log.flush()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -871,6 +1729,8 @@ class Daemon:
             "daemon listening on %s (pid=%d, proto=%d)",
             self.socket_path, os.getpid(), PROTOCOL_VERSION,
         )
+        self.event_log.emit("daemon_start", pid=os.getpid(),
+                            socket_path=self.socket_path)
 
         if self.persistence:
             try:
@@ -882,12 +1742,14 @@ class Daemon:
 
         watchdog_task = asyncio.create_task(self._idle_watchdog())
         flush_task = asyncio.create_task(self._periodic_flush())
+        stats_task = asyncio.create_task(self._periodic_stats())
 
         try:
             await self._shutdown_event.wait()
         finally:
             watchdog_task.cancel()
             flush_task.cancel()
+            stats_task.cancel()
             self._server.close()
             await self._server.wait_closed()
             for f in list(self.fetchers.values()):
@@ -898,6 +1760,9 @@ class Daemon:
                     logger.info("final flush: %d series written", n)
                 except Exception as e:
                     logger.warning("final flush failed: %s", e)
+            self.event_log.emit("daemon_stop",
+                                uptime_s=round(self.stats.uptime_s(), 1))
+            self.event_log.flush()
             try:
                 os.unlink(self.socket_path)
             except OSError:
@@ -909,6 +1774,22 @@ class Daemon:
 
 
 # -------------------------------------------------------------------- main
+
+
+def _acquire_pid_lock(socket_path: str) -> int | None:
+    """Acquire an exclusive PID lock. Returns the fd if acquired, None if another
+    daemon is already running (in which case this process should exit silently)."""
+    pid_path = socket_path + ".pid"
+    fd = os.open(pid_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    os.fsync(fd)
+    return fd
 
 
 def main() -> int:
@@ -930,6 +1811,11 @@ def main() -> int:
     global_cfg = resolve_global_config(raw_cfg.get("global") if raw_cfg else None)
     if args.socket:
         global_cfg["socket_path"] = args.socket
+
+    pid_lock_fd = _acquire_pid_lock(global_cfg["socket_path"])
+    if pid_lock_fd is None:
+        print("another ftcache daemon is already running — exiting", file=sys.stderr)
+        return 0
 
     setup_daemon_logger(global_cfg.get("log_path"), level=args.log_level)
     logger.info(
@@ -957,6 +1843,13 @@ def main() -> int:
     except Exception as e:
         logger.exception("daemon crashed: %s", e)
         return 1
+    finally:
+        try:
+            fcntl.flock(pid_lock_fd, fcntl.LOCK_UN)
+            os.close(pid_lock_fd)
+            os.unlink(global_cfg["socket_path"] + ".pid")
+        except Exception:
+            pass
     return 0
 
 

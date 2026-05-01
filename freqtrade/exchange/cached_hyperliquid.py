@@ -37,5 +37,5 @@ class CachedHyperliquid(CachedExchangeMixin, Hyperliquid):
         return super().fetch_liquidation_fills(pair, since)
 
     def additional_exchange_init(self) -> None:
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.LOW)
+        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
         return super().additional_exchange_init()

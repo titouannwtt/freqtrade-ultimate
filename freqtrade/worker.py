@@ -105,6 +105,8 @@ class Worker:
             if state == State.STOPPED:
                 self.freqtrade.check_for_open_trades()
 
+            self._notify_fleet_state(state)
+
             # Reset heartbeat timestamp to log the heartbeat message at
             # first throttling iteration when the state changes
             self._heartbeat_msg = 0
@@ -190,6 +192,26 @@ class Worker:
     def _sleep(sleep_duration: float) -> None:
         """Local sleep method - to improve testability"""
         time.sleep(sleep_duration)
+
+    def _notify_fleet_state(self, state: State) -> None:
+        state_map = {
+            State.RUNNING: "running",
+            State.PAUSED: "paused",
+            State.STOPPED: "stopped",
+        }
+        state_str = state_map.get(state)
+        if not state_str:
+            return
+        client = getattr(self.freqtrade.exchange, '_ftcache_client', None)
+        if not client:
+            return
+        import asyncio
+        try:
+            asyncio.get_event_loop().run_until_complete(
+                client.update_state(state_str),
+            )
+        except Exception:  # noqa: S110
+            pass
 
     def _process_stopped(self) -> None:
         self.freqtrade.process_stopped()

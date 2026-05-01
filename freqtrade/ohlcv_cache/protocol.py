@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 @dataclass
@@ -57,6 +57,30 @@ class PongResponse:
     ok: bool = True
     daemon_version: int = PROTOCOL_VERSION
     uptime_s: float = 0.0
+
+
+@dataclass
+class RegisterRequest:
+    bot_id: str = ""
+    config_file: str = ""
+    exchange: str = ""
+    trading_mode: str = ""
+    strategy: str = ""
+    timeframe: str = ""
+    pairs_count: int = 0
+    dry_run: bool = False
+    api_port: int = 0
+    pid: int = 0
+    op: str = "register"
+    req_id: str = ""
+
+
+@dataclass
+class StateUpdateRequest:
+    state: str = ""
+    pairs_count: int = 0
+    op: str = "state_update"
+    req_id: str = ""
 
 
 def dumps(obj: Any) -> bytes:

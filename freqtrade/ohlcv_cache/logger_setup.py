@@ -11,6 +11,7 @@ Both daemon-side and client-side log records are emitted with a
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -31,12 +32,11 @@ def setup_daemon_logger(log_path: str | Path | None, level: str = "INFO") -> log
     fmt = logging.Formatter(_DAEMON_FMT)
 
     if log_path:
-        # File-backed: parent already redirects stdout/stderr to the same
-        # file via subprocess pipes, so adding a StreamHandler would
-        # duplicate every line. Use FileHandler only.
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(p, encoding="utf-8")
+        fh = RotatingFileHandler(
+            p, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        )
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     else:

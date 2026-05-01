@@ -69,7 +69,7 @@ class OhlcvCacheClient:
     def __init__(
         self,
         socket_path: str,
-        timeout_s: float = 10.0,
+        timeout_s: float = 30.0,
         exchange_id: str = "",
         trading_mode: str = "spot",
         respawn_cfg: dict | None = None,
@@ -88,6 +88,8 @@ class OhlcvCacheClient:
         # Cached parameters needed to respawn the daemon if it has died.
         # Populated by get_or_spawn().
         self._respawn_cfg: dict | None = respawn_cfg
+        self._bot_identity: dict | None = None
+        self._registered = False
 
     # ---------------- connection lifecycle
 
@@ -102,31 +104,45 @@ class OhlcvCacheClient:
             timeout=self.timeout_s,
         )
 
+    def set_bot_identity(self, identity: dict) -> None:
+        self._bot_identity = identity
+
     async def _ensure_connected(self) -> None:
         if self._writer is not None and not self._writer.is_closing():
             return
+        self._registered = False
         try:
             await self._connect()
-            return
         except (TimeoutError, FileNotFoundError, ConnectionRefusedError) as e:
             first_err = e
-
-        # Daemon socket missing — try to respawn once if we have the info.
-        if self._respawn_cfg is None:
-            raise CacheUnavailable(f"cannot connect to daemon: {first_err}") from first_err
-        try:
-            logger.info("daemon socket missing, attempting respawn")
-            _ensure_daemon_running(**self._respawn_cfg)
-            await self._connect()
-        except (TimeoutError, FileNotFoundError, ConnectionRefusedError) as e:
-            raise CacheUnavailable(
-                f"cannot connect to daemon after respawn: {e}"
-            ) from e
-        except CacheUnavailable:
-            raise
+            # Daemon socket missing — try to respawn once if we have the info.
+            if self._respawn_cfg is None:
+                raise CacheUnavailable(
+                    f"cannot connect to daemon: {first_err}",
+                ) from first_err
+            try:
+                logger.info("daemon socket missing, attempting respawn")
+                _ensure_daemon_running(**self._respawn_cfg)
+                await self._connect()
+            except (TimeoutError, FileNotFoundError, ConnectionRefusedError) as e:
+                raise CacheUnavailable(
+                    f"cannot connect to daemon after respawn: {e}"
+                ) from e
+            except CacheUnavailable:
+                raise
+        await self._auto_register()
 
     async def close(self) -> None:
         if self._writer is not None:
+            if self._registered:
+                try:
+                    self._writer.write(dumps({
+                        "op": "unregister",
+                        "req_id": uuid.uuid4().hex,
+                    }))
+                    await self._writer.drain()
+                except Exception:  # noqa: S110
+                    pass
             try:
                 self._writer.close()
                 await self._writer.wait_closed()
@@ -134,6 +150,67 @@ class OhlcvCacheClient:
                 pass
         self._reader = None
         self._writer = None
+        self._registered = False
+
+    async def _auto_register(self) -> None:
+        if self._registered or not self._bot_identity:
+            return
+        try:
+            payload = {
+                "op": "register",
+                "req_id": uuid.uuid4().hex,
+                **self._bot_identity,
+            }
+            if self._writer is None or self._reader is None:
+                return
+            self._writer.write(dumps(payload))
+            await self._writer.drain()
+            line = await asyncio.wait_for(
+                self._reader.readline(), timeout=10.0,
+            )
+            if line:
+                resp = loads_response(line)
+                if resp.get("ok"):
+                    self._registered = True
+                    logger.info(
+                        "registered with fleet orchestrator (fleet_size=%d stagger=%.0fs)",
+                        resp.get("fleet_size", 0), resp.get("stagger_s", 0),
+                    )
+        except Exception as e:
+            logger.debug("fleet register failed (non-fatal): %s", e)
+
+    async def update_state(self, state: str, pairs_count: int = 0) -> None:
+        try:
+            await self._send_and_receive({
+                "op": "state_update",
+                "req_id": uuid.uuid4().hex,
+                "state": state,
+                "pairs_count": pairs_count,
+            })
+        except Exception as e:
+            logger.debug("fleet state_update failed (non-fatal): %s", e)
+
+    async def fleet_status(self) -> dict:
+        return await self._send_and_receive({
+            "op": "fleet_status",
+            "req_id": uuid.uuid4().hex,
+        })
+
+    async def fleet_events(
+        self, since_ts: float = 0, event_types: list[str] | None = None,
+        bot_id: str | None = None, limit: int = 100,
+    ) -> dict:
+        payload: dict = {
+            "op": "fleet_events",
+            "req_id": uuid.uuid4().hex,
+            "since_ts": since_ts,
+            "limit": limit,
+        }
+        if event_types:
+            payload["event_types"] = event_types
+        if bot_id:
+            payload["bot_id"] = bot_id
+        return await self._send_and_receive(payload)
 
     # ---------------- request/response
 
@@ -222,11 +299,11 @@ class OhlcvCacheClient:
                 raise CacheRateLimited(f"daemon rate-limited: {err_type} {err_msg}")
             raise CacheUnavailable(f"daemon error: {err_type} {err_msg}")
         try:
-            ct_ret = CandleType(resp["candle_type"])
-        except ValueError:
-            ct_ret = CandleType.SPOT
+            ct_ret = CandleType(resp.get("candle_type", ct_str))
+        except (ValueError, KeyError):
+            ct_ret = candle_type if isinstance(candle_type, CandleType) else CandleType.SPOT
         return (
-            resp["pair"], resp["timeframe"], ct_ret,
+            resp.get("pair", pair), resp.get("timeframe", timeframe), ct_ret,
             resp.get("data", []), resp.get("drop_incomplete", True),
         )
 
@@ -253,6 +330,10 @@ class OhlcvCacheClient:
         }
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
+            if resp.get("throttled"):
+                raise CacheRateLimited(
+                    f"acquire shed: {resp.get('error_message')}"
+                )
             raise CacheUnavailable(
                 f"acquire failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
@@ -304,6 +385,87 @@ class OhlcvCacheClient:
                 f"{resp.get('error_message')}"
             )
         return resp.get("hit", False), resp.get("data", [])
+
+    async def push_balances(self, balances: dict) -> None:
+        """Push get_balances() result into the daemon's shared cache."""
+        req = {
+            "op": "balances_put",
+            "req_id": uuid.uuid4().hex,
+            "exchange": self.exchange_id,
+            "data": balances,
+        }
+        resp = await self._send_and_receive(req)
+        if not resp.get("ok"):
+            raise CacheUnavailable(
+                f"balances_put failed: {resp.get('error_type')} "
+                f"{resp.get('error_message')}"
+            )
+
+    async def get_markets(self) -> tuple[bool, dict]:
+        """Get cached markets from the daemon. Returns (hit, data)."""
+        req = {
+            "op": "markets",
+            "req_id": uuid.uuid4().hex,
+            "exchange": self.exchange_id,
+            "trading_mode": self.trading_mode,
+        }
+        resp = await self._send_and_receive(req)
+        if not resp.get("ok"):
+            err_type = resp.get("error_type", "")
+            err_msg = resp.get("error_message", "")
+            if "429" in err_msg or "RateLimit" in err_type:
+                raise CacheRateLimited(f"markets rate-limited: {err_type} {err_msg}")
+            raise CacheUnavailable(f"markets failed: {err_type} {err_msg}")
+        return True, resp.get("data", {})
+
+    async def get_balances(self) -> tuple[bool, dict]:
+        """Get cached balances from the daemon. Returns (hit, data)."""
+        req = {
+            "op": "balances_get",
+            "req_id": uuid.uuid4().hex,
+            "exchange": self.exchange_id,
+        }
+        resp = await self._send_and_receive(req)
+        if not resp.get("ok"):
+            raise CacheUnavailable(
+                f"balances_get failed: {resp.get('error_type')} "
+                f"{resp.get('error_message')}"
+            )
+        return resp.get("hit", False), resp.get("data", {})
+
+    async def get_funding_rates(self) -> tuple[bool, dict]:
+        """Get cached funding rates from daemon (bulk fetch, all pairs)."""
+        req = {
+            "op": "funding_rates",
+            "req_id": uuid.uuid4().hex,
+            "exchange": self.exchange_id,
+            "trading_mode": self.trading_mode,
+        }
+        resp = await self._send_and_receive(req)
+        if not resp.get("ok"):
+            err_type = resp.get("error_type", "")
+            err_msg = resp.get("error_message", "")
+            if "429" in err_msg or "RateLimit" in err_type:
+                raise CacheRateLimited(f"funding_rates rate-limited: {err_type} {err_msg}")
+            raise CacheUnavailable(f"funding_rates failed: {err_type} {err_msg}")
+        return True, resp.get("data", {})
+
+    async def get_leverage_tiers(self) -> tuple[bool, dict]:
+        """Get cached leverage tiers from daemon (bulk fetch, all pairs)."""
+        req = {
+            "op": "leverage_tiers",
+            "req_id": uuid.uuid4().hex,
+            "exchange": self.exchange_id,
+            "trading_mode": self.trading_mode,
+        }
+        resp = await self._send_and_receive(req)
+        if not resp.get("ok"):
+            err_type = resp.get("error_type", "")
+            err_msg = resp.get("error_message", "")
+            if "429" in err_msg or "RateLimit" in err_type:
+                raise CacheRateLimited(f"leverage_tiers rate-limited: {err_type} {err_msg}")
+            raise CacheUnavailable(f"leverage_tiers failed: {err_type} {err_msg}")
+        return True, resp.get("data", {})
 
     # ---------------- spawn-on-demand
 
@@ -367,8 +529,8 @@ class OhlcvCacheClient:
                     exchange_id, trading_mode, socket_path)
 
         stagger_max = float(global_cfg.get("client_stagger_s", 30))
-        if stagger_max > 0:
-            stagger_s = random.uniform(0, stagger_max)  # noqa: S311
+        stagger_s = random.uniform(0, stagger_max)  # noqa: S311
+        if stagger_s > 0.5:
             logger.info(
                 "startup stagger: waiting %.1fs before first request", stagger_s,
             )

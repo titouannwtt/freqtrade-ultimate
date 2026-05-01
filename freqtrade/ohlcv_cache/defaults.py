@@ -63,7 +63,7 @@ GLOBAL_DEFAULTS: dict = {
 EXCHANGE_DEFAULTS: dict[str, dict] = {
     "hyperliquid": {
         "rate_per_s": 10,
-        "burst": 12,
+        "burst": 15,
         "refresh_overlap_candles": 5,
         "max_candles_per_call": 5000,
         "supports_mark": True,
