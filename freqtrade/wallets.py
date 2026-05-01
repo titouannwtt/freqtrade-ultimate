@@ -200,6 +200,9 @@ class Wallets:
         positions = self._exchange.fetch_positions()
         _parsed_positions = {}
         for position in positions:
+            if not isinstance(position, dict):
+                logger.warning("position entry is %s, not dict — skipping", type(position).__name__)
+                continue
             symbol = position["symbol"]
             if position["side"] is None or position["collateral"] == 0.0:
                 # Position is not open ...

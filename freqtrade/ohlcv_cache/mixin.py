@@ -401,6 +401,14 @@ class CachedExchangeMixin:
                 client.get_positions(),
             )
             if hit:
+                if not isinstance(positions, list) or (
+                    positions and not isinstance(positions[0], dict)
+                ):
+                    logger.warning(
+                        "daemon returned positions as %s — falling back to ccxt",
+                        type(positions[0]).__name__ if positions else type(positions).__name__,
+                    )
+                    raise CacheUnavailable("positions data corrupted")
                 self._log_exchange_response(  # type: ignore[attr-defined]
                     "fetch_positions", positions, add_info="from ftcache",
                 )

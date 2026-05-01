@@ -3998,6 +3998,11 @@ class Exchange:
         mark_comb: PairWithTimeframe = (pair, timeframe, mark_price_type)
         funding_comb: PairWithTimeframe = (pair, timeframe_ff, CandleType.FUNDING_RATE)
 
+        if self.loop.is_running():
+            raise ExchangeError(
+                "Cannot fetch funding fees — event loop already running"
+            )
+
         candle_histories = self.refresh_latest_ohlcv(
             [mark_comb, funding_comb],
             since_ms=since_ms,
