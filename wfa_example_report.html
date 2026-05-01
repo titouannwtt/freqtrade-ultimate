@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WFA Report — HippoDCA_hyp_dynv1_short_sharpe</title>
+<style>
+body {
+  font-family: -apple-system, 'Segoe UI', Roboto, monospace;
+  background: #1a1a2e; color: #e0e0e0; margin: 0; padding: 20px;
+}
+.container { max-width: 1000px; margin: 0 auto; }
+h1 { color: #00d4ff; border-bottom: 2px solid #00d4ff;
+     padding-bottom: 8px; }
+h2 { color: #00d4ff; margin-top: 30px; }
+h3 { color: #84cc16; margin-top: 20px; }
+.meta { color: #888; font-size: 0.9em; }
+table {
+  width: 100%; border-collapse: collapse; margin: 10px 0;
+  font-size: 0.85em;
+}
+th { background: #16213e; color: #00d4ff; padding: 8px;
+     text-align: left; }
+td { padding: 6px 8px; border-bottom: 1px solid #2a2a4a; }
+tr:hover { background: #16213e; }
+.grade {
+  font-size: 3em; font-weight: bold; display: inline-block;
+  width: 80px; height: 80px; line-height: 80px;
+  text-align: center; border-radius: 12px; margin-right: 16px;
+}
+.check-pass { color: #22c55e; }
+.check-fail { color: #ef4444; }
+.verdict-box {
+  display: flex; align-items: center; margin: 16px 0;
+  background: #16213e; padding: 16px; border-radius: 8px;
+}
+.pos { color: #22c55e; }
+.neg { color: #ef4444; }
+.warn-item { color: #eab308; margin: 4px 0; }
+.badge-stable { color: #22c55e; font-size: 0.82em; }
+.badge-marginal { color: #eab308; font-size: 0.82em; }
+.badge-unstable { color: #ef4444; font-size: 0.82em; }
+svg { background: #0f0f23; border-radius: 8px; margin: 10px 0; }
+.section { margin-bottom: 24px; }
+.kv { display: inline-block; margin-right: 20px;
+      margin-bottom: 10px; }
+.kv-label { color: #888; font-size: 0.85em; }
+.kv-value { font-size: 1.1em; font-weight: bold;
+            font-family: monospace; }
+.intro {
+  background: #16213e; padding: 16px; border-radius: 8px;
+  margin: 16px 0; line-height: 1.6; font-size: 0.9em;
+}
+.next-steps {
+  background: #1a2744; padding: 16px; border-radius: 8px;
+  border-left: 4px solid #00d4ff; margin: 16px 0;
+  line-height: 1.5;
+}
+.explain-box {
+  background: #16213e; padding: 12px 16px; border-radius: 6px;
+  margin: 10px 0; font-size: 0.88em; line-height: 1.6;
+  color: #bbb;
+}
+.tooltip { position: relative; cursor: help;
+           border-bottom: 1px dotted #00d4ff; }
+.tooltip .tip-text {
+  visibility: hidden; position: absolute; bottom: 125%;
+  left: 50%; transform: translateX(-50%);
+  background: #16213e; color: #e0e0e0;
+  padding: 8px 12px; border-radius: 6px; font-size: 0.8em;
+  width: 280px; z-index: 10; border: 1px solid #2a2a4a;
+  white-space: normal; line-height: 1.4;
+}
+.tooltip:hover .tip-text { visibility: visible; }
+details { margin: 8px 0; }
+details summary { cursor: pointer; color: #00d4ff;
+                  font-size: 0.9em; }
+details summary:hover { text-decoration: underline; }
+details > div {
+  padding: 8px 0 8px 16px; color: #bbb;
+  font-size: 0.85em; line-height: 1.6;
+}
+.section-desc {
+  color: #888; font-size: 0.82em; margin: 2px 0 10px 0;
+  font-style: italic; line-height: 1.4;
+}
+span[lang="fr"] { display: none; }
+html:lang(fr) span[lang="en"] { display: none; }
+html:lang(fr) span[lang="fr"] { display: inline; }
+.lang-bar {
+  position: fixed; top: 10px; right: 20px; z-index: 100;
+  background: #16213e; border: 1px solid #2a2a4a;
+  border-radius: 6px; padding: 4px 8px; font-size: 0.85em;
+}
+.lang-bar select {
+  background: #0f0f23; color: #e0e0e0;
+  border: 1px solid #2a2a4a; border-radius: 4px;
+  padding: 2px 6px; font-size: 0.9em; cursor: pointer;
+}
+.mini-section {
+  background: #16213e; padding: 12px 16px; border-radius: 6px;
+  margin: 10px 0; font-size: 0.88em; line-height: 1.6;
+}
+.badge-inline { font-size: 0.78em; margin-left: 6px; }
+.warn-box {
+  background: #1a2744; padding: 10px 14px; border-radius: 6px;
+  margin: 8px 0; line-height: 1.5;
+}
+.group {
+  border-left: 4px solid var(--gc, #2a2a4a);
+  margin: 32px 0; padding: 0 0 0 16px;
+}
+.group-title {
+  font-size: 1.15em; font-weight: bold; margin: 0 0 4px 0;
+  letter-spacing: 0.5px;
+}
+.group-verdict { --gc: #00d4ff; }
+.group-verdict .group-title { color: #00d4ff; }
+.group-perf { --gc: #22c55e; }
+.group-perf .group-title { color: #22c55e; }
+.group-oos { --gc: #84cc16; }
+.group-oos .group-title { color: #84cc16; }
+.group-robust { --gc: #eab308; }
+.group-robust .group-title { color: #eab308; }
+.group-params { --gc: #a855f7; }
+.group-params .group-title { color: #a855f7; }
+.group-diag { --gc: #f97316; }
+.group-diag .group-title { color: #f97316; }
+.group-ref { --gc: #888; }
+.group-ref .group-title { color: #888; }
+.metric-card {
+  display: inline-block; background: #16213e;
+  border-radius: 8px; padding: 12px 16px;
+  margin: 4px; min-width: 140px; text-align: center;
+}
+.metric-card .mc-label { color: #888; font-size: 0.8em; }
+.metric-card .mc-value {
+  font-size: 1.3em; font-weight: bold; margin: 4px 0;
+  font-family: monospace;
+}
+.metric-card .mc-badge { font-size: 0.75em; }
+</style>
+</head>
+<body>
+<div class="lang-bar">
+  <span lang="en">Language</span><span lang="fr">Langue</span>:
+  <select onchange="document.documentElement.lang=this.value">
+    <option value="en">English</option>
+    <option value="fr">Français</option>
+  </select>
+</div>
+<div class="container">
+<h1><span lang="en">Walk-Forward Analysis</span><span lang="fr">Analyse Walk-Forward</span> — HippoDCA_hyp_dynv1_short_sharpe</h1>
+<p class="meta">
+  CalmarHyperOptLoss | 5 windows (rolling) | 200 epochs/win | 2026-04-30T14:32:17
+</p>
+
+<div class="intro">
+<strong><span lang="en">What is this?</span><span lang="fr">Qu'est-ce que c'est ?</span></strong>
+<span lang="en">Walk-forward analysis is the gold standard for validating trading strategies. Instead of optimizing on all data and then testing on the same data (overfitting), it splits history into N sequential windows. For each window: optimize on training data, then test on the unseen test period that follows. This mimics real trading — you always trade with parameters optimized on past data.</span><span lang="fr">L'analyse walk-forward est le standard pour valider les stratégies de trading. Au lieu d'optimiser sur toutes les données puis tester sur les mêmes (surapprentissage), elle découpe l'historique en N fenêtres séquentielles. Pour chaque fenêtre : optimiser sur les données d'entraînement, puis tester sur la période non vue qui suit. Cela simule le trading réel — on trade toujours avec des paramètres optimisés sur le passé.</span>
+<br><br>
+<strong><span lang="en">How to read:</span><span lang="fr">Comment lire :</span></strong>
+<span lang="en"><strong>Verdict</strong> = overall grade (A-F) with pass/fail checklist based on Pardo, Lopez de Prado, Carver, Chan, Davey, Van Tharp. <strong>Windows</strong> = per-period results — look for consistency, not one lucky window. <strong>OOS Analysis</strong> = concatenated out-of-sample metrics. <strong>Robustness</strong> = Monte Carlo, regime, perturbation, multi-seed, CPCV tests. <strong>Parameters</strong> = stability and consensus across windows. Hover over <u>underlined terms</u> for definitions.</span><span lang="fr"><strong>Verdict</strong> = note globale (A-F) avec checklist basée sur Pardo, Lopez de Prado, Carver, Chan, Davey, Van Tharp. <strong>Fenêtres</strong> = résultats par période — chercher la consistance, pas une fenêtre chanceuse. <strong>Analyse OOS</strong> = métriques hors-échantillon concaténées. <strong>Robustesse</strong> = Monte Carlo, régimes, perturbation, multi-seed, CPCV. <strong>Paramètres</strong> = stabilité et consensus entre fenêtres. Survolez les <u>termes soulignés</u> pour les définitions.</span>
+<br><br>
+<em style="color:#888"><span lang="en">Train/test ratio: 75%/25%. Embargo: 7 days between train and test to prevent information leakage (Lopez de Prado).</span><span lang="fr">Ratio train/test : 75%/25%. Embargo : 7 jours entre train et test pour empêcher les fuites d'information (Lopez de Prado).</span></em>
+</div>
+<div class="group group-verdict"><div class="group-title"><span lang="en">Verdict</span><span lang="fr">Verdict</span></div>
+
+<div class="section" id="sec-verdict">
+<h2><span lang="en">Overall Verdict</span><span lang="fr">Verdict global</span></h2>
+<p class="section-desc"><span lang="en">Grade based on Pardo (WFE, profitable windows), Lopez de Prado (DSR, CPCV), Van Tharp (SQN), Chan (trades/params), Davey (DD ratio, profit factor), Carver (Monte Carlo robustness).</span><span lang="fr">Note basée sur Pardo (WFE, fenêtres profitables), Lopez de Prado (DSR, CPCV), Van Tharp (SQN), Chan (trades/params), Davey (ratio DD, profit factor), Carver (robustesse Monte Carlo).</span></p>
+<div class="verdict-box">
+  <div class="grade" style="background:#84cc1620;color:#84cc16">
+    B
+  </div>
+  <div style="flex:1">
+    <div style="font-size:1.1em;font-weight:bold;color:#84cc16;margin-bottom:6px">Proceed to dry-run</div>
+    <table><tr><td class="check-pass">&#10003;</td><td>4/5 (80%)</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>WFE median 62%</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>DSR 1.120</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>OOS trades: 487</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>SQN 2.45</td></tr>
+<tr><td class="check-fail">&#10007;</td><td>3/7 stable (43%)</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>Max DD ratio 1.4x</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>Avg PF 1.52</td></tr>
+<tr><td class="check-pass">&#10003;</td><td>Min trades/params 68:1</td></tr>
+</table>
+    <p style="color:#888;font-size:0.85em;margin-top:10px">Most checks passed. Safe to dry-run at reduced size (50%). Review any failed checks — they may not be dealbreakers. Run for 4+ weeks before considering live capital.</p>
+  </div>
+</div>
+</div>
+<div class="section" id="sec-scorecard"><h2><span lang="en">Strategy Scorecard</span><span lang="fr">Bilan de la stratégie</span></h2><p class="section-desc"><span lang="en">Each criterion is graded against thresholds from quantitative trading literature. Red = blocking, Yellow = needs attention, Green = passed. Click criterion names to jump to the relevant section.</span><span lang="fr">Chaque critère est évalué selon des seuils issus de la littérature quantitative. Rouge = bloquant, Jaune = à surveiller, Vert = validé. Cliquez sur les noms pour aller à la section concernée.</span></p><div style="border:2px solid #ef4444;border-radius:8px;padding:10px 16px;margin:8px 0;text-align:center"><strong style="color:#ef4444;font-size:1.1em">16 <span lang="en">passed</span><span lang="fr">validés</span> / 1 <span lang="en">warnings</span><span lang="fr">alertes</span> / 1 <span lang="en">failed</span><span lang="fr">échoués</span></strong><br><span style="color:#ef4444"><span lang="en">Critical issues — fix red criteria first.</span><span lang="fr">Problèmes critiques — corriger les rouges.</span></span></div><div style="margin:10px 0"><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-windows" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Profitable Windows</span><span lang="fr">Fenêtres profitables</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">4/5 (80%)</span><span lang="fr">4/5 (80%)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-wfe" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">WFE</span><span lang="fr">WFE</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">WFE median 62%</span><span lang="fr">WFE median 62%</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-verdict" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">DSR</span><span lang="fr">DSR</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">DSR 1.120</span><span lang="fr">DSR 1.120</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-oos-agg" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">OOS Trades</span><span lang="fr">Trades OOS</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">OOS trades: 487</span><span lang="fr">OOS trades: 487</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-oos-agg" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">SQN</span><span lang="fr">SQN</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">SQN 2.45</span><span lang="fr">SQN 2.45</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-param-stability" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Param Stability</span><span lang="fr">Stabilité params</span></a></div><div style="color:#ef4444;font-weight:bold;text-align:right">✗</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:10%;height:100%;background:#ef4444;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">3/7 stable (43%)</span><span lang="fr">3/7 stable (43%)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-degradation" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">DD Ratio</span><span lang="fr">Ratio DD</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Max DD ratio 1.4x</span><span lang="fr">Max DD ratio 1.4x</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-windows" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Profit Factor</span><span lang="fr">Profit Factor</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Avg PF 1.52</span><span lang="fr">Avg PF 1.52</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-windows" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Trades/Params</span><span lang="fr">Trades/Params</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">✓</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:100%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Min trades/params 68:1</span><span lang="fr">Min trades/params 68:1</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-monte-carlo" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">MC Robustness</span><span lang="fr">Robustesse MC</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">0.62</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:62%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Return/DD p5=0.62 — edge survives reordering (Carver #111).</span><span lang="fr">Return/DD p5=0.62 — edge survit au réordonnancement (Carver #111).</span><span style="color:#666;font-size:0.75em"> (Carver #111)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-perturbation" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Perturbation</span><span lang="fr">Perturbation</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">82%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:82%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">82% profitable under param noise — robust (tip #81).</span><span lang="fr">82% profitable avec bruit params — robuste (tip #81).</span><span style="color:#666;font-size:0.75em"> (tip #81)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-multi-seed" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Seed Convergence</span><span lang="fr">Convergence seeds</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">68%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:68%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">68% params converge — stable surface (tip #76).</span><span lang="fr">68% params convergent — surface stable (tip #76).</span><span style="color:#666;font-size:0.75em"> (tip #76)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-cpcv" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">CPCV P(loss)</span><span lang="fr">CPCV P(perte)</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">27%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:73%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">27% of paths lose money — acceptable (Lopez de Prado).</span><span lang="fr">27% des chemins perdent — acceptable (Lopez de Prado).</span><span style="color:#666;font-size:0.75em"> (Lopez de Prado)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-equity" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">OOS Equity</span><span lang="fr">Equity OOS</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">K=0.95</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:47%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">K-ratio 0.95 — smooth growth.</span><span lang="fr">K-ratio 0.95 — croissance régulière.</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-oos-agg" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">OOS Profit</span><span lang="fr">Profit OOS</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">+16.9%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:84%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Aggregate OOS profit +16.9% — positive.</span><span lang="fr">Profit OOS agrégé +16.9% — positif.</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-oos-agg" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Max DD</span><span lang="fr">DD max</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">7.2%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:14%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Worst OOS DD 7.2% — acceptable (tip #16).</span><span lang="fr">Pire DD OOS 7.2% — acceptable (tip #16).</span><span style="color:#666;font-size:0.75em"> (tip #16)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-regime" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Regime</span><span lang="fr">Régime</span></a></div><div style="color:#eab308;font-weight:bold;text-align:right">dep</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:30%;height:100%;background:#eab308;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Regime dependent — profitable only in some conditions (tip #69).</span><span lang="fr">Dépendant du régime — profitable uniquement dans certaines conditions (tip #69).</span><span style="color:#666;font-size:0.75em"> (tip #69)</span></span></div></div><div style="display:grid;grid-template-columns:160px 70px 1fr;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a2e"><div style="font-weight:bold;color:#ccc"><a href="#sec-holdout" style="color:#ccc;text-decoration:none;border-bottom:1px dotted #555"><span lang="en">Holdout</span><span lang="fr">Holdout</span></a></div><div style="color:#22c55e;font-weight:bold;text-align:right">+3.2%</div><div style="display:flex;align-items:center;gap:8px"><div style="flex:0 0 120px;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden"><div style="width:16%;height:100%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:0.82em;color:#999"><span lang="en">Holdout profit +3.2% (avg OOS: +3.4%) — passes.</span><span lang="fr">Profit holdout +3.2% (moy OOS : +3.4%) — validé.</span></span></div></div></div></div>
+</div>
+<div class="group group-perf"><div class="group-title"><span lang="en">Window Results</span><span lang="fr">Résultats par fenêtre</span></div>
+
+<div class="section" id="sec-windows">
+<h2><span lang="en">Window Results</span><span lang="fr">Résultats par fenêtre</span></h2>
+<p class="section-desc"><span lang="en">Each row is one walk-forward cycle: train on past data, test on unseen future. Consistency across windows matters more than any single result (tip #161 Chan: best system in backtest = often the luckiest).</span><span lang="fr">Chaque ligne est un cycle walk-forward : entraîner sur le passé, tester sur le futur non vu. La consistance entre fenêtres compte plus qu'un seul résultat (tip #161 Chan : meilleur système en backtest = souvent le plus chanceux).</span></p>
+<table>
+<tr><th>#</th>
+<th><span lang="en">Train</span><span lang="fr">Entraîn.</span></th>
+<th><span lang="en">Test</span><span lang="fr">Test</span></th>
+<th><span lang="en">Train Profit</span><span lang="fr">Profit Train</span></th>
+<th><span lang="en">Test Profit</span><span lang="fr">Profit Test</span></th>
+<th><span lang="en">Trades</span><span lang="fr">Trades</span></th>
+<th><span class="tooltip">Calmar<span class="tip-text"><span lang="en">Annualized return divided by maximum drawdown. A Calmar of 2 means you earn twice what you risk losing. Below 0.5 suggests the drawdown pain is not worth the return.</span><span lang="fr">Rendement annualisé divisé par le drawdown maximum. Un Calmar de 2 signifie que vous gagnez 2x ce que vous risquez de perdre. En dessous de 0.5, la douleur du DD ne vaut pas le rendement.</span></span></span></th><th><span class="tooltip">Max DD<span class="tip-text"><span lang="en">The largest drop from a peak equity value to a subsequent trough, as a percentage. This is the worst loss you would have experienced if you entered at the peak.</span><span lang="fr">La plus grande chute depuis un pic d&#x27;equity jusqu&#x27;au creux suivant, en pourcentage. C&#x27;est la pire perte subie si vous étiez entré au sommet.</span></span></span></th>
+<th><span class="tooltip">WFE<span class="tip-text"><span lang="en">Annualized test return divided by annualized training return. A WFE above 50% means more than half the in-sample edge persists out-of-sample — a sign the strategy generalizes.</span><span lang="fr">Rendement test annualisé divisé par le rendement training. Un WFE &gt; 50% signifie que plus de la moitié de l&#x27;edge in-sample persiste hors-échantillon — signe de généralisation.</span></span></span></th>
+<th><span lang="en">Regime</span><span lang="fr">Régime</span></th></tr>
+<tr><td>1</td><td>20250101-20250701</td><td>20250708-20250908</td><td class="pos">+14.8%</td><td class="pos">+6.3%</td><td>95</td><td>2.20</td><td>2.9%</td><td>72%</td><td>bull</td></tr>
+<tr><td>2</td><td>20250301-20250901</td><td>20250908-20251108</td><td class="pos">+11.2%</td><td class="pos">+4.1%</td><td>102</td><td>1.50</td><td>3.8%</td><td>65%</td><td>bull</td></tr>
+<tr><td>3</td><td>20250501-20251101</td><td>20251108-20260108</td><td class="pos">+9.5%</td><td class="neg">-1.8%</td><td>85</td><td>-0.60</td><td>7.2%</td><td>28%</td><td>bear</td></tr>
+<tr><td>4</td><td>20250701-20260101</td><td>20260108-20260308</td><td class="pos">+10.8%</td><td class="pos">+3.5%</td><td>98</td><td>1.30</td><td>4.5%</td><td>58%</td><td>ranging</td></tr>
+<tr><td>5</td><td>20250901-20260301</td><td>20260301-20260430</td><td class="pos">+12.1%</td><td class="pos">+4.8%</td><td>107</td><td>1.80</td><td>3.4%</td><td>61%</td><td>bull</td></tr>
+
+</table>
+</div>
+
+<div class="section" id="sec-wfe">
+<h2><span lang="en">WFE Evolution</span><span lang="fr">Évolution du WFE</span></h2>
+<p class="section-desc"><span lang="en">Walk-Forward Efficiency per window. Above 50% = the in-sample edge persists out-of-sample (Pardo). Declining WFE suggests the strategy's edge is decaying over time.</span><span lang="fr">Efficacité Walk-Forward par fenêtre. Au-dessus de 50% = l'edge in-sample persiste hors-échantillon (Pardo). Un WFE en déclin suggère que l'edge de la stratégie se dégrade avec le temps.</span></p>
+<svg width="900" height="250" xmlns="http://www.w3.org/2000/svg">
+<line x1="60" y1="210.0" x2="880" y2="210.0" stroke="#555" stroke-width="1"/>
+<line x1="60" y1="115.0" x2="880" y2="115.0" stroke="#22c55e" stroke-dasharray="6" stroke-width="1" opacity="0.5"/>
+<text x="882" y="115.0" fill="#22c55e" font-size="9" dominant-baseline="middle">50%</text>
+<rect x="112.0" y="73.2" width="60" height="136.8" fill="#22c55e" opacity="0.8"/>
+<text x="142.0" y="68.2" text-anchor="middle" fill="#e0e0e0" font-size="10">72%</text>
+<text x="142.0" y="242.0" text-anchor="middle" fill="#888" font-size="10">W1</text>
+<rect x="276.0" y="86.5" width="60" height="123.5" fill="#22c55e" opacity="0.8"/>
+<text x="306.0" y="81.5" text-anchor="middle" fill="#e0e0e0" font-size="10">65%</text>
+<text x="306.0" y="242.0" text-anchor="middle" fill="#888" font-size="10">W2</text>
+<rect x="440.0" y="156.8" width="60" height="53.2" fill="#ef4444" opacity="0.8"/>
+<text x="470.0" y="151.8" text-anchor="middle" fill="#e0e0e0" font-size="10">28%</text>
+<text x="470.0" y="242.0" text-anchor="middle" fill="#888" font-size="10">W3</text>
+<rect x="604.0" y="99.8" width="60" height="110.2" fill="#22c55e" opacity="0.8"/>
+<text x="634.0" y="94.8" text-anchor="middle" fill="#e0e0e0" font-size="10">58%</text>
+<text x="634.0" y="242.0" text-anchor="middle" fill="#888" font-size="10">W4</text>
+<rect x="768.0" y="94.1" width="60" height="115.9" fill="#22c55e" opacity="0.8"/>
+<text x="798.0" y="89.1" text-anchor="middle" fill="#e0e0e0" font-size="10">61%</text>
+<text x="798.0" y="242.0" text-anchor="middle" fill="#888" font-size="10">W5</text>
+</svg>
+</div>
+
+<div class="section" id="sec-degradation">
+<h2><span lang="en">Train vs Test Degradation</span><span lang="fr">Dégradation Train vs Test</span></h2>
+<p class="section-desc"><span lang="en">How much each metric degraded from training to testing. Negative = OOS worse than IS. DD ratio > -50% is normal; > -80% suggests severe overfitting (Davey: expect 30-50% degradation).</span><span lang="fr">Combien chaque métrique s'est dégradée entre l'entraînement et le test. Négatif = OOS pire que IS. Ratio DD > -50% est normal ; > -80% suggère un surapprentissage sévère (Davey : s'attendre à 30-50% de dégradation).</span></p>
+<table>
+<tr><th>#</th>
+<th><span lang="en">Profit</span><span lang="fr">Profit</span></th>
+<th><span class="tooltip">Calmar<span class="tip-text"><span lang="en">Annualized return divided by maximum drawdown. A Calmar of 2 means you earn twice what you risk losing. Below 0.5 suggests the drawdown pain is not worth the return.</span><span lang="fr">Rendement annualisé divisé par le drawdown maximum. Un Calmar de 2 signifie que vous gagnez 2x ce que vous risquez de perdre. En dessous de 0.5, la douleur du DD ne vaut pas le rendement.</span></span></span></th>
+<th><span class="tooltip">Sharpe<span class="tip-text"><span lang="en">Annualized return divided by annualized volatility. Measures how much return you get per unit of risk. Above 1 is good, above 2 is excellent — but in-sample Sharpe above 3 is almost always overfitting.</span><span lang="fr">Rendement annualisé divisé par la volatilité. Mesure le rendement par unité de risque. Au-dessus de 1 = bon, au-dessus de 2 = excellent — mais un Sharpe in-sample &gt; 3 est presque toujours du surapprentissage.</span></span></span></th>
+<th><span class="tooltip">PF<span class="tip-text"><span lang="en">Total gross profit divided by total gross loss. A value of 1.0 is break-even. Above 1.2 suggests a durable edge; below 1.0 means the strategy is losing money overall.</span><span lang="fr">Profit brut total divisé par la perte brute totale. 1.0 = seuil de rentabilité. Au-dessus de 1.2, edge durable ; en dessous de 1.0, la stratégie perd de l&#x27;argent.</span></span></span></th></tr>
+<tr><td>W1</td><td class="neg">-57%</td><td class="neg">-42%</td><td class="neg">-33%</td><td class="neg">-14%</td></tr>
+<tr><td>W2</td><td class="neg">-63%</td><td class="neg">-48%</td><td class="neg">-41%</td><td class="neg">-15%</td></tr>
+<tr><td>W3</td><td class="neg">-119%</td><td class="neg">-129%</td><td class="neg">-131%</td><td class="neg">-36%</td></tr>
+<tr><td>W4</td><td class="neg">-68%</td><td class="neg">-50%</td><td class="neg">-47%</td><td class="neg">-14%</td></tr>
+<tr><td>W5</td><td class="neg">-60%</td><td class="neg">-42%</td><td class="neg">-39%</td><td class="neg">-12%</td></tr>
+
+</table>
+</div>
+
+<div class="section" id="sec-holdout">
+<h2><span lang="en">Holdout Validation</span><span lang="fr">Validation holdout</span></h2>
+<p class="section-desc"><span lang="en">The holdout period was never used during training or window testing — it is the ultimate unseen test. If profit collapses here, the strategy is overfitted (tip #85 Lopez de Prado: holdout final = never touched).</span><span lang="fr">La période holdout n'a jamais été utilisée pendant l'entraînement ou le test — c'est l'ultime test non vu. Si le profit s'effondre ici, la stratégie est sur-optimisée (tip #85 Lopez de Prado : holdout final = jamais touché).</span></p>
+<div class="mini-section">
+<strong><span lang="en">Period</span><span lang="fr">Période</span>:</strong> 20260430-20260530<br>
+<span class="kv"><span class="kv-label"><span lang="en">Profit</span><span lang="fr">Profit</span></span><br>
+  <span class="kv-value pos">+3.2%</span></span>
+<span class="kv"><span class="kv-label"><span lang="en">Trades</span><span lang="fr">Trades</span></span><br>
+  <span class="kv-value">52</span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">Calmar<span class="tip-text"><span lang="en">Annualized return divided by maximum drawdown. A Calmar of 2 means you earn twice what you risk losing. Below 0.5 suggests the drawdown pain is not worth the return.</span><span lang="fr">Rendement annualisé divisé par le drawdown maximum. Un Calmar de 2 signifie que vous gagnez 2x ce que vous risquez de perdre. En dessous de 0.5, la douleur du DD ne vaut pas le rendement.</span></span></span></span><br>
+  <span class="kv-value">1.90 <span style="color:#eab308;font-size:0.8em">(marginal)</span></span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">Max DD<span class="tip-text"><span lang="en">The largest drop from a peak equity value to a subsequent trough, as a percentage. This is the worst loss you would have experienced if you entered at the peak.</span><span lang="fr">La plus grande chute depuis un pic d&#x27;equity jusqu&#x27;au creux suivant, en pourcentage. C&#x27;est la pire perte subie si vous étiez entré au sommet.</span></span></span></span><br>
+  <span class="kv-value">2.5% <span style="color:#22c55e;font-size:0.8em">(none)</span></span></span>
+</div>
+<div class="mini-section"><strong><span lang="en">Baseline (default params)</span><span lang="fr">Baseline (params défaut)</span>:</strong> <span class="pos">+0.7%</span> | 45 trades</div>
+</div>
+</div>
+<div class="group group-oos"><div class="group-title"><span lang="en">Out-of-Sample Analysis</span><span lang="fr">Analyse hors-échantillon</span></div>
+
+<div class="section" id="sec-oos-agg">
+<h2><span lang="en">OOS Aggregate Metrics</span><span lang="fr">Métriques OOS agrégées</span></h2>
+<p class="section-desc"><span lang="en">Metrics computed across ALL out-of-sample windows combined. These represent the strategy's real-world performance on data the optimizer never saw.</span><span lang="fr">Métriques calculées sur TOUTES les fenêtres hors-échantillon combinées. Elles représentent la performance réelle de la stratégie sur des données que l'optimiseur n'a jamais vues.</span></p>
+<div>
+<span class="kv"><span class="kv-label"><span lang="en">Total OOS Profit</span><span lang="fr">Profit OOS total</span></span><br>
+  <span class="kv-value pos">+16.9%</span></span>
+<span class="kv"><span class="kv-label"><span lang="en">Trades</span><span lang="fr">Trades</span></span><br>
+  <span class="kv-value">487</span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">SQN<span class="tip-text"><span lang="en">Measures trading edge quality by comparing average profit per trade to its variability. Higher is better, but values above 5 suggest overfitting — real edges rarely look that clean.</span><span lang="fr">Mesure la qualité de l&#x27;edge en comparant le profit moyen par trade à sa variabilité. Plus c&#x27;est haut, mieux c&#x27;est, mais au-dessus de 5, c&#x27;est suspect — les vrais edges sont rarement aussi nets.</span></span></span></span><br>
+  <span class="kv-value">2.5 <span style="color:#84cc16;font-size:0.8em">(good)</span></span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">Expectancy<span class="tip-text"><span lang="en">The mean profit (or loss) per trade. Positive means the strategy makes money on average; negative means it loses. This is the most basic measure of whether the strategy works.</span><span lang="fr">Le profit (ou perte) moyen par trade. Positif = la stratégie gagne de l&#x27;argent en moyenne. C&#x27;est la mesure la plus fondamentale de l&#x27;efficacité d&#x27;une stratégie.</span></span></span></span><br>
+  <span class="kv-value">+0.0042</span></span>
+<span class="kv"><span class="kv-label"><span lang="en">Avg Sharpe</span><span lang="fr">Sharpe moy.</span></span><br>
+  <span class="kv-value">0.78 <span style="color:#f97316;font-size:0.8em">(flat)</span></span></span>
+<span class="kv"><span class="kv-label"><span lang="en">Avg DD</span><span lang="fr">DD moy.</span></span><br>
+  <span class="kv-value">4.4%</span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">Avg PF<span class="tip-text"><span lang="en">Total gross profit divided by total gross loss. A value of 1.0 is break-even. Above 1.2 suggests a durable edge; below 1.0 means the strategy is losing money overall.</span><span lang="fr">Profit brut total divisé par la perte brute totale. 1.0 = seuil de rentabilité. Au-dessus de 1.2, edge durable ; en dessous de 1.0, la stratégie perd de l&#x27;argent.</span></span></span></span><br>
+  <span class="kv-value">1.28 <span style="color:#84cc16;font-size:0.8em">(edge)</span></span></span>
+<span class="kv"><span class="kv-label"><span class="tooltip">DSR<span class="tip-text"><span lang="en">The Sharpe ratio deflated for the number of trials run. When you test hundreds of parameter combinations, some will look good by chance. DSR corrects for this — above 0.95 means the edge is likely real, not a statistical fluke.</span><span lang="fr">Le ratio de Sharpe corrigé pour le nombre d&#x27;essais. Quand on teste des centaines de combinaisons, certaines semblent bonnes par chance. Le DSR corrige ce biais — au-dessus de 0.95, l&#x27;edge est probablement réel.</span></span></span></span><br><span class="kv-value" style="color:#22c55e">1.120 <span style="color:#22c55e;font-size:0.8em">(significant)</span></span></span>
+</div>
+</div>
+
+<div class="section" id="sec-equity">
+<h2><span lang="en">OOS Equity Curve</span><span lang="fr">Courbe d'equity OOS</span></h2>
+<p class="section-desc"><span lang="en">Concatenated equity curve from all out-of-sample trades in chronological order. A smooth upward curve (high K-ratio) means consistent growth; erratic jumps mean the strategy depends on a few lucky trades.</span><span lang="fr">Courbe d'equity concaténée de tous les trades hors-échantillon en ordre chronologique. Une courbe ascendante régulière (K-ratio élevé) = croissance consistante ; des sauts erratiques = la stratégie dépend de quelques trades chanceux.</span></p>
+<div style="margin:8px 0"><span class="kv"><span class="kv-label"><span lang="en">Return</span><span lang="fr">Rendement</span></span><br><span class="kv-value">+8.7%</span></span><span class="kv"><span class="kv-label"><span class="tooltip">Max DD<span class="tip-text"><span lang="en">The largest drop from a peak equity value to a subsequent trough, as a percentage. This is the worst loss you would have experienced if you entered at the peak.</span><span lang="fr">La plus grande chute depuis un pic d&#x27;equity jusqu&#x27;au creux suivant, en pourcentage. C&#x27;est la pire perte subie si vous étiez entré au sommet.</span></span></span></span><br><span class="kv-value">4.2% <span style="color:#22c55e;font-size:0.8em">(none)</span></span></span><span class="kv"><span class="kv-label"><span class="tooltip">K-ratio<span class="tip-text"><span lang="en">Slope of the equity curve divided by its standard error. A high K-ratio means the equity curve grows steadily rather than in erratic jumps. Above 0.5 is smooth; below 0 means the equity curve is declining.</span><span lang="fr">Pente de la courbe d&#x27;equity divisée par son erreur standard. Un K-ratio élevé = croissance régulière. Au-dessus de 0.5 = lisse ; en dessous de 0, la courbe décline.</span></span></span></span><br><span class="kv-value">0.95 <span style="color:#84cc16;font-size:0.8em">(smooth growth)</span></span></span><span class="kv"><span class="kv-label"><span lang="en">Trades</span><span lang="fr">Trades</span></span><br><span class="kv-value">487</span></span></div>
+<svg width="900" height="300" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="260.0" x2="880" y2="260.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="260.0" text-anchor="end" fill="#888" font-size="10">990</text>
+<line x1="70" y1="212.0" x2="880" y2="212.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="212.0" text-anchor="end" fill="#888" font-size="10">994</text>
+<line x1="70" y1="164.0" x2="880" y2="164.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="164.0" text-anchor="end" fill="#888" font-size="10">999</text>
+<line x1="70" y1="116.0" x2="880" y2="116.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="116.0" text-anchor="end" fill="#888" font-size="10">1003</text>
+<line x1="70" y1="68.0" x2="880" y2="68.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="68.0" text-anchor="end" fill="#888" font-size="10">1007</text>
+<line x1="70" y1="20.0" x2="880" y2="20.0" stroke="#2a2a4a" stroke-width="1"/>
+<text x="65" y="20.0" text-anchor="end" fill="#888" font-size="10">1011</text>
+<text x="15" y="140" text-anchor="middle" fill="#888" font-size="11" transform="rotate(-90,15,140)">Equity</text>
+<text x="475" y="295" text-anchor="middle" fill="#888" font-size="11">Trade #</text>
+<line x1="750" y1="12" x2="770" y2="12" stroke="#555" stroke-dasharray="4" stroke-width="1"/>
+<text x="775" y="16" fill="#888" font-size="10">Starting balance</text>
+<line x1="70" y1="147.7" x2="880" y2="147.7" stroke="#555" stroke-dasharray="4" stroke-width="1"/>
+<polyline points="70.0,147.6 71.7,147.8 73.3,147.6 75.0,147.4 76.7,147.8 78.3,148.0 80.0,148.0 81.7,148.0 83.3,148.0 85.0,148.2 86.7,147.9 88.3,147.7 90.0,147.7 91.7,147.4 93.3,147.2 95.0,147.4 96.7,147.3 98.3,147.5 100.0,147.2 101.7,147.2 103.3,147.2 105.0,147.3 106.7,147.0 108.3,147.0 110.0,147.1 111.7,147.1 113.3,147.0 115.0,146.9 116.7,146.7 118.3,146.6 120.0,146.1 121.7,146.2 123.3,146.2 125.0,146.4 126.7,146.2 128.3,145.9 130.0,145.9 131.7,146.1 133.3,146.2 135.0,146.1 136.7,145.9 138.3,145.7 140.0,145.8 141.7,145.7 143.3,145.7 145.0,145.6 146.7,145.4 148.3,145.3 150.0,145.1 151.7,145.0 153.3,144.9 155.0,144.8 156.7,145.1 158.3,145.1 160.0,145.2 161.7,145.3 163.3,145.3 165.0,144.9 166.7,145.1 168.3,144.8 170.0,145.2 171.7,145.2 173.3,145.2 175.0,145.0 176.7,144.8 178.3,144.6 180.0,144.6 181.7,144.7 183.3,144.5 185.0,144.5 186.7,144.7 188.3,145.0 190.0,145.1 191.7,145.0 193.3,144.9 195.0,144.7 196.7,144.8 198.3,144.7 200.0,144.6 201.7,144.6 203.3,144.5 205.0,144.6 206.7,144.6 208.3,144.7 210.0,144.9 211.7,144.8 213.3,144.8 215.0,144.8 216.7,144.7 218.3,144.5 220.0,144.3 221.7,144.3 223.3,144.4 225.0,144.4 226.7,144.7 228.3,145.0 230.0,145.3 231.7,145.5 233.3,145.3 235.0,145.5 236.7,145.6 238.3,145.2 240.0,145.3 241.7,145.1 243.3,145.3 245.0,145.3 246.7,145.4 248.3,145.5 250.0,145.3 251.7,145.6 253.3,145.5 255.0,145.4 256.7,145.5 258.3,145.8 260.0,145.7 261.7,145.8 263.3,145.7 265.0,145.7 266.7,145.3 268.3,145.3 270.0,145.5 271.7,145.5 273.3,145.4 275.0,145.0 276.7,144.8 278.3,144.7 280.0,144.3 281.7,144.6 283.3,144.7 285.0,144.9 286.7,144.9 288.3,145.2 290.0,145.0 291.7,145.0 293.3,145.3 295.0,145.5 296.7,145.4 298.3,145.2 300.0,144.7 301.7,144.0 303.3,143.9 305.0,144.1 306.7,144.5 308.3,144.4 310.0,144.6 311.7,144.6 313.3,144.7 315.0,144.7 316.7,144.5 318.3,144.4 320.0,144.4 321.7,144.6 323.3,144.9 325.0,145.0 326.7,145.0 328.3,144.6 330.0,144.5 331.7,144.3 333.3,144.3 335.0,144.6 336.7,144.7 338.3,144.9 340.0,144.4 341.7,144.5 343.3,144.3 345.0,144.5 346.7,144.2 348.3,144.1 350.0,144.1 351.7,144.1 353.3,144.2 355.0,144.1 356.7,144.1 358.3,144.4 360.0,144.6 361.7,144.5 363.3,144.2 365.0,144.1 366.7,144.1 368.3,144.0 370.0,143.7 371.7,143.6 373.3,143.6 375.0,143.4 376.7,143.2 378.3,142.8 380.0,142.8 381.7,143.0 383.3,143.3 385.0,142.9 386.7,142.5 388.3,142.5 390.0,142.5 391.7,142.2 393.3,142.4 395.0,142.5 396.7,142.4 398.3,142.4 400.0,142.4 401.7,142.4 403.3,142.3 405.0,141.9 406.7,141.9 408.3,141.7 410.0,142.1 411.7,142.1 413.3,142.3 415.0,142.5 416.7,142.7 418.3,142.7 420.0,142.5 421.7,142.7 423.3,142.7 425.0,142.8 426.7,142.8 428.3,142.5 430.0,142.4 431.7,142.1 433.3,142.1 435.0,142.2 436.7,142.2 438.3,142.1 440.0,142.0 441.7,142.2 443.3,142.2 445.0,142.1 446.7,141.5 448.3,141.1 450.0,141.2 451.7,141.2 453.3,141.5 455.0,141.6 456.7,141.5 458.3,141.2 460.0,141.4 461.7,141.5 463.3,141.9 465.0,141.9 466.7,142.1 468.3,142.2 470.0,142.4 471.7,142.4 473.3,142.7 475.0,143.0 476.7,142.5 478.3,142.8 480.0,143.0 481.7,142.5 483.3,141.8 485.0,142.1 486.7,142.1 488.3,142.0 490.0,141.6 491.7,141.8 493.3,141.8 495.0,141.6 496.7,141.5 498.3,141.5 500.0,141.5 501.7,141.8 503.3,141.8 505.0,141.8 506.7,141.7 508.3,141.8 510.0,141.7 511.7,141.4 513.3,141.4 515.0,141.2 516.7,141.2 518.3,141.2 520.0,141.3 521.7,141.2 523.3,141.2 525.0,140.7 526.7,140.3 528.3,140.2 530.0,140.3 531.7,140.5 533.3,140.2 535.0,140.1 536.7,140.0 538.3,140.4 540.0,140.1 541.7,140.0 543.3,140.2 545.0,140.3 546.7,140.2 548.3,140.1 550.0,140.2 551.7,140.1 553.3,140.2 555.0,140.1 556.7,139.7 558.3,140.3 560.0,140.3 561.7,140.2 563.3,140.1 565.0,140.2 566.7,140.5 568.3,140.4 570.0,140.0 571.7,140.3 573.3,140.1 575.0,140.1 576.7,140.1 578.3,140.3 580.0,140.4 581.7,140.0 583.3,139.9 585.0,139.4 586.7,139.1 588.3,139.0 590.0,138.6 591.7,138.5 593.3,138.2 595.0,138.3 596.7,138.2 598.3,138.3 600.0,138.1 601.7,138.3 603.3,138.1 605.0,138.1 606.7,137.8 608.3,137.6 610.0,137.2 611.7,137.0 613.3,137.3 615.0,137.3 616.7,137.5 618.3,137.6 620.0,137.2 621.7,137.1 623.3,137.2 625.0,137.4 626.7,137.3 628.3,137.6 630.0,137.7 631.7,137.6 633.3,137.3 635.0,137.1 636.7,137.6 638.3,137.5 640.0,137.4 641.7,137.3 643.3,136.9 645.0,137.4 646.7,137.4 648.3,137.3 650.0,137.6 651.7,137.2 653.3,137.1 655.0,136.9 656.7,137.0 658.3,136.8 660.0,136.5 661.7,136.4 663.3,136.3 665.0,136.2 666.7,136.4 668.3,136.4 670.0,136.4 671.7,136.3 673.3,136.0 675.0,136.2 676.7,136.2 678.3,135.9 680.0,136.0 681.7,136.1 683.3,136.1 685.0,135.8 686.7,135.8 688.3,135.5 690.0,135.2 691.7,135.0 693.3,134.9 695.0,134.3 696.7,134.3 698.3,134.7 700.0,134.3 701.7,134.4 703.3,134.4 705.0,134.0 706.7,134.4 708.3,134.6 710.0,134.9 711.7,135.1 713.3,134.9 715.0,134.8 716.7,134.7 718.3,135.0 720.0,135.5 721.7,135.4 723.3,135.5 725.0,135.3 726.7,135.2 728.3,135.1 730.0,134.9 731.7,134.8 733.3,134.7 735.0,134.8 736.7,134.8 738.3,134.7 740.0,134.5 741.7,134.5 743.3,134.4 745.0,134.4 746.7,134.4 748.3,134.2 750.0,134.6 751.7,134.9 753.3,135.2 755.0,135.6 756.7,135.8 758.3,135.6 760.0,135.6 761.7,135.5 763.3,135.2 765.0,134.9 766.7,134.9 768.3,134.6 770.0,134.5 771.7,134.7 773.3,134.8 775.0,135.1 776.7,135.2 778.3,135.3 780.0,135.1 781.7,134.6 783.3,134.9 785.0,134.8 786.7,135.0 788.3,134.8 790.0,134.8 791.7,135.2 793.3,135.0 795.0,135.1 796.7,135.2 798.3,135.4 800.0,135.5 801.7,135.4 803.3,135.4 805.0,135.3 806.7,135.1 808.3,134.8 810.0,134.9 811.7,135.2 813.3,134.9 815.0,134.9 816.7,134.6 818.3,134.5 820.0,134.5 821.7,134.4 823.3,133.9 825.0,133.4 826.7,133.4 828.3,133.3 830.0,133.0 831.7,133.2 833.3,133.1 835.0,133.1 836.7,133.0 838.3,133.1 840.0,133.4 841.7,133.9 843.3,134.1 845.0,134.1 846.7,134.2 848.3,133.7 850.0,133.4 851.7,133.6 853.3,133.5 855.0,133.6 856.7,133.6 858.3,133.5 860.0,133.3 861.7,133.4 863.3,133.1 865.0,133.3 866.7,133.3 868.3,132.7 870.0,132.6 871.7,132.2 873.3,132.2 875.0,132.0 876.7,132.0 878.3,132.0 880.0,132.2" fill="none" stroke="#22c55e" stroke-width="2"/>
+</svg>
+</div>
+
+<div class="section" id="sec-concentration">
+<h2><span lang="en">Profit Concentration</span><span lang="fr">Concentration du profit</span></h2>
+<p class="section-desc"><span lang="en">If one trade dominates the profit, the strategy's success is luck, not a repeatable edge. HHI measures concentration (0 = diversified, 1 = one trade). Top-1 > 50% = red flag.</span><span lang="fr">Si un trade domine le profit, le succès de la stratégie est de la chance, pas un edge reproductible. HHI mesure la concentration (0 = diversifié, 1 = un trade). Top-1 > 50% = signal d'alarme.</span></p>
+<table>
+<tr><th>#</th>
+<th><span class="tooltip">HHI<span class="tip-text"><span lang="en">Measures how concentrated your profits are across trades. An HHI near 0 means profits are spread evenly; near 1 means one trade dominates. Above 0.15 is a warning sign — your strategy&#x27;s success depends on too few trades.</span><span lang="fr">Mesure la concentration des profits entre les trades. Un HHI proche de 0 = profits répartis ; proche de 1 = un trade domine. Au-dessus de 0.15, la stratégie dépend de trop peu de trades.</span></span></span></th>
+<th><span lang="en">Top-1 Trade %</span><span lang="fr">Top-1 Trade %</span></th></tr>
+<tr><td>W1</td><td>0.060 <span style="color:#22c55e;font-size:0.8em">(diversified)</span></td><td>18%</td></tr>
+<tr><td>W2</td><td>0.090 <span style="color:#22c55e;font-size:0.8em">(diversified)</span></td><td>28%</td></tr>
+<tr><td>W3</td><td>0.140 <span style="color:#84cc16;font-size:0.8em">(acceptable)</span></td><td>42%</td></tr>
+<tr><td>W4</td><td>0.070 <span style="color:#22c55e;font-size:0.8em">(diversified)</span></td><td>22%</td></tr>
+<tr><td>W5</td><td>0.050 <span style="color:#22c55e;font-size:0.8em">(diversified)</span></td><td>16%</td></tr>
+
+</table>
+</div>
+</div>
+<div class="group group-robust"><div class="group-title"><span lang="en">Robustness Analysis</span><span lang="fr">Analyse de robustesse</span></div>
+
+<div class="section" id="sec-monte-carlo">
+<h2><span class="tooltip">&lt;span lang=&quot;en&quot;&gt;Monte Carlo Shuffle&lt;/span&gt;&lt;span lang=&quot;fr&quot;&gt;Monte Carlo — Réordonnancement&lt;/span&gt;<span class="tip-text"><span lang="en">Your trades happened in a specific order, but they could have occurred differently. Monte Carlo reshuffles the trade sequence 1,000 times to see how drawdown varies with ordering alone — revealing whether your equity curve was lucky or robust.</span><span lang="fr">Vos trades ont eu lieu dans un ordre précis, mais auraient pu survenir différemment. Monte Carlo mélange la séquence 1000 fois pour voir comment le DD varie — révèle si votre courbe d&#x27;equity était chanceuse ou robuste.</span></span></span> (1000 sims)</h2>
+<p class="section-desc"><span lang="en">Your trades happened in a specific order, but they could have occurred differently. Monte Carlo reshuffles the trade sequence 1,000 times. Return stays the same (sum doesn't change), but max drawdown varies with ordering. If p5 DD is much worse than p50, your equity curve was lucky (tip #111 Carver). p5 = worst 5% of scenarios, p50 = median (typical), p95 = best 5% of scenarios.</span><span lang="fr">Vos trades ont eu lieu dans un ordre précis, mais auraient pu survenir différemment. Monte Carlo mélange la séquence 1000 fois. Le rendement ne change pas (la somme est invariante), mais le DD max varie avec l'ordre. Si DD p5 >> p50, votre courbe d'equity était chanceuse (tip #111 Carver). p5 = worst 5% of scenarios, p50 = median (typical), p95 = best 5% of scenarios.</span></p>
+<div>
+  <span class="kv"><span class="kv-label"><span lang="en">Return</span><span lang="fr">Rendement</span></span><br>
+    <span class="kv-value">+8.7%</span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">&lt;span lang=&quot;en&quot;&gt;Max DD&lt;/span&gt;&lt;span lang=&quot;fr&quot;&gt;DD max&lt;/span&gt;<span class="tip-text"><span lang="en">The largest drop from a peak equity value to a subsequent trough, as a percentage. This is the worst loss you would have experienced if you entered at the peak.</span><span lang="fr">La plus grande chute depuis un pic d&#x27;equity jusqu&#x27;au creux suivant, en pourcentage. C&#x27;est la pire perte subie si vous étiez entré au sommet.</span></span></span> p5/p50/p95</span><br>
+    <span class="kv-value">1.8% / 3.9% / 8.2%</span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">Return/DD</span><span lang="fr">Rend./DD</span> p5/p50/p95</span><br>
+    <span class="kv-value">0.62 / 1.85 / 3.91</span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">Carver discount<span class="tip-text"><span lang="en">Ratio of the 5th-percentile to the 50th-percentile return/DD ratio from Monte Carlo. A value near 1.0 means worst-case performance is close to typical — the edge is robust. Below 0.3 means unlucky trade ordering wrecks the risk profile.</span><span lang="fr">Ratio entre le 5e percentile et la médiane du rendement/DD Monte Carlo. Proche de 1.0 = robuste. En dessous de 0.3, un mauvais ordre de trades détruit le profil de risque.</span></span></span></span><br>
+    <span class="kv-value">0.48 <span style="color:#eab308;font-size:0.8em">(moderate)</span></span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">Consec loss p50/p95</span><span lang="fr">Pertes consec. p50/p95</span></span><br>
+    <span class="kv-value">4 / 7</span></span>
+</div>
+<svg width="400" height="50" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="20" width="380" height="10" fill="#2a2a4a" rx="3"/>
+<rect x="26.3" y="20" width="289.5" height="10" fill="#eab308" opacity="0.5" rx="3"/>
+<circle cx="121.3" cy="25" r="5" fill="#00d4ff"/>
+<text x="26.3" y="15" text-anchor="middle" fill="#22c55e" font-size="9">p5: 1.8%</text>
+<text x="121.3" y="45" text-anchor="middle" fill="#00d4ff" font-size="9">p50: 3.9%</text>
+<text x="315.8" y="15" text-anchor="middle" fill="#ef4444" font-size="9">p95: 8.2%</text>
+</svg>
+</div>
+
+<div class="section" id="sec-regime">
+<h2><span lang="en">Regime Analysis</span><span lang="fr">Analyse de régime</span></h2>
+<p class="section-desc"><span lang="en">OOS performance broken down by market regime (bull/bear/range based on BTC price movement). A robust strategy works across regimes — not just in favorable conditions (tip #69).</span><span lang="fr">Performance OOS ventilée par régime de marché (bull/bear/range basé sur le mouvement BTC). Une stratégie robuste fonctionne dans tous les régimes — pas seulement en conditions favorables (tip #69).</span></p>
+<table>
+<tr><th><span lang="en">Regime</span><span lang="fr">Régime</span></th>
+<th><span lang="en">Windows</span><span lang="fr">Fenêtres</span></th>
+<th><span lang="en">Avg Profit</span><span lang="fr">Profit moy.</span></th>
+<th><span lang="en">Avg DD</span><span lang="fr">DD moy.</span></th>
+<th><span lang="en">% Profitable</span><span lang="fr">% Profitable</span></th></tr>
+<tr><td>bear</td><td>1</td><td class="neg">-2.1%</td><td>7.8%</td><td>0%</td></tr>
+<tr><td>bull</td><td>3</td><td class="pos">+4.8%</td><td>2.9%</td><td>100%</td></tr>
+<tr><td>ranging</td><td>1</td><td class="pos">+1.3%</td><td>3.1%</td><td>100%</td></tr>
+
+</table>
+<p class="warn-item">⚠ <span lang="en">Regime dependent: strategy loses in bear. It only works in certain market conditions (tip #69).</span><span lang="fr">Dépendant du régime : la stratégie perd en bear. Elle ne fonctionne que dans certaines conditions de marché (tip #69).</span></p>
+</div>
+
+<div class="section" id="sec-perturbation">
+<h2><span lang="en">Parameter Perturbation</span><span lang="fr">Perturbation des paramètres</span></h2>
+<p class="section-desc"><span lang="en">Consensus params nudged +/-5% and +/-10% randomly, then backtested on the full OOS period. If most perturbations stay profitable, the optimum is broad and robust (tip #81: stability of optimal params — if changing slightly kills performance, it's overfitting).</span><span lang="fr">Les params consensus sont perturbés de +/-5% et +/-10% aléatoirement, puis backtestés sur la période OOS complète. Si la plupart restent profitables, l'optimum est large et robuste (tip #81 : stabilité des params optimaux — si un léger changement tue la performance, c'est du surapprentissage).</span></p>
+<div>
+  <span class="kv"><span class="kv-label"><span lang="en">Variants tested</span><span lang="fr">Variantes testées</span></span><br>
+    <span class="kv-value">80</span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">Profit p5/p50/p95</span><span lang="fr">Profit p5/p50/p95</span></span><br>
+    <span class="kv-value">-1.5% / +4.1% / +11.3%</span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">% Profitable</span><span lang="fr">% Profitable</span></span><br>
+    <span class="kv-value">82%</span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">&lt;span lang=&quot;en&quot;&gt;Sensitivity&lt;/span&gt;&lt;span lang=&quot;fr&quot;&gt;Sensibilité&lt;/span&gt;<span class="tip-text"><span lang="en">Measures how much profit changes when parameters are randomly nudged by 5-10%. Low sensitivity means the strategy is robust to small parameter errors; high sensitivity means it only works at exact parameter values — a sign of overfitting.</span><span lang="fr">Mesure combien le profit change quand les paramètres sont perturbés de 5-10%. Faible sensibilité = robuste ; haute sensibilité = ne marche qu&#x27;avec des valeurs exactes — signe de surapprentissage.</span></span></span></span><br>
+    <span class="kv-value">0.73 <span style="color:#22c55e;font-size:0.8em">(robust)</span></span></span>
+</div>
+</div>
+
+<div class="section" id="sec-multi-seed">
+<h2><span lang="en">Multi-Seed Convergence</span><span lang="fr">Convergence multi-seed</span></h2>
+<p class="section-desc"><span lang="en">The same hyperopt run repeated with different random seeds. If different seeds find very different params, the optimization landscape is noisy and the 'best' params are not meaningfully better than alternatives (tip #76: the number of trials attempted is the most important information).</span><span lang="fr">Le même hyperopt répété avec différentes seeds. Si différentes seeds trouvent des params très différents, le paysage d'optimisation est bruité et les 'meilleurs' params ne sont pas significativement meilleurs que les alternatives (tip #76 : le nombre d'essais tentés est l'info la plus importante).</span></p>
+<div>
+  <span class="kv"><span class="kv-label"><span lang="en">Seeds tested</span><span lang="fr">Seeds testées</span></span><br>
+    <span class="kv-value">5</span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">&lt;span lang=&quot;en&quot;&gt;Convergence&lt;/span&gt;&lt;span lang=&quot;fr&quot;&gt;Convergence&lt;/span&gt;<span class="tip-text"><span lang="en">Running the optimizer with different random seeds should find similar parameter values. If convergence is low, the optimization landscape is noisy and the &#x27;best&#x27; parameters are not meaningfully better than alternatives.</span><span lang="fr">Lancer l&#x27;optimiseur avec différentes seeds devrait trouver des paramètres similaires. Si la convergence est faible, le paysage d&#x27;optimisation est bruité et les &#x27;meilleurs&#x27; paramètres ne sont pas significativement meilleurs.</span></span></span></span><br>
+    <span class="kv-value">68% <span style="color:#22c55e;font-size:0.8em">(stable)</span></span></span>
+</div>
+</div>
+
+<div class="section" id="sec-cpcv">
+<h2><span class="tooltip">CPCV<span class="tip-text"><span lang="en">Instead of testing N sequential windows, CPCV tests every possible combination of data splits. This gives a distribution of returns and a probability of loss — a much stronger test of whether the strategy is genuinely profitable.</span><span lang="fr">Au lieu de tester N fenêtres séquentielles, CPCV teste toutes les combinaisons possibles de splits. Donne une distribution de rendements et une probabilité de perte — un test bien plus solide.</span></span></span> — <span lang="en">Combinatorial Purged Cross-Validation</span><span lang="fr">Validation croisée combinatoire purgée</span> (N=6, K=2)</h2>
+<p class="section-desc"><span lang="en">Unlike rolling walk-forward which tests N sequential windows, CPCV tests every possible combination of train/test splits. This gives a distribution of returns and a probability of loss — a much stronger test (Lopez de Prado, Advances in Financial ML).</span><span lang="fr">Contrairement au walk-forward glissant qui teste N fenêtres séquentielles, CPCV teste toutes les combinaisons possibles de splits train/test. Donne une distribution de rendements et une probabilité de perte — un test bien plus solide (Lopez de Prado, Advances in Financial ML).</span></p>
+<div>
+  <span class="kv"><span class="kv-label"><span lang="en">Combinations</span><span lang="fr">Combinaisons</span></span><br>
+    <span class="kv-value">15</span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">Paths</span><span lang="fr">Chemins</span></span><br>
+    <span class="kv-value">5</span></span>
+  <span class="kv"><span class="kv-label"><span lang="en">Avg Return</span><span lang="fr">Rendement moy.</span></span><br>
+    <span class="kv-value">+4.5%</span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">&lt;span lang=&quot;en&quot;&gt;Sharpe of Paths&lt;/span&gt;&lt;span lang=&quot;fr&quot;&gt;Sharpe des chemins&lt;/span&gt;<span class="tip-text"><span lang="en">The Sharpe ratio computed across all CPCV path returns. Unlike the usual Sharpe (computed within a single backtest), this measures how consistent the strategy is across different data splits.</span><span lang="fr">Le Sharpe calculé sur tous les chemins CPCV. Contrairement au Sharpe classique (un seul backtest), il mesure la cohérence de la stratégie à travers différents splits de données.</span></span></span></span><br>
+    <span class="kv-value">0.92 <span style="color:#eab308;font-size:0.8em">(moderate)</span></span></span>
+  <span class="kv"><span class="kv-label"><span class="tooltip">P(loss)<span class="tip-text"><span lang="en">The percentage of all CPCV backtest paths that ended with a negative return. Below 15% is strong evidence the strategy works; above 30% means it loses money in many data splits.</span><span lang="fr">Le pourcentage de chemins CPCV terminant avec un rendement négatif. En dessous de 15% = preuve solide. Au-dessus de 30% = la stratégie perd dans beaucoup de splits.</span></span></span></span><br>
+    <span class="kv-value">27% <span style="color:#84cc16;font-size:0.8em">(acceptable)</span></span></span>
+  <span class="kv"><span class="kv-label">p5/p50/p95</span><br>
+    <span class="kv-value">-1.5% / +3.9% / +6.9%</span></span>
+</div>
+<svg width="600" height="180" xmlns="http://www.w3.org/2000/svg">
+<rect x="50.0" y="48.8" width="104.0" height="101.2" fill="#ef4444" opacity="0.7"/>
+<rect x="156.0" y="116.2" width="104.0" height="33.8" fill="#22c55e" opacity="0.7"/>
+<rect x="262.0" y="48.8" width="104.0" height="101.2" fill="#22c55e" opacity="0.7"/>
+<rect x="368.0" y="15.0" width="104.0" height="135.0" fill="#22c55e" opacity="0.7"/>
+<rect x="474.0" y="15.0" width="104.0" height="135.0" fill="#22c55e" opacity="0.7"/>
+<line x1="169.7" y1="15" x2="169.7" y2="150" stroke="#888" stroke-dasharray="4" stroke-width="1"/>
+<text x="315.0" y="175" text-anchor="middle" fill="#888" font-size="10">Return %</text>
+</svg>
+</div>
+</div>
+<div class="group group-params"><div class="group-title"><span lang="en">Parameter Analysis</span><span lang="fr">Analyse des paramètres</span></div>
+
+<div class="section" id="sec-param-stability">
+<h2><span lang="en">Parameter Stability</span><span lang="fr">Stabilité des paramètres</span></h2>
+<p class="section-desc"><span lang="en">Parameters that change wildly between windows are 'unstable' — the optimizer is fitting noise, not signal (tip #81: if changing a param slightly kills performance, it's overfitting). Stable params (std/range < 15%) suggest a real pattern. Consider freezing unstable params at sensible defaults.</span><span lang="fr">Les paramètres qui changent beaucoup entre fenêtres sont 'instables' — l'optimiseur fitte le bruit, pas le signal (tip #81 : si changer légèrement un param tue la performance, c'est du surapprentissage). Params stables (std/range < 15%) = vrai pattern. Envisager de figer les params instables.</span></p>
+<table>
+<tr><th><span lang="en">Param</span><span lang="fr">Param</span></th>
+<th><span lang="en">Median</span><span lang="fr">Médiane</span></th>
+<th><span lang="en">Std</span><span lang="fr">Écart-type</span></th>
+<th><span lang="en">Std/Range</span><span lang="fr">Std/Range</span></th>
+<th><span lang="en">Status</span><span lang="fr">Statut</span></th>
+<th><span lang="en">Values per window</span><span lang="fr">Valeurs par fenêtre</span></th></tr>
+<tr><td>buy_dca_multiplier</td><td>1.9000</td><td>0.2600</td><td>0.1400</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>1.8, 2.0, 2.5, 1.9, 1.85</td></tr>
+<tr><td>buy_rsi_low</td><td>29.0000</td><td>1.7200</td><td>0.1100</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>28, 30, 25, 29, 29</td></tr>
+<tr><td>buy_so_count</td><td>4.0000</td><td>0.4000</td><td>0.1000</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>4, 4, 5, 4, 4</td></tr>
+<tr><td>buy_tp_pct</td><td>0.0240</td><td>0.0030</td><td>0.1500</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>0.025, 0.022, 0.03, 0.024, 0.023</td></tr>
+<tr><td>buy_volume_factor</td><td>1.4000</td><td>0.6100</td><td>0.3800</td><td><span class="badge-unstable">unstable</span></td><td style='color:#888;font-size:0.8em'>1.3, 1.5, 2.8, 1.4, 1.2</td></tr>
+<tr><td>sell_rsi_high</td><td>71.0000</td><td>2.8600</td><td>0.1800</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>72, 70, 65, 71, 73</td></tr>
+<tr><td>sell_trail_offset</td><td>0.0110</td><td>0.0015</td><td>0.1900</td><td><span class="badge-stable">stable</span></td><td style='color:#888;font-size:0.8em'>0.012, 0.01, 0.008, 0.011, 0.012</td></tr>
+
+</table>
+<svg width="600" height="230" xmlns="http://www.w3.org/2000/svg">
+<text x="115" y="29" text-anchor="end" fill="#888" font-size="10">buy_dca_multiplier</text>
+<polyline points="120.0,33.0 235.0,28.4 350.0,17.0 465.0,30.7 580.0,31.9" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="33.0" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="28.4" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="17.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="30.7" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="31.9" r="2.5" fill="#22c55e"/>
+<text x="115" y="59" text-anchor="end" fill="#888" font-size="10">buy_rsi_low</text>
+<polyline points="120.0,53.4 235.0,47.0 350.0,63.0 465.0,50.2 580.0,50.2" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="53.4" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="47.0" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="63.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="50.2" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="50.2" r="2.5" fill="#22c55e"/>
+<text x="115" y="89" text-anchor="end" fill="#888" font-size="10">buy_so_count</text>
+<polyline points="120.0,93.0 235.0,93.0 350.0,77.0 465.0,93.0 580.0,93.0" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="93.0" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="93.0" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="77.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="93.0" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="93.0" r="2.5" fill="#22c55e"/>
+<text x="115" y="119" text-anchor="end" fill="#888" font-size="10">buy_tp_pct</text>
+<polyline points="120.0,117.0 235.0,123.0 350.0,107.0 465.0,119.0 580.0,121.0" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="117.0" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="123.0" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="107.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="119.0" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="121.0" r="2.5" fill="#22c55e"/>
+<text x="115" y="149" text-anchor="end" fill="#888" font-size="10">buy_volume_factor</text>
+<polyline points="120.0,152.0 235.0,150.0 350.0,137.0 465.0,151.0 580.0,153.0" fill="none" stroke="#ef4444" stroke-width="1.5"/>
+<circle cx="120.0" cy="152.0" r="2.5" fill="#ef4444"/>
+<circle cx="235.0" cy="150.0" r="2.5" fill="#ef4444"/>
+<circle cx="350.0" cy="137.0" r="2.5" fill="#ef4444"/>
+<circle cx="465.0" cy="151.0" r="2.5" fill="#ef4444"/>
+<circle cx="580.0" cy="153.0" r="2.5" fill="#ef4444"/>
+<text x="115" y="179" text-anchor="end" fill="#888" font-size="10">sell_rsi_high</text>
+<polyline points="120.0,169.0 235.0,173.0 350.0,183.0 465.0,171.0 580.0,167.0" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="169.0" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="173.0" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="183.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="171.0" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="167.0" r="2.5" fill="#22c55e"/>
+<text x="115" y="209" text-anchor="end" fill="#888" font-size="10">sell_trail_offset</text>
+<polyline points="120.0,197.0 235.0,205.0 350.0,213.0 465.0,201.0 580.0,197.0" fill="none" stroke="#22c55e" stroke-width="1.5"/>
+<circle cx="120.0" cy="197.0" r="2.5" fill="#22c55e"/>
+<circle cx="235.0" cy="205.0" r="2.5" fill="#22c55e"/>
+<circle cx="350.0" cy="213.0" r="2.5" fill="#22c55e"/>
+<circle cx="465.0" cy="201.0" r="2.5" fill="#22c55e"/>
+<circle cx="580.0" cy="197.0" r="2.5" fill="#22c55e"/>
+</svg>
+</div>
+
+<div class="section" id="sec-consensus">
+<h2><span lang="en">Consensus Parameters</span><span lang="fr">Paramètres consensus</span></h2>
+<p class="section-desc"><span lang="en">Weighted median of each parameter across all windows, weighted by test Calmar ratio. These are the params to deploy — they represent the robust center of the optimization landscape, not any single window's 'best'.</span><span lang="fr">Médiane pondérée de chaque paramètre sur toutes les fenêtres, pondérée par le Calmar test. Ce sont les params à déployer — ils représentent le centre robuste du paysage d'optimisation, pas le 'meilleur' d'une seule fenêtre.</span></p>
+<table>
+<tr><th><span lang="en">Space</span><span lang="fr">Espace</span></th>
+<th><span lang="en">Parameter</span><span lang="fr">Paramètre</span></th>
+<th><span lang="en">Value</span><span lang="fr">Valeur</span></th></tr>
+<tr><td>buy</td><td>dca_multiplier</td><td>1.9</td></tr>
+<tr><td>buy</td><td>rsi_low</td><td>29</td></tr>
+<tr><td>buy</td><td>so_count</td><td>4</td></tr>
+<tr><td>buy</td><td>tp_pct</td><td>0.024</td></tr>
+<tr><td>buy</td><td>volume_factor</td><td>1.4</td></tr>
+<tr><td>sell</td><td>rsi_high</td><td>71</td></tr>
+<tr><td>sell</td><td>trail_offset</td><td>0.011</td></tr>
+
+</table>
+<details><summary><span lang="en">How to apply</span><span lang="fr">Comment appliquer</span></summary><div><span lang="en">Copy the consensus JSON from <code>user_data/walk_forward/HippoDCA_hyp_dynv1_short_sharpe_consensus_*.json</code> to <code>user_data/strategies/HippoDCA_hyp_dynv1_short_sharpe.json</code>. Freqtrade loads this at startup and overrides the strategy's default parameters.</span><span lang="fr">Copier le JSON consensus depuis <code>user_data/walk_forward/HippoDCA_hyp_dynv1_short_sharpe_consensus_*.json</code> vers <code>user_data/strategies/HippoDCA_hyp_dynv1_short_sharpe.json</code>. Freqtrade le charge au démarrage et écrase les paramètres par défaut de la stratégie.</span></div></details>
+</div>
+</div>
+<div class="group group-diag"><div class="group-title"><span lang="en">Diagnostics</span><span lang="fr">Diagnostics</span></div>
+
+<div class="section" id="sec-warnings">
+<h2><span lang="en">Warning Flags</span><span lang="fr">Alertes</span></h2>
+<p class="section-desc"><span lang="en">Automatic flags based on per-window and aggregate analysis. Each references a specific rule from quantitative trading literature.</span><span lang="fr">Alertes automatiques basées sur l'analyse par fenêtre et agrégée. Chacune référence une règle spécifique de la littérature quantitative.</span></p>
+<p class="warn-item">⚠ No --timeframe-detail: fills overestimated (tip #20)</p><p class="warn-item">⚠ Window 3 WFE &lt; 30% — possible overfitting on this period</p><p class="warn-item">⚠ buy_volume_factor, sell_rsi_high unstable across windows — consider fixing or narrowing search range</p>
+</div>
+</div>
+<div class="group group-ref"><div class="group-title"><span lang="en">Reference</span><span lang="fr">Référence</span></div>
+
+<div class="section" id="sec-next-steps">
+<h2><span lang="en">What To Do Next</span><span lang="fr">Prochaines étapes</span></h2>
+<div class="next-steps">
+  <p><strong><span lang="en">Grade</span><span lang="fr">Note</span> B:</strong> Most checks passed. Safe to dry-run at reduced size (50%). Review any failed checks — they may not be dealbreakers. Run for 4+ weeks before considering live capital.</p>
+</div>
+<details><summary><span lang="en">Output files from this run</span><span lang="fr">Fichiers générés par cette exécution</span></summary><div><span lang="en"><p>All files are in <code>user_data/walk_forward/</code>:</p><ul><li><strong>Consensus params</strong> (JSON): copy to your strategy file to use these optimized values</li><li><strong>Full results</strong> (JSON): machine-readable data</li><li><strong>This report</strong> (HTML): shareable summary</li></ul><p>To apply consensus params for dry-run:</p><code>cp user_data/walk_forward/HippoDCA_hyp_dynv1_short_sharpe_consensus_*.json user_data/strategies/HippoDCA_hyp_dynv1_short_sharpe.json</code></span><span lang="fr"><p>Tous les fichiers sont dans <code>user_data/walk_forward/</code> :</p><ul><li><strong>Params consensus</strong> (JSON) : copier dans le fichier stratégie</li><li><strong>Résultats complets</strong> (JSON) : données machine</li><li><strong>Ce rapport</strong> (HTML) : résumé partageable</li></ul><p>Pour appliquer les params consensus en dry-run :</p><code>cp user_data/walk_forward/HippoDCA_hyp_dynv1_short_sharpe_consensus_*.json user_data/strategies/HippoDCA_hyp_dynv1_short_sharpe.json</code></span></div></details>
+</div>
+
+<div class="section" id="sec-glossary">
+<details><summary><h2 style="display:inline"><span lang="en">Glossary</span><span lang="fr">Glossaire</span></h2></summary><div>
+<table><tr><th><span lang="en">Abbrev</span><span lang="fr">Abrév.</span></th>
+<th><span lang="en">Full Name</span><span lang="fr">Nom complet</span></th>
+<th><span lang="en">Description</span><span lang="fr">Description</span></th></tr>
+<tr><td><strong>CAGR</strong></td><td>Compound Annual Growth Rate</td><td><span lang="en">Annualized return. Comparable across timeranges</span><span lang="fr">Le rendement annuel géométrique moyen. Contrairement au profit total, le CAGR es</span></td></tr>
+<tr><td><strong>Calmar</strong></td><td>Calmar Ratio</td><td><span lang="en">Annual return / max drawdown. Higher = better risk-adjusted</span><span lang="fr">Rendement annualisé divisé par le drawdown maximum. Un Calmar de 2 signifie que </span> <span style="color:#555">(Young)</span></td></tr>
+<tr><td><strong>Carver</strong></td><td>Carver Discount</td><td><span lang="en">Worst-case / median risk ratio. 1.0=robust, low=fragile</span><span lang="fr">Ratio entre le 5e percentile et la médiane du rendement/DD Monte Carlo. Proche d</span> <span style="color:#555">(Carver, Systematic Trading)</span></td></tr>
+<tr><td><strong>Convergence</strong></td><td>Seed Convergence</td><td><span lang="en">Do different random seeds find the same params? (&gt;60% good)</span><span lang="fr">Lancer l&#x27;optimiseur avec différentes seeds devrait trouver des paramètres simila</span></td></tr>
+<tr><td><strong>CPCV</strong></td><td>Combinatorial Purged Cross-Validation</td><td><span lang="en">Tests all possible train/test splits for reliability</span><span lang="fr">Au lieu de tester N fenêtres séquentielles, CPCV teste toutes les combinaisons p</span> <span style="color:#555">(Lopez de Prado, Advances in Financial ML)</span></td></tr>
+<tr><td><strong>Max DD</strong></td><td>Maximum Drawdown</td><td><span lang="en">Worst peak-to-trough loss during the period</span><span lang="fr">La plus grande chute depuis un pic d&#x27;equity jusqu&#x27;au creux suivant, en pourcenta</span></td></tr>
+<tr><td><strong>DoF</strong></td><td>Degrees of Freedom</td><td><span lang="en">Trades / params ratio. Higher = more reliable results</span><span lang="fr">Le ratio trades / paramètres optimisés. Avec trop peu de trades par paramètre, l</span></td></tr>
+<tr><td><strong>DSR</strong></td><td>Deflated Sharpe Ratio</td><td><span lang="en">Sharpe adjusted for multiple testing (&gt;0.95 significant)</span><span lang="fr">Le ratio de Sharpe corrigé pour le nombre d&#x27;essais. Quand on teste des centaines</span> <span style="color:#555">(Bailey &amp; Lopez de Prado)</span></td></tr>
+<tr><td><strong>Embargo</strong></td><td>Embargo Period</td><td><span lang="en">Gap between train/test to prevent information leakage</span><span lang="fr">Un tampon de jours entre les périodes train et test. Sans embargo, les indicateu</span> <span style="color:#555">(Lopez de Prado)</span></td></tr>
+<tr><td><strong>Exp</strong></td><td>Expectancy</td><td><span lang="en">Average profit per trade in account currency</span><span lang="fr">Le profit (ou perte) moyen par trade. Positif = la stratégie gagne de l&#x27;argent e</span> <span style="color:#555">(Van Tharp)</span></td></tr>
+<tr><td><strong>E[max SR]</strong></td><td>Expected Maximum Sharpe</td><td><span lang="en">Best Sharpe expected from N random trials: sqrt(2*ln(N))</span><span lang="fr">Quand vous testez N combinaisons, le meilleur Sharpe est biaisé à la hausse. Du </span> <span style="color:#555">(Bailey &amp; Lopez de Prado)</span></td></tr>
+<tr><td><strong>HHI</strong></td><td>Herfindahl-Hirschman Index</td><td><span lang="en">Profit concentration: 0=even, 1=one trade. Below 0.15 OK</span><span lang="fr">Mesure la concentration des profits entre les trades. Un HHI proche de 0 = profi</span></td></tr>
+<tr><td><strong>K-ratio</strong></td><td>K-Ratio</td><td><span lang="en">Equity curve linearity. &gt;0.5 = smooth growth</span><span lang="fr">Pente de la courbe d&#x27;equity divisée par son erreur standard. Un K-ratio élevé = </span> <span style="color:#555">(Zephyr Associates)</span></td></tr>
+<tr><td><strong>Kurt</strong></td><td>Excess Kurtosis</td><td><span lang="en">Tail heaviness. &gt;3 = fat tails, extreme events more frequent</span><span lang="fr">Un excès de kurtosis &gt; 3 signifie que les événements extrêmes sont plus fréquent</span> <span style="color:#555">(Carver)</span></td></tr>
+<tr><td><strong>MC</strong></td><td>Monte Carlo Simulation</td><td><span lang="en">Reshuffles trade order 1000x to stress-test drawdown</span><span lang="fr">Vos trades ont eu lieu dans un ordre précis, mais auraient pu survenir différemm</span> <span style="color:#555">(Carver)</span></td></tr>
+<tr><td><strong>Payoff</strong></td><td>Payoff Ratio</td><td><span lang="en">Avg win / avg loss. &gt;1.5 good for trend, &lt;1 OK for DCA</span><span lang="fr">Gain moyen divisé par la perte moyenne. Un payoff &gt; 2 = les gagnants sont bien p</span> <span style="color:#555">(Van Tharp)</span></td></tr>
+<tr><td><strong>PF</strong></td><td>Profit Factor</td><td><span lang="en">Gross profit / gross loss. Above 1.2 = real edge</span><span lang="fr">Profit brut total divisé par la perte brute totale. 1.0 = seuil de rentabilité. </span> <span style="color:#555">(Davey)</span></td></tr>
+<tr><td><strong>P(loss)</strong></td><td>Probability of Loss</td><td><span lang="en">Fraction of CPCV paths with negative return (&lt;30% OK)</span><span lang="fr">Le pourcentage de chemins CPCV terminant avec un rendement négatif. En dessous d</span> <span style="color:#555">(Lopez de Prado)</span></td></tr>
+<tr><td><strong>Conc.</strong></td><td>Profit Concentration</td><td><span lang="en">How much profit depends on top trades. Low = robust</span><span lang="fr">Si retirer les 1-2 meilleurs trades fait tomber le profit à zéro, l&#x27;edge est peu</span> <span style="color:#555">(Community)</span></td></tr>
+<tr><td><strong>Sensitivity</strong></td><td>Parameter Sensitivity</td><td><span lang="en">Profit change when params nudged +/-10%. Lower = robust</span><span lang="fr">Mesure combien le profit change quand les paramètres sont perturbés de 5-10%. Fa</span></td></tr>
+<tr><td><strong>Sharpe</strong></td><td>Sharpe Ratio</td><td><span lang="en">Risk-adjusted return. &gt;1 good, &gt;2 excellent</span><span lang="fr">Rendement annualisé divisé par la volatilité. Mesure le rendement par unité de r</span> <span style="color:#555">(Sharpe)</span></td></tr>
+<tr><td><strong>Sharpe</strong></td><td>Sharpe of Paths</td><td><span lang="en">Risk-adjusted return across CPCV paths (&gt;1.0 good)</span><span lang="fr">Le Sharpe calculé sur tous les chemins CPCV. Contrairement au Sharpe classique (</span> <span style="color:#555">(Lopez de Prado)</span></td></tr>
+<tr><td><strong>Skew</strong></td><td>Skewness</td><td><span lang="en">Return asymmetry. Negative = more large losses than gains</span><span lang="fr">Mesure l&#x27;asymétrie de la distribution des rendements. Skew négatif (&lt; -1) = gros</span> <span style="color:#555">(Carver)</span></td></tr>
+<tr><td><strong>Sortino</strong></td><td>Sortino Ratio</td><td><span lang="en">Like Sharpe but only penalizes downside. &gt;2 good</span><span lang="fr">Rendement annualisé divisé par la déviation baissière uniquement. Contrairement </span> <span style="color:#555">(Sortino &amp; Price)</span></td></tr>
+<tr><td><strong>SQN</strong></td><td>System Quality Number</td><td><span lang="en">Edge quality: mean/std * sqrt(N). 1.5-3 good, &gt;5 suspicious</span><span lang="fr">Mesure la qualité de l&#x27;edge en comparant le profit moyen par trade à sa variabil</span> <span style="color:#555">(Van Tharp)</span></td></tr>
+<tr><td><strong>WFE</strong></td><td>Walk-Forward Efficiency</td><td><span lang="en">How much training profit survives on unseen data (&gt;50% good)</span><span lang="fr">Rendement test annualisé divisé par le rendement training. Un WFE &gt; 50% signifie</span> <span style="color:#555">(Pardo)</span></td></tr>
+<tr><td><strong>WR</strong></td><td>Win Rate</td><td><span lang="en">Fraction of trades that are profitable</span><span lang="fr">Pourcentage de trades clôturés avec un profit. Un taux élevé (&gt;60%) rassure mais</span></td></tr>
+</table>
+</div></details></div>
+</div>
+
+</div>
+</body>
+</html>
