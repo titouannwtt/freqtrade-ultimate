@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,10 @@ from freqtrade.rpc.api_server.deps import get_config
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_runs_cache: AllRunsResponse | None = None
+_runs_cache_ts: float = 0.0
+_RUNS_CACHE_TTL_S = 60.0
+
 
 def _bt_dir(config: dict) -> Path:
     return Path(config["user_data_dir"]) / "backtest_results"
@@ -36,11 +42,10 @@ def _wfa_dir(config: dict) -> Path:
     return d
 
 
-@router.get("/stratdev/runs", response_model=AllRunsResponse)
-def api_list_all_runs(
+def _build_all_runs(
+    config: dict,
     strategy: str | None = None,
     run_type: str | None = None,
-    config: dict = Depends(get_config),
 ) -> AllRunsResponse:
     from freqtrade.optimize.stratdev_readers import (
         convert_backtest_entries,
@@ -55,17 +60,26 @@ def api_list_all_runs(
     if run_type is None or run_type == "backtest":
         bd = _bt_dir(config)
         if bd.exists():
-            backtests = convert_backtest_entries(bd)
+            try:
+                backtests = convert_backtest_entries(bd)
+            except Exception as e:
+                logger.error(f"Failed to read backtests: {e}")
 
     if run_type is None or run_type == "hyperopt":
         hd = _ho_dir(config)
         if hd.exists():
-            hyperopts = get_hyperopt_resultlist(hd)
+            try:
+                hyperopts = get_hyperopt_resultlist(hd)
+            except Exception as e:
+                logger.error(f"Failed to read hyperopts: {e}")
 
     if run_type is None or run_type == "wfa":
         wd = _wfa_dir(config)
         if wd.exists():
-            wfa_runs = get_wfa_resultlist(wd)
+            try:
+                wfa_runs = get_wfa_resultlist(wd)
+            except Exception as e:
+                logger.error(f"Failed to read WFA runs: {e}")
 
     if strategy:
         backtests = [e for e in backtests if e.get("strategy") == strategy]
@@ -79,28 +93,72 @@ def api_list_all_runs(
     )
 
 
+@router.get("/stratdev/runs", response_model=AllRunsResponse)
+async def api_list_all_runs(
+    strategy: str | None = None,
+    run_type: str | None = None,
+    config: dict = Depends(get_config),
+) -> AllRunsResponse:
+    global _runs_cache, _runs_cache_ts
+    now = time.monotonic()
+    if (
+        _runs_cache is not None
+        and not strategy
+        and not run_type
+        and (now - _runs_cache_ts) < _RUNS_CACHE_TTL_S
+    ):
+        return _runs_cache
+
+    result = await asyncio.to_thread(_build_all_runs, config, strategy, run_type)
+    if not strategy and not run_type:
+        _runs_cache = result
+        _runs_cache_ts = now
+    return result
+
+
 @router.get("/stratdev/hyperopt/{filename}")
-def api_hyperopt_detail(
+async def api_hyperopt_detail(
     filename: str,
     config: dict = Depends(get_config),
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import get_hyperopt_run_detail
 
-    return get_hyperopt_run_detail(_ho_dir(config), filename)
+    return await asyncio.to_thread(get_hyperopt_run_detail, _ho_dir(config), filename)
 
 
 @router.get("/stratdev/hyperopt/{filename}/analysis")
-def api_hyperopt_analysis(
+async def api_hyperopt_analysis(
     filename: str,
     config: dict = Depends(get_config),
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import compute_hyperopt_analysis
 
-    return compute_hyperopt_analysis(_ho_dir(config), filename)
+    return await asyncio.to_thread(compute_hyperopt_analysis, _ho_dir(config), filename)
+
+
+@router.get("/stratdev/hyperopt/{filename}/advanced")
+async def api_hyperopt_advanced(
+    filename: str,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_readers import compute_advanced_analytics
+
+    return await asyncio.to_thread(compute_advanced_analytics, _ho_dir(config), filename)
+
+
+@router.get("/stratdev/hyperopt/{filename}/epoch/{rank}")
+async def api_hyperopt_epoch_detail(
+    filename: str,
+    rank: int,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_readers import get_epoch_detail
+
+    return await asyncio.to_thread(get_epoch_detail, _ho_dir(config), filename, rank)
 
 
 @router.delete("/stratdev/hyperopt/{filename}")
-def api_delete_hyperopt(
+async def api_delete_hyperopt(
     filename: str,
     config: dict = Depends(get_config),
 ) -> AllRunsResponse:
@@ -109,8 +167,11 @@ def api_delete_hyperopt(
         get_hyperopt_resultlist,
     )
 
-    delete_hyperopt_result(_ho_dir(config), filename)
-    remaining = get_hyperopt_resultlist(_ho_dir(config))
+    global _runs_cache, _runs_cache_ts
+    await asyncio.to_thread(delete_hyperopt_result, _ho_dir(config), filename)
+    _runs_cache = None
+    _runs_cache_ts = 0.0
+    remaining = await asyncio.to_thread(get_hyperopt_resultlist, _ho_dir(config))
     return AllRunsResponse(
         backtests=[],
         hyperopts=[RunListEntry(**e) for e in remaining],
@@ -119,26 +180,28 @@ def api_delete_hyperopt(
 
 
 @router.patch("/stratdev/hyperopt/{filename}")
-def api_update_hyperopt_meta(
+async def api_update_hyperopt_meta(
     filename: str,
     body: MetadataUpdateRequest,
     config: dict = Depends(get_config),
 ) -> dict[str, str]:
-    return _update_meta(_ho_dir(config) / f"{filename}.meta.json", body)
+    return await asyncio.to_thread(
+        _update_meta, _ho_dir(config) / f"{filename}.meta.json", body,
+    )
 
 
 @router.get("/stratdev/wfa/{filename}")
-def api_wfa_detail(
+async def api_wfa_detail(
     filename: str,
     config: dict = Depends(get_config),
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import get_wfa_run_detail
 
-    return get_wfa_run_detail(_wfa_dir(config), filename)
+    return await asyncio.to_thread(get_wfa_run_detail, _wfa_dir(config), filename)
 
 
 @router.delete("/stratdev/wfa/{filename}")
-def api_delete_wfa(
+async def api_delete_wfa(
     filename: str,
     config: dict = Depends(get_config),
 ) -> AllRunsResponse:
@@ -147,8 +210,11 @@ def api_delete_wfa(
         get_wfa_resultlist,
     )
 
-    delete_wfa_result(_wfa_dir(config), filename)
-    remaining = get_wfa_resultlist(_wfa_dir(config))
+    global _runs_cache, _runs_cache_ts
+    await asyncio.to_thread(delete_wfa_result, _wfa_dir(config), filename)
+    _runs_cache = None
+    _runs_cache_ts = 0.0
+    remaining = await asyncio.to_thread(get_wfa_resultlist, _wfa_dir(config))
     return AllRunsResponse(
         backtests=[],
         hyperopts=[],
@@ -157,7 +223,7 @@ def api_delete_wfa(
 
 
 @router.patch("/stratdev/wfa/{filename}")
-def api_update_wfa_meta(
+async def api_update_wfa_meta(
     filename: str,
     body: MetadataUpdateRequest,
     config: dict = Depends(get_config),
@@ -166,63 +232,68 @@ def api_update_wfa_meta(
 
     from freqtrade.misc import file_dump_json
 
-    wfa_file = _wfa_dir(config) / f"{filename}.json"
-    if not wfa_file.exists():
-        return {"status": "not_found"}
-    with wfa_file.open() as f:
-        data = rapidjson.load(f)
-    if body.notes is not None:
-        data["notes"] = body.notes
-    if body.tags is not None:
-        data["tags"] = body.tags
-    if body.favorite is not None:
-        data["favorite"] = body.favorite
-    file_dump_json(wfa_file, data)
-    return {"status": "ok"}
+    def _do_update() -> dict[str, str]:
+        wfa_file = _wfa_dir(config) / f"{filename}.json"
+        if not wfa_file.exists():
+            return {"status": "not_found"}
+        with wfa_file.open() as f:
+            data = rapidjson.load(f)
+        if body.notes is not None:
+            data["notes"] = body.notes
+        if body.tags is not None:
+            data["tags"] = body.tags
+        if body.favorite is not None:
+            data["favorite"] = body.favorite
+        file_dump_json(wfa_file, data)
+        return {"status": "ok"}
+
+    return await asyncio.to_thread(_do_update)
 
 
 @router.get(
     "/stratdev/backtest/{filename}/snapshot",
     response_model=BacktestSnapshotResponse,
 )
-def api_backtest_snapshot(
+async def api_backtest_snapshot(
     filename: str,
     strategy: str,
     config: dict = Depends(get_config),
 ) -> BacktestSnapshotResponse:
     from freqtrade.optimize.stratdev_readers import get_backtest_snapshot
 
-    result = get_backtest_snapshot(_bt_dir(config), filename, strategy)
+    result = await asyncio.to_thread(
+        get_backtest_snapshot, _bt_dir(config), filename, strategy,
+    )
     return BacktestSnapshotResponse(**result)
 
 
 @router.post("/stratdev/diff", response_model=SnapshotDiffResponse)
-def api_snapshot_diff(
+async def api_snapshot_diff(
     body: SnapshotDiffRequest,
     config: dict = Depends(get_config),
 ) -> SnapshotDiffResponse:
-    from freqtrade.optimize.stratdev_readers import (
-        compute_snapshot_diff,
-        get_backtest_snapshot,
-        get_hyperopt_run_detail,
-        get_wfa_run_detail,
-    )
-
-    saved = ""
-    current_path = Path("/dev/null")
-
-    if body.diff_type == "strategy":
-        saved, current_path = _get_strategy_snapshot(
-            body,
-            config,
+    def _do_diff() -> dict:
+        from freqtrade.optimize.stratdev_readers import (
+            compute_snapshot_diff,
+            get_backtest_snapshot,
             get_hyperopt_run_detail,
             get_wfa_run_detail,
-            get_backtest_snapshot,
         )
-    elif body.diff_type == "config":
-        saved, current_path = _get_config_snapshot(body, config)
 
-    result = compute_snapshot_diff(saved, current_path)
+        saved = ""
+        current_path = Path("/dev/null")
+
+        if body.diff_type == "strategy":
+            saved, current_path = _get_strategy_snapshot(
+                body, config,
+                get_hyperopt_run_detail, get_wfa_run_detail, get_backtest_snapshot,
+            )
+        elif body.diff_type == "config":
+            saved, current_path = _get_config_snapshot(body, config)
+
+        return compute_snapshot_diff(saved, current_path)
+
+    result = await asyncio.to_thread(_do_diff)
     return SnapshotDiffResponse(**result)
 
 

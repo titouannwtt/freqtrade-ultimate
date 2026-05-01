@@ -224,19 +224,19 @@ def rate_metrics(
 
 
 @router.get("/fleet/status", tags=["Fleet"])
-async def fleet_status(rpc: RPC = Depends(get_rpc)):
-    return await rpc._rpc_fleet_status()
+def fleet_status(rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_fleet_status()
 
 
 @router.get("/fleet/events", tags=["Fleet"])
-async def fleet_events(
+def fleet_events(
     since: float = Query(0),
     types: str = Query(""),
     limit: int = Query(100, ge=1, le=1000),
     rpc: RPC = Depends(get_rpc),
 ):
     type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
-    return await rpc._rpc_fleet_events(since_ts=since, event_types=type_list, limit=limit)
+    return rpc._rpc_fleet_events(since_ts=since, event_types=type_list, limit=limit)
 
 
 def _query_cache_daemons() -> dict:
@@ -289,6 +289,10 @@ def _query_cache_daemons() -> dict:
                 "backoff_remaining_s": stats.get("backoff_remaining_s", 0),
                 "consecutive_backoffs": stats.get("consecutive_backoffs", 0),
                 "current_backoff_duration_s": stats.get("current_backoff_duration_s", 0),
+                "weight_mode": stats.get("weight_mode", False),
+                "weight_used_last_min": stats.get("weight_used_last_min", 0.0),
+                "weight_budget_per_min": stats.get("weight_budget_per_min", 0),
+                "weight_utilization_pct": stats.get("weight_utilization_pct", 0.0),
             }
     except Exception:
         logger.debug("ftcache status query failed", exc_info=True)

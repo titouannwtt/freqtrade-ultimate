@@ -773,6 +773,11 @@ class CacheDaemonStatus(BaseModel):
     backoff_remaining_s: float = 0.0
     consecutive_backoffs: int = 0
     current_backoff_duration_s: int = 0
+    # Weight-based rate limiting (Hyperliquid)
+    weight_mode: bool = False
+    weight_used_last_min: float = 0.0
+    weight_budget_per_min: int = 0
+    weight_utilization_pct: float = 0.0
 
 
 class PairlistCacheStatus(BaseModel):
@@ -822,6 +827,10 @@ class TokenBucketState(BaseModel):
     tokens_available: float = 0.0
     tokens_max: float = 0.0
     refill_rate: float = 0.0
+    weight_mode: bool = False
+    weight_used_last_min: float = 0.0
+    weight_budget_per_min: int = 0
+    weight_utilization_pct: float = 0.0
     backoff_active: bool = False
     backoff_factor: float = 1.0
     backoff_remaining_s: float = 0.0
@@ -896,9 +905,12 @@ class FleetDaemonInfo(BaseModel):
 class FleetRateLimiterInfo(BaseModel):
     tokens_available: float
     tokens_max: float
+    weight_mode: bool = False
     backoff_active: bool = False
     shed_count: int = 0
     backoff_count: int = 0
+    weight_used_last_min: float = 0.0
+    weight_budget_per_min: int = 0
 
 
 class FleetStatusResponse(BaseModel):

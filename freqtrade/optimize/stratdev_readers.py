@@ -59,13 +59,27 @@ def _entry_from_meta(fthypt: Path, meta_path: Path) -> dict[str, Any]:
 def _entry_from_filename(fthypt: Path) -> dict[str, Any]:
     m = _FTHYPT_NAME_RE.match(fthypt.name)
     strategy = m.group(1) if m else fthypt.stem
-    return {
+    entry: dict[str, Any] = {
         "run_type": "hyperopt",
         "filename": fthypt.stem,
         "strategy": strategy,
         "timestamp": int(fthypt.stat().st_mtime),
         "has_metadata": False,
     }
+    # Quick scan: read only first line for a fast best_loss estimate
+    try:
+        with fthypt.open() as f:
+            first_line = f.readline().strip()
+            if first_line:
+                ep = rapidjson.loads(first_line, number_mode=HYPER_PARAMS_FILE_FORMAT)
+                rm = ep.get("results_metrics", {})
+                entry["best_loss"] = ep.get("loss")
+                entry["total_profit_pct"] = round(rm.get("profit_total", 0) * 100, 2)
+                entry["total_trades"] = rm.get("total_trades", 0)
+                entry["best_sharpe"] = rm.get("sharpe")
+    except Exception:
+        pass
+    return entry
 
 
 def get_hyperopt_run_detail(dirname: Path, filename: str) -> dict[str, Any]:
@@ -106,6 +120,879 @@ def _read_best_epoch(fthypt: Path) -> dict[str, Any] | None:
                 best_loss = loss
                 best = ep
     return best
+
+
+def get_epoch_detail(dirname: Path, filename: str, rank: int) -> dict[str, Any]:
+    fthypt = dirname / f"{filename}.fthypt"
+    if not fthypt.exists():
+        return {"error": "file_not_found"}
+
+    all_epochs: list[dict[str, Any]] = []
+    for batch in HyperoptTools._read_results(fthypt):
+        all_epochs.extend(batch)
+
+    all_epochs.sort(key=lambda e: e.get("loss", 1e6))
+    idx = rank - 1
+    if idx < 0 or idx >= len(all_epochs):
+        return {"error": "rank_out_of_range", "total": len(all_epochs)}
+
+    ep = all_epochs[idx]
+    rm = ep.get("results_metrics", {})
+    return {
+        "rank": rank,
+        "loss": ep.get("loss"),
+        "results_metrics": rm,
+        "params_dict": ep.get("params_dict", {}),
+        "params_details": ep.get("params_details", {}),
+    }
+
+
+def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
+    fthypt = dirname / f"{filename}.fthypt"
+    if not fthypt.exists():
+        return {"error": "file_not_found"}
+
+    best = _read_best_epoch(fthypt)
+    if not best:
+        return {"error": "no_epochs"}
+
+    rm = best.get("results_metrics", {})
+    result: dict[str, Any] = {
+        "epoch_info": {
+            "loss": best.get("loss"),
+            "current_epoch": best.get("current_epoch"),
+            "total_profit": rm.get("profit_total", 0),
+            "total_profit_abs": rm.get("profit_total_abs", 0),
+            "total_trades": rm.get("total_trades", 0),
+            "max_drawdown": rm.get("max_drawdown", 0),
+            "sharpe": rm.get("sharpe", 0),
+            "sortino": rm.get("sortino", 0),
+            "calmar": rm.get("calmar", 0),
+            "profit_factor": rm.get("profit_factor", 0),
+            "winrate": rm.get("winrate") or rm.get("win_rate", 0),
+            "duration_avg": rm.get("duration_avg"),
+            "trade_count_long": rm.get("trade_count_long", 0),
+            "trade_count_short": rm.get("trade_count_short", 0),
+        },
+    }
+
+    # 1. Equity curve + underwater plot from daily_profit
+    daily_profit = rm.get("daily_profit", [])
+    starting_balance = rm.get("starting_balance") or rm.get("dry_run_wallet", 1000)
+    if daily_profit:
+        equity = []
+        drawdown_series = []
+        balance = starting_balance
+        peak = balance
+        for date_str, pnl in daily_profit:
+            balance += pnl
+            equity.append({"date": date_str, "balance": round(balance, 2)})
+            if balance > peak:
+                peak = balance
+            dd_pct = ((peak - balance) / peak * 100) if peak > 0 else 0
+            drawdown_series.append({"date": date_str, "dd_pct": round(dd_pct, 2)})
+        result["equity_curve"] = equity
+        result["drawdown_series"] = drawdown_series
+        result["starting_balance"] = starting_balance
+
+        # Top 5 drawdowns with duration and recovery
+        result["top_drawdowns"] = _compute_top_drawdowns(equity, drawdown_series)
+
+    # 2. Monthly returns heatmap from periodic_breakdown or daily_profit
+    periodic = rm.get("periodic_breakdown", {})
+    monthly_data = periodic.get("month", [])
+    if monthly_data:
+        result["monthly_returns"] = _build_monthly_heatmap(monthly_data)
+    elif daily_profit:
+        result["monthly_returns"] = _build_monthly_heatmap_from_daily(
+            daily_profit, starting_balance
+        )
+
+    # 3. Rolling metrics from daily_profit
+    if daily_profit and len(daily_profit) >= 30:
+        result["rolling_metrics"] = _compute_rolling_metrics(daily_profit, starting_balance)
+
+    # 4. Advanced risk metrics from daily returns
+    if daily_profit:
+        result["risk_metrics"] = _compute_risk_metrics(daily_profit, starting_balance)
+
+    # 5. Trade PnL distribution
+    trades = rm.get("trades", [])
+    if not trades:
+        trades = best.get("trades", [])
+    if trades:
+        result["trade_pnl_distribution"] = _compute_trade_pnl_distribution(trades)
+        result["trade_durations"] = _compute_trade_durations(trades)
+
+    # 6. Win/Loss streaks
+    result["streaks"] = {
+        "max_consecutive_wins": rm.get("max_consecutive_wins", 0),
+        "max_consecutive_losses": rm.get("max_consecutive_losses", 0),
+        "wins": rm.get("wins", 0),
+        "losses": rm.get("losses", 0),
+        "draws": rm.get("draws", 0),
+    }
+    if trades:
+        result["streaks"]["distribution"] = _compute_streak_distribution(trades)
+
+    # 7. Yearly returns
+    yearly_data = periodic.get("year", [])
+    if yearly_data:
+        result["yearly_returns"] = [
+            {
+                "year": str(y.get("date", "")),
+                "profit_abs": y.get("profit_abs", 0),
+                "trades": y.get("trades", 0),
+                "profit_factor": y.get("profit_factor", 0),
+            }
+            for y in yearly_data
+        ]
+
+    # 8. Exit reason breakdown
+    exit_reasons = rm.get("exit_reason_summary", [])
+    if exit_reasons:
+        result["exit_reasons"] = exit_reasons
+
+    # 9. Per-pair breakdown (already exists but include for completeness)
+    results_per_pair = rm.get("results_per_pair", [])
+    if results_per_pair:
+        result["results_per_pair"] = results_per_pair
+
+    # ── TIER 2 ──
+
+    # 10. Trade duration scatter (duration vs profit)
+    if trades:
+        result["duration_scatter"] = _compute_duration_scatter(trades)
+
+    # 11. Exit reason breakdown (count + avg profit per reason)
+    if trades:
+        result["exit_reason_detail"] = _compute_exit_reason_detail(trades)
+
+    # 12. Day-of-week returns pattern
+    if trades:
+        result["weekday_pattern"] = _compute_weekday_pattern(trades)
+
+    # 13. Cumulative trade returns (trade-by-trade cumulative)
+    if trades:
+        result["cumulative_trades"] = _compute_cumulative_trades(trades, starting_balance)
+
+    # ── TIER 3 ──
+
+    # 14. Rolling win rate (50-trade window)
+    if trades and len(trades) >= 20:
+        result["rolling_winrate"] = _compute_rolling_winrate(trades, window=50)
+
+    # 15. Rolling profit factor (50-trade window)
+    if trades and len(trades) >= 20:
+        result["rolling_profit_factor"] = _compute_rolling_profit_factor(trades, window=50)
+
+    # 16. Long vs Short breakdown
+    if trades:
+        result["long_short_split"] = _compute_long_short_split(trades)
+
+    # 17. Exposure timeline (open positions over time)
+    if trades:
+        result["exposure_timeline"] = _compute_exposure_timeline(trades)
+
+    # 18. Trade expectancy with confidence
+    if trades:
+        result["trade_expectancy"] = _compute_trade_expectancy(trades)
+
+    return result
+
+
+def _compute_top_drawdowns(
+    equity: list[dict], dd_series: list[dict]
+) -> list[dict[str, Any]]:
+    import math
+
+    drawdowns: list[dict[str, Any]] = []
+    in_dd = False
+    dd_start = ""
+    dd_valley = ""
+    dd_peak_val = 0.0
+    dd_max_depth = 0.0
+
+    for i, pt in enumerate(dd_series):
+        dd_pct = pt["dd_pct"]
+        bal = equity[i]["balance"]
+        date = pt["date"]
+
+        if dd_pct > 0 and not in_dd:
+            in_dd = True
+            dd_start = date
+            dd_peak_val = bal + (bal * dd_pct / (100 - dd_pct)) if dd_pct < 100 else bal
+            dd_max_depth = dd_pct
+            dd_valley = date
+        elif dd_pct > 0 and in_dd:
+            if dd_pct > dd_max_depth:
+                dd_max_depth = dd_pct
+                dd_valley = date
+        elif dd_pct == 0 and in_dd:
+            in_dd = False
+            drawdowns.append({
+                "start": dd_start,
+                "valley": dd_valley,
+                "end": date,
+                "depth_pct": round(dd_max_depth, 2),
+            })
+
+    if in_dd and dd_start:
+        drawdowns.append({
+            "start": dd_start,
+            "valley": dd_valley,
+            "end": dd_series[-1]["date"],
+            "depth_pct": round(dd_max_depth, 2),
+            "active": True,
+        })
+
+    drawdowns.sort(key=lambda d: d["depth_pct"], reverse=True)
+
+    for dd in drawdowns[:5]:
+        try:
+            from datetime import datetime
+            fmt = "%Y-%m-%d"
+            s = datetime.strptime(dd["start"], fmt)
+            v = datetime.strptime(dd["valley"], fmt)
+            e = datetime.strptime(dd["end"], fmt)
+            dd["decline_days"] = (v - s).days
+            dd["recovery_days"] = (e - v).days
+            dd["total_days"] = (e - s).days
+        except Exception:
+            pass
+
+    return drawdowns[:5]
+
+
+def _build_monthly_heatmap(monthly_data: list[dict]) -> list[dict]:
+    results = []
+    for m in monthly_data:
+        date_str = str(m.get("date", ""))
+        parts = date_str.split("-")
+        if len(parts) >= 2:
+            results.append({
+                "year": int(parts[0]),
+                "month": int(parts[1]),
+                "profit_abs": m.get("profit_abs", 0),
+                "trades": m.get("trades", 0),
+            })
+    return results
+
+
+def _build_monthly_heatmap_from_daily(
+    daily_profit: list, starting_balance: float,
+) -> list[dict]:
+    from collections import defaultdict
+    monthly: dict[tuple[int, int], dict] = defaultdict(
+        lambda: {"profit_abs": 0.0, "trades": 0}
+    )
+    for date_str, pnl in daily_profit:
+        parts = date_str.split("-")
+        if len(parts) >= 2:
+            key = (int(parts[0]), int(parts[1]))
+            monthly[key]["profit_abs"] += pnl
+    return [
+        {"year": k[0], "month": k[1], "profit_abs": round(v["profit_abs"], 2), "trades": 0}
+        for k, v in sorted(monthly.items())
+    ]
+
+
+def _compute_rolling_metrics(
+    daily_profit: list, starting_balance: float, window: int = 30,
+) -> dict[str, list]:
+    import math
+
+    daily_returns: list[float] = []
+    balance = starting_balance
+    dates: list[str] = []
+    for date_str, pnl in daily_profit:
+        ret = pnl / balance if balance > 0 else 0
+        daily_returns.append(ret)
+        balance += pnl
+        dates.append(date_str)
+
+    n = len(daily_returns)
+    rolling_sharpe = []
+    rolling_sortino = []
+    rolling_volatility = []
+
+    for i in range(window, n):
+        w = daily_returns[i - window: i]
+        mean_r = sum(w) / len(w)
+        var_r = sum((r - mean_r) ** 2 for r in w) / len(w)
+        std_r = math.sqrt(var_r) if var_r > 0 else 1e-10
+
+        ann_factor = math.sqrt(365)
+        sharpe = (mean_r / std_r) * ann_factor if std_r > 1e-10 else 0
+
+        downside = [r for r in w if r < 0]
+        ds_var = sum(r ** 2 for r in downside) / len(w) if downside else 0
+        ds_std = math.sqrt(ds_var) if ds_var > 0 else 1e-10
+        sortino = (mean_r / ds_std) * ann_factor if ds_std > 1e-10 else 0
+
+        vol = std_r * ann_factor
+
+        rolling_sharpe.append({"date": dates[i], "value": round(sharpe, 3)})
+        rolling_sortino.append({"date": dates[i], "value": round(sortino, 3)})
+        rolling_volatility.append({"date": dates[i], "value": round(vol * 100, 2)})
+
+    # Subsample to max 500 points
+    for key in ["sharpe", "sortino", "volatility"]:
+        data = locals()[f"rolling_{key}"]
+        if len(data) > 500:
+            step = len(data) / 500
+            data[:] = [data[int(i * step)] for i in range(500)]
+
+    return {
+        "sharpe": rolling_sharpe,
+        "sortino": rolling_sortino,
+        "volatility": rolling_volatility,
+        "window": window,
+    }
+
+
+def _compute_risk_metrics(
+    daily_profit: list, starting_balance: float,
+) -> dict[str, Any]:
+    import math
+
+    daily_returns: list[float] = []
+    balance = starting_balance
+    for _, pnl in daily_profit:
+        ret = pnl / balance if balance > 0 else 0
+        daily_returns.append(ret)
+        balance += pnl
+
+    n = len(daily_returns)
+    if n < 2:
+        return {}
+
+    sorted_returns = sorted(daily_returns)
+
+    # VaR 95% (historical)
+    var_idx = int(n * 0.05)
+    var_95 = sorted_returns[var_idx] if var_idx < n else 0
+
+    # CVaR 95% (Expected Shortfall)
+    tail = sorted_returns[:var_idx + 1] if var_idx > 0 else sorted_returns[:1]
+    cvar_95 = sum(tail) / len(tail) if tail else 0
+
+    # Omega ratio (threshold = 0)
+    gains = sum(r for r in daily_returns if r > 0)
+    losses = abs(sum(r for r in daily_returns if r < 0))
+    omega = (gains / losses) if losses > 0 else float("inf")
+
+    # Tail ratio (95th percentile / 5th percentile absolute)
+    p95 = sorted_returns[int(n * 0.95)] if n > 20 else 0
+    p5 = sorted_returns[int(n * 0.05)] if n > 20 else 0
+    tail_ratio = abs(p95 / p5) if p5 != 0 else float("inf")
+
+    # Ulcer Index
+    balance = starting_balance
+    peak = balance
+    sum_sq_dd = 0.0
+    for _, pnl in daily_profit:
+        balance += pnl
+        if balance > peak:
+            peak = balance
+        dd_pct = ((peak - balance) / peak) if peak > 0 else 0
+        sum_sq_dd += dd_pct ** 2
+    ulcer_index = math.sqrt(sum_sq_dd / n) * 100 if n > 0 else 0
+
+    # Recovery factor
+    total_profit = sum(pnl for _, pnl in daily_profit)
+    max_dd_abs = 0
+    balance = starting_balance
+    peak = balance
+    for _, pnl in daily_profit:
+        balance += pnl
+        if balance > peak:
+            peak = balance
+        dd = peak - balance
+        if dd > max_dd_abs:
+            max_dd_abs = dd
+    recovery_factor = total_profit / max_dd_abs if max_dd_abs > 0 else float("inf")
+
+    # Gain-to-Pain ratio
+    total_loss = sum(abs(pnl) for _, pnl in daily_profit if pnl < 0)
+    gain_pain = total_profit / total_loss if total_loss > 0 else float("inf")
+
+    # Kelly criterion (from trade data is better but approximate from daily)
+    win_days = [r for r in daily_returns if r > 0]
+    loss_days = [r for r in daily_returns if r < 0]
+    if win_days and loss_days:
+        win_rate = len(win_days) / n
+        avg_win = sum(win_days) / len(win_days)
+        avg_loss = abs(sum(loss_days) / len(loss_days))
+        payoff = avg_win / avg_loss if avg_loss > 0 else 0
+        kelly = win_rate - ((1 - win_rate) / payoff) if payoff > 0 else 0
+    else:
+        kelly = 0
+
+    def _cap(v, lo=-1e6, hi=1e6):
+        if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
+            return hi if v > 0 else lo
+        return round(v, 4)
+
+    return {
+        "var_95": _cap(var_95 * 100),
+        "cvar_95": _cap(cvar_95 * 100),
+        "omega": _cap(omega),
+        "tail_ratio": _cap(tail_ratio),
+        "ulcer_index": _cap(ulcer_index),
+        "recovery_factor": _cap(recovery_factor),
+        "gain_pain_ratio": _cap(gain_pain),
+        "kelly_criterion": _cap(kelly * 100),
+    }
+
+
+def _compute_trade_pnl_distribution(trades: list) -> dict[str, Any]:
+    profits = []
+    for t in trades:
+        if isinstance(t, dict):
+            pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+            if isinstance(pnl, (int, float)):
+                profits.append(float(pnl))
+
+    if not profits:
+        return {"bins": [], "counts": []}
+
+    import math
+
+    mn, mx = min(profits), max(profits)
+    n_bins = 20
+    if mx == mn:
+        return {"bins": [mn], "counts": [len(profits)]}
+
+    bin_width = (mx - mn) / n_bins
+    bins = [round(mn + i * bin_width, 4) for i in range(n_bins + 1)]
+    counts = [0] * n_bins
+
+    for p in profits:
+        idx = int((p - mn) / bin_width)
+        if idx >= n_bins:
+            idx = n_bins - 1
+        counts[idx] += 1
+
+    win_profits = [p for p in profits if p > 0]
+    loss_profits = [p for p in profits if p < 0]
+
+    return {
+        "bins": bins,
+        "counts": counts,
+        "total": len(profits),
+        "mean": round(sum(profits) / len(profits), 4),
+        "median": round(sorted(profits)[len(profits) // 2], 4),
+        "std": round(
+            math.sqrt(sum((p - sum(profits) / len(profits)) ** 2 for p in profits) / len(profits)),
+            4,
+        ),
+        "avg_win": round(sum(win_profits) / len(win_profits), 4) if win_profits else 0,
+        "avg_loss": round(sum(loss_profits) / len(loss_profits), 4) if loss_profits else 0,
+        "best_trade": round(max(profits), 4),
+        "worst_trade": round(min(profits), 4),
+    }
+
+
+def _compute_trade_durations(trades: list) -> dict[str, Any]:
+    win_durations = []
+    loss_durations = []
+
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        dur = t.get("trade_duration")
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if dur is None or not isinstance(pnl, (int, float)):
+            continue
+        if pnl > 0:
+            win_durations.append(dur)
+        elif pnl < 0:
+            loss_durations.append(dur)
+
+    def _stats(arr):
+        if not arr:
+            return {"avg": 0, "min": 0, "max": 0, "median": 0, "count": 0}
+        s = sorted(arr)
+        return {
+            "avg": round(sum(s) / len(s), 1),
+            "min": s[0],
+            "max": s[-1],
+            "median": s[len(s) // 2],
+            "count": len(s),
+        }
+
+    return {
+        "winners": _stats(win_durations),
+        "losers": _stats(loss_durations),
+        "all": _stats(win_durations + loss_durations),
+    }
+
+
+def _compute_streak_distribution(trades: list) -> dict[str, list[int]]:
+    win_streaks = []
+    loss_streaks = []
+    current_streak = 0
+    current_type = None
+
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        trade_type = "win" if pnl > 0 else "loss"
+
+        if trade_type == current_type:
+            current_streak += 1
+        else:
+            if current_type == "win" and current_streak > 0:
+                win_streaks.append(current_streak)
+            elif current_type == "loss" and current_streak > 0:
+                loss_streaks.append(current_streak)
+            current_streak = 1
+            current_type = trade_type
+
+    if current_type == "win" and current_streak > 0:
+        win_streaks.append(current_streak)
+    elif current_type == "loss" and current_streak > 0:
+        loss_streaks.append(current_streak)
+
+    return {"win_streaks": win_streaks, "loss_streaks": loss_streaks}
+
+
+def _compute_duration_scatter(trades: list) -> list[dict]:
+    points = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        dur = t.get("trade_duration")
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        pair = t.get("pair", "")
+        if dur is None or not isinstance(pnl, (int, float)):
+            continue
+        points.append({
+            "duration": round(float(dur), 1),
+            "profit": round(float(pnl), 4),
+            "pair": pair,
+        })
+    if len(points) > 1000:
+        step = len(points) / 1000
+        points = [points[int(i * step)] for i in range(1000)]
+    return points
+
+
+def _compute_exit_reason_detail(trades: list) -> list[dict]:
+    from collections import defaultdict
+    reasons: dict[str, dict] = defaultdict(
+        lambda: {"count": 0, "profit_sum": 0.0, "wins": 0, "losses": 0}
+    )
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        reason = t.get("exit_reason", "unknown")
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        r = reasons[reason]
+        r["count"] += 1
+        r["profit_sum"] += pnl
+        if pnl > 0:
+            r["wins"] += 1
+        elif pnl < 0:
+            r["losses"] += 1
+    result = []
+    for reason, data in sorted(reasons.items(), key=lambda x: x[1]["count"], reverse=True):
+        result.append({
+            "reason": reason,
+            "count": data["count"],
+            "avg_profit": round(data["profit_sum"] / data["count"], 4) if data["count"] else 0,
+            "total_profit": round(data["profit_sum"], 4),
+            "wins": data["wins"],
+            "losses": data["losses"],
+            "winrate": round(data["wins"] / data["count"], 4) if data["count"] else 0,
+        })
+    return result
+
+
+def _compute_weekday_pattern(trades: list) -> dict:
+    from collections import defaultdict
+    from datetime import datetime
+
+    by_day: dict[int, list[float]] = defaultdict(list)
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        close_date = t.get("close_date") or t.get("close_timestamp")
+        if not close_date:
+            continue
+        try:
+            if isinstance(close_date, str):
+                dt = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
+            elif isinstance(close_date, (int, float)):
+                dt = datetime.fromtimestamp(close_date / 1000)
+            else:
+                continue
+            by_day[dt.weekday()].append(float(pnl))
+        except Exception:
+            continue
+
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    result = []
+    for i in range(7):
+        profits = by_day.get(i, [])
+        count = len(profits)
+        avg = round(sum(profits) / count, 4) if count else 0
+        total = round(sum(profits), 4)
+        wins = sum(1 for p in profits if p > 0)
+        result.append({
+            "day": days[i],
+            "day_index": i,
+            "trades": count,
+            "avg_profit": avg,
+            "total_profit": total,
+            "winrate": round(wins / count, 4) if count else 0,
+        })
+    return {"days": result}
+
+
+def _compute_cumulative_trades(trades: list, starting_balance: float) -> list[dict]:
+    points = []
+    cumulative = 0.0
+    balance = starting_balance
+    for i, t in enumerate(trades):
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        pnl_abs = t.get("profit_abs", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        cumulative += float(pnl)
+        balance += float(pnl_abs) if isinstance(pnl_abs, (int, float)) else 0
+        close_date = t.get("close_date", "")
+        if isinstance(close_date, str) and len(close_date) >= 10:
+            date_label = close_date[:10]
+        else:
+            date_label = str(i)
+        points.append({
+            "index": i,
+            "date": date_label,
+            "cumulative_pct": round(cumulative, 4),
+            "balance": round(balance, 2),
+            "profit": round(float(pnl), 4),
+        })
+    if len(points) > 2000:
+        step = len(points) / 2000
+        points = [points[int(i * step)] for i in range(2000)]
+    return points
+
+
+def _compute_rolling_winrate(trades: list, window: int = 50) -> list[dict]:
+    trade_results = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        close_date = t.get("close_date", "")
+        if not isinstance(pnl, (int, float)):
+            continue
+        trade_results.append({
+            "win": 1 if pnl > 0 else 0,
+            "date": close_date[:10] if isinstance(close_date, str) and len(close_date) >= 10 else "",
+        })
+
+    if len(trade_results) < window:
+        window = max(10, len(trade_results) // 2)
+
+    points = []
+    for i in range(window, len(trade_results)):
+        w = trade_results[i - window: i]
+        wr = sum(x["win"] for x in w) / len(w)
+        points.append({
+            "index": i,
+            "date": trade_results[i]["date"],
+            "winrate": round(wr, 4),
+        })
+
+    if len(points) > 500:
+        step = len(points) / 500
+        points = [points[int(i * step)] for i in range(500)]
+    return points
+
+
+def _compute_rolling_profit_factor(trades: list, window: int = 50) -> list[dict]:
+    trade_pnls = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        close_date = t.get("close_date", "")
+        if not isinstance(pnl, (int, float)):
+            continue
+        trade_pnls.append({
+            "pnl": float(pnl),
+            "date": close_date[:10] if isinstance(close_date, str) and len(close_date) >= 10 else "",
+        })
+
+    if len(trade_pnls) < window:
+        window = max(10, len(trade_pnls) // 2)
+
+    points = []
+    for i in range(window, len(trade_pnls)):
+        w = trade_pnls[i - window: i]
+        wins = sum(x["pnl"] for x in w if x["pnl"] > 0)
+        losses = abs(sum(x["pnl"] for x in w if x["pnl"] < 0))
+        pf = wins / losses if losses > 0 else 10.0
+        pf = min(pf, 10.0)
+        points.append({
+            "index": i,
+            "date": trade_pnls[i]["date"],
+            "profit_factor": round(pf, 3),
+        })
+
+    if len(points) > 500:
+        step = len(points) / 500
+        points = [points[int(i * step)] for i in range(500)]
+    return points
+
+
+def _compute_long_short_split(trades: list) -> dict:
+    long_trades = {"count": 0, "profit_sum": 0.0, "wins": 0, "losses": 0, "durations": []}
+    short_trades = {"count": 0, "profit_sum": 0.0, "wins": 0, "losses": 0, "durations": []}
+
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        dur = t.get("trade_duration", 0)
+        is_short = t.get("is_short", False)
+        if not isinstance(pnl, (int, float)):
+            continue
+        bucket = short_trades if is_short else long_trades
+        bucket["count"] += 1
+        bucket["profit_sum"] += float(pnl)
+        if pnl > 0:
+            bucket["wins"] += 1
+        elif pnl < 0:
+            bucket["losses"] += 1
+        if isinstance(dur, (int, float)):
+            bucket["durations"].append(float(dur))
+
+    def _summarize(b):
+        durs = b["durations"]
+        return {
+            "count": b["count"],
+            "total_profit": round(b["profit_sum"], 4),
+            "avg_profit": round(b["profit_sum"] / b["count"], 4) if b["count"] else 0,
+            "wins": b["wins"],
+            "losses": b["losses"],
+            "winrate": round(b["wins"] / b["count"], 4) if b["count"] else 0,
+            "avg_duration": round(sum(durs) / len(durs), 1) if durs else 0,
+        }
+
+    return {
+        "long": _summarize(long_trades),
+        "short": _summarize(short_trades),
+    }
+
+
+def _compute_exposure_timeline(trades: list) -> list[dict]:
+    from datetime import datetime
+
+    events = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        open_date = t.get("open_date") or t.get("open_timestamp")
+        close_date = t.get("close_date") or t.get("close_timestamp")
+        if not open_date or not close_date:
+            continue
+        try:
+            if isinstance(open_date, str):
+                od = datetime.fromisoformat(open_date.replace("Z", "+00:00"))
+            elif isinstance(open_date, (int, float)):
+                od = datetime.fromtimestamp(open_date / 1000)
+            else:
+                continue
+            if isinstance(close_date, str):
+                cd = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
+            elif isinstance(close_date, (int, float)):
+                cd = datetime.fromtimestamp(close_date / 1000)
+            else:
+                continue
+            events.append((od, 1))
+            events.append((cd, -1))
+        except Exception:
+            continue
+
+    if not events:
+        return []
+
+    events.sort(key=lambda x: x[0])
+    timeline = []
+    current = 0
+    for dt, delta in events:
+        current += delta
+        timeline.append({
+            "date": dt.strftime("%Y-%m-%d"),
+            "open_positions": current,
+        })
+
+    if len(timeline) > 1000:
+        step = len(timeline) / 1000
+        timeline = [timeline[int(i * step)] for i in range(1000)]
+    return timeline
+
+
+def _compute_trade_expectancy(trades: list) -> dict:
+    import math
+
+    profits = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if isinstance(pnl, (int, float)):
+            profits.append(float(pnl))
+
+    if not profits:
+        return {}
+
+    n = len(profits)
+    wins = [p for p in profits if p > 0]
+    losses = [p for p in profits if p < 0]
+
+    win_rate = len(wins) / n if n else 0
+    avg_win = sum(wins) / len(wins) if wins else 0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 0
+    expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+    payoff = avg_win / avg_loss if avg_loss > 0 else 0
+    kelly = (win_rate - ((1 - win_rate) / payoff)) if payoff > 0 else 0
+
+    mean_pnl = sum(profits) / n
+    std_pnl = math.sqrt(sum((p - mean_pnl) ** 2 for p in profits) / n) if n > 1 else 0
+    sqn = (mean_pnl / std_pnl) * math.sqrt(n) if std_pnl > 0 else 0
+
+    ci_95 = 1.96 * (std_pnl / math.sqrt(n)) if n > 1 else 0
+
+    return {
+        "expectancy": round(expectancy, 4),
+        "expectancy_per_trade_pct": round(expectancy, 4),
+        "win_rate": round(win_rate, 4),
+        "avg_win": round(avg_win, 4),
+        "avg_loss": round(avg_loss, 4),
+        "payoff_ratio": round(payoff, 4),
+        "kelly_pct": round(kelly * 100, 2),
+        "half_kelly_pct": round(kelly * 50, 2),
+        "sqn": round(sqn, 2),
+        "ci_95_low": round(expectancy - ci_95, 4),
+        "ci_95_high": round(expectancy + ci_95, 4),
+        "total_trades": n,
+    }
 
 
 def _count_epochs(fthypt: Path) -> int:
@@ -204,6 +1091,7 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
                     e.get("results_metrics", {}).get("winrate", 0) * 100, 1
                 ),
                 "params": e.get("params_dict", {}),
+                "results_metrics": e.get("results_metrics", {}),
             }
             for i, e in enumerate(top_10)
         ],
@@ -441,6 +1329,11 @@ def _compute_param_analytics(
             else:
                 normalized[pn] = 0.5
         pc["lines"].append({"values": normalized, "loss": ep.get("loss", 0)})
+    pc["actual_ranges"] = {
+        pn: {"min": min(num_params[pn]), "max": max(num_params[pn])}
+        for pn in pnames
+        if num_params.get(pn) and max(num_params[pn]) > min(num_params[pn])
+    }
     result["parallel_coords"] = pc
 
     top10_profits = [
@@ -1071,17 +1964,30 @@ def convert_backtest_entries(
     raw = get_backtest_resultlist(dirname)
     results = []
     for entry in raw:
-        results.append(
-            {
-                "run_type": "backtest",
-                "filename": entry["filename"],
-                "strategy": entry["strategy"],
-                "timestamp": entry.get("backtest_start_time", 0),
-                "timeframe": entry.get("timeframe"),
-                "timerange": None,
-                "has_metadata": True,
-                "run_id": entry.get("run_id"),
-                "notes": entry.get("notes"),
-            }
-        )
+        result: dict[str, Any] = {
+            "run_type": "backtest",
+            "filename": entry["filename"],
+            "strategy": entry["strategy"],
+            "timestamp": entry.get("backtest_start_time", 0),
+            "timeframe": entry.get("timeframe"),
+            "timerange": None,
+            "has_metadata": True,
+            "run_id": entry.get("run_id"),
+            "notes": entry.get("notes"),
+        }
+        try:
+            raw = load_file_from_zip(
+                dirname / f"{entry['filename']}.zip", entry["strategy"]
+            )
+            if raw:
+                strat_data = rapidjson.loads(raw)
+                result["total_profit_pct"] = round(
+                    strat_data.get("profit_total", 0) * 100, 2
+                )
+                result["total_trades"] = strat_data.get("total_trades", 0)
+                result["best_sharpe"] = strat_data.get("sharpe")
+                result["best_loss"] = None
+        except Exception:
+            pass
+        results.append(result)
     return results

@@ -1845,27 +1845,33 @@ class RPC:
 
         return res
 
-    async def _rpc_fleet_status(self) -> dict[str, Any]:
-        client = getattr(self._freqtrade.exchange, '_ftcache_client', None)
-        if not client:
-            return {"error": "ftcache not available"}
+    def _rpc_fleet_status(self) -> dict[str, Any]:
         try:
-            return await client.fleet_status()
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            sock = default_socket_path()
+            return _query_unix(sock, {"op": "fleet_status", "req_id": "api-fleet"})
         except Exception as e:
             return {"error": str(e)}
 
-    async def _rpc_fleet_events(
+    def _rpc_fleet_events(
         self, since_ts: float = 0,
         event_types: list[str] | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        client = getattr(self._freqtrade.exchange, '_ftcache_client', None)
-        if not client:
-            return {"error": "ftcache not available", "events": []}
         try:
-            return await client.fleet_events(
-                since_ts, event_types, limit=limit,
-            )
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            sock = default_socket_path()
+            req: dict[str, Any] = {
+                "op": "fleet_events", "req_id": "api-events",
+                "since_ts": since_ts, "limit": limit,
+            }
+            if event_types:
+                req["event_types"] = event_types
+            return _query_unix(sock, req)
         except Exception as e:
             return {"error": str(e), "events": []}
 
