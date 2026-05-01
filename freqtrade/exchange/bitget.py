@@ -115,7 +115,7 @@ class Bitget(Exchange):
                     return self._convert_stop_order(pair, order_id, order)
             except (ccxt.OrderNotFound, ccxt.InvalidOrder):
                 pass
-            except ccxt.DDoSProtection as e:
+            except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
                 raise DDosProtection(e) from e
             except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
                 raise TemporaryError(
@@ -146,7 +146,7 @@ class Bitget(Exchange):
                 if self.trading_mode == TradingMode.FUTURES:
                     position_mode = self._api.set_position_mode(False)
                     self._log_exchange_response("set_position_mode", position_mode)
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(

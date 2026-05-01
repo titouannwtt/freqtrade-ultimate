@@ -102,7 +102,7 @@ class Kraken(Exchange):
 
             self._log_exchange_response("fetch_balance2", balances)
             return balances
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(

@@ -91,7 +91,7 @@ class Hyperliquid(Exchange):
                 if self.unified_account:
                     logger.info("Unified Hyperliquid account detected.")
 
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -387,7 +387,7 @@ class Hyperliquid(Exchange):
                 )
             return liquidation_fills
 
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(

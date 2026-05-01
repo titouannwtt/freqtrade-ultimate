@@ -115,7 +115,7 @@ class Krakenfutures(Exchange):
 
             self._log_exchange_response("fetch_balance", balances, add_info=params)
             return balances
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -209,7 +209,7 @@ class Krakenfutures(Exchange):
         except ccxt.OrderNotFound:
             # Expected for older Kraken Futures orders not visible in orders/status.
             pass
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except ccxt.InvalidOrder as e:
             msg = f"Tried to get an invalid order (pair: {pair} id: {order_id}). Message: {e}"
@@ -280,7 +280,7 @@ class Krakenfutures(Exchange):
         except (ccxt.OrderNotFound, ccxt.InvalidOrder) as e:
             logger.debug(f"{fetch_fn.__name__} failed: {e}")
             return None
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
