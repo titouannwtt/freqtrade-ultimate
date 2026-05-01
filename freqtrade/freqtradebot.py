@@ -101,20 +101,23 @@ class FreqtradeBot(LoggingMixin):
         )
 
         # Register with fleet orchestrator (ftcache extension)
+        config_files = config.get("config_files", [""])
+        bot_identity = {
+            "bot_id": config.get("bot_name", ""),
+            "config_file": Path(config_files[0]).name if config_files else "",
+            "exchange": config["exchange"]["name"],
+            "trading_mode": config.get("trading_mode", "spot"),
+            "strategy": config.get("strategy", ""),
+            "timeframe": config.get("timeframe", "15m"),
+            "dry_run": config.get("dry_run", False),
+            "api_port": config.get("api_server", {}).get("listen_port", 0),
+            "pid": os.getpid(),
+        }
         ftcache_client = getattr(self.exchange, '_ftcache_client', None)
         if ftcache_client and ftcache_client:
-            config_files = config.get("config_files", [""])
-            ftcache_client.set_bot_identity({
-                "bot_id": config.get("bot_name", ""),
-                "config_file": Path(config_files[0]).name if config_files else "",
-                "exchange": config["exchange"]["name"],
-                "trading_mode": config.get("trading_mode", "spot"),
-                "strategy": config.get("strategy", ""),
-                "timeframe": config.get("timeframe", "15m"),
-                "dry_run": config.get("dry_run", False),
-                "api_port": config.get("api_server", {}).get("listen_port", 0),
-                "pid": os.getpid(),
-            })
+            ftcache_client.set_bot_identity(bot_identity)
+        else:
+            self.exchange._ftcache_pending_identity = bot_identity
 
         self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
 
@@ -294,6 +297,9 @@ class FreqtradeBot(LoggingMixin):
         if hasattr(self.exchange, 'ftcache_set_open_pairs'):
             open_pairs = {t.pair for t in trades}
             self.exchange.ftcache_set_open_pairs(open_pairs)
+
+        if hasattr(self.exchange, 'ftcache_mark_init_complete'):
+            self.exchange.ftcache_mark_init_complete()
 
         # Refreshing candles
         self.dataprovider.refresh(

@@ -52,7 +52,13 @@ class Wallets:
             self._start_cap = _start_cap
 
         self._last_wallet_refresh: datetime | None = None
-        self.update()
+        try:
+            self.update()
+        except Exception as e:
+            logger.warning(
+                "wallet init failed (%s) — proceeding with empty wallets, "
+                "will retry on first process cycle", e,
+            )
 
     def __repr__(self) -> str:
         return (
