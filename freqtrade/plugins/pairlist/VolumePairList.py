@@ -268,14 +268,18 @@ class VolumePairList(IPairList):
             )
             shared_volumes: dict[str, float] = {}
             if self._shared_client:
-                all_symbols = [s["symbol"] for s in filtered_tickers]
-                shared = self._shared_client.mget(
-                    "VolumePairList", self._params_hash, all_symbols
-                )
-                for sym, val in shared.items():
-                    if val is not None:
-                        shared_volumes[sym] = val["quoteVolume"]
-                        self._pair_cache[sym] = val["quoteVolume"]
+                uncached_symbols = [
+                    s["symbol"] for s in filtered_tickers
+                    if s["symbol"] not in self._pair_cache
+                ]
+                if uncached_symbols:
+                    shared = self._shared_client.mget(
+                        "VolumePairList", self._params_hash, uncached_symbols
+                    )
+                    for sym, val in shared.items():
+                        if val is not None:
+                            shared_volumes[sym] = val["quoteVolume"]
+                            self._pair_cache[sym] = val["quoteVolume"]
 
             needed_pairs: ListPairsWithTimeframes = [
                 (p, self._lookback_timeframe, self._def_candletype)
