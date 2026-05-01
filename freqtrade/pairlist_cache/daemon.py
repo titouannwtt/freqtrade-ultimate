@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -63,6 +64,7 @@ class PairlistCacheDaemon:
             "hits": 0,
             "puts": 0,
         }
+        self._method_stats: dict[str, dict[str, int]] = {}
 
     def _get(self, method: str, ph: str, pair: str) -> dict | None:
         bucket = self._cache.get(method, {}).get(ph, {})
@@ -70,6 +72,13 @@ class PairlistCacheDaemon:
         if entry and entry.alive():
             return entry.value
         return None
+
+    def _bump_method(self, method: str, key: str, count: int = 1) -> None:
+        m = self._method_stats.get(method)
+        if m is None:
+            m = {"gets": 0, "hits": 0, "puts": 0}
+            self._method_stats[method] = m
+        m[key] = m.get(key, 0) + count
 
     def _put(self, method: str, ph: str, pair: str, value: dict, ttl: float) -> None:
         self._cache.setdefault(method, {}).setdefault(ph, {})[pair] = _Entry(value, ttl)
@@ -150,38 +159,49 @@ class PairlistCacheDaemon:
             }
 
         if op == "get":
+            method = req["method"]
             self._stats["gets"] += 1
-            val = self._get(req["method"], req["params_hash"], req["pair"])
+            self._bump_method(method, "gets")
+            val = self._get(method, req["params_hash"], req["pair"])
             if val is not None:
                 self._stats["hits"] += 1
+                self._bump_method(method, "hits")
                 return {"req_id": rid, "ok": True, "hit": True, "value": val}
             return {"req_id": rid, "ok": True, "hit": False}
 
         if op == "put":
+            method = req["method"]
             self._stats["puts"] += 1
+            self._bump_method(method, "puts")
             self._put(
-                req["method"], req["params_hash"], req["pair"], req["value"], req.get("ttl", 3600)
+                method, req["params_hash"], req["pair"], req["value"], req.get("ttl", 3600)
             )
             return {"req_id": rid, "ok": True}
 
         if op == "mget":
-            self._stats["gets"] += len(req.get("pairs", []))
+            method = req["method"]
+            pairs = req.get("pairs", [])
+            self._stats["gets"] += len(pairs)
+            self._bump_method(method, "gets", len(pairs))
             results = {}
-            for pair in req.get("pairs", []):
-                val = self._get(req["method"], req["params_hash"], pair)
+            for pair in pairs:
+                val = self._get(method, req["params_hash"], pair)
                 if val is not None:
                     self._stats["hits"] += 1
+                    self._bump_method(method, "hits")
                     results[pair] = {"hit": True, "value": val}
                 else:
                     results[pair] = {"hit": False}
             return {"req_id": rid, "ok": True, "results": results}
 
         if op == "mput":
+            method = req["method"]
             entries = req.get("entries", {})
             self._stats["puts"] += len(entries)
+            self._bump_method(method, "puts", len(entries))
             ttl = req.get("ttl", 3600)
             for pair, val in entries.items():
-                self._put(req["method"], req["params_hash"], pair, val, ttl)
+                self._put(method, req["params_hash"], pair, val, ttl)
             return {"req_id": rid, "ok": True}
 
         if op == "stats":
@@ -194,6 +214,7 @@ class PairlistCacheDaemon:
                 "clients": self._active_clients,
                 **self._stats,
                 "entries": total_entries,
+                "by_method": dict(self._method_stats),
             }
 
         return {"req_id": rid, "ok": False, "error": f"unknown op: {op}"}
@@ -237,6 +258,34 @@ class PairlistCacheDaemon:
                 logger.info("idle %.0fs — shutting down", idle)
                 self._shutdown.set()
 
+    async def _periodic_stats(self) -> None:
+        """Log summary stats every 60s."""
+        last_gets = 0
+        last_hits = 0
+        last_puts = 0
+        while not self._shutdown.is_set():
+            await asyncio.sleep(60)
+            gets = self._stats["gets"]
+            hits = self._stats["hits"]
+            puts = self._stats["puts"]
+            d_gets = gets - last_gets
+            d_hits = hits - last_hits
+            d_puts = puts - last_puts
+            last_gets, last_hits, last_puts = gets, hits, puts
+            total_entries = sum(
+                sum(len(pairs) for pairs in ph.values()) for ph in self._cache.values()
+            )
+            uptime = time.monotonic() - self._stats["started"]
+            hit_pct = round(hits / gets * 100, 1) if gets > 0 else 0
+            logger.info(
+                "STATS uptime=%ds clients=%d entries=%d "
+                "gets=%d hits=%d(%s%%) puts=%d "
+                "delta(gets=%d hits=%d puts=%d)",
+                uptime, self._active_clients, total_entries,
+                gets, hits, hit_pct, puts,
+                d_gets, d_hits, d_puts,
+            )
+
     async def _gc(self) -> None:
         """Periodic sweep of expired entries."""
         while not self._shutdown.is_set():
@@ -270,11 +319,13 @@ class PairlistCacheDaemon:
 
         watchdog = asyncio.create_task(self._idle_watchdog())
         gc = asyncio.create_task(self._gc())
+        stats_task = asyncio.create_task(self._periodic_stats())
         try:
             await self._shutdown.wait()
         finally:
             watchdog.cancel()
             gc.cancel()
+            stats_task.cancel()
             server.close()
             await server.wait_closed()
             self._save_to_disk()
@@ -293,10 +344,26 @@ def main() -> int:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    log_fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+
+    console = logging.StreamHandler()
+    console.setFormatter(log_fmt)
+    root.addHandler(console)
+
+    log_dir = Path.home() / ".freqtrade" / "ftpairlist" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "daemon.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
     )
+    file_handler.setFormatter(log_fmt)
+    root.addHandler(file_handler)
 
     from freqtrade.pairlist_cache.defaults import default_socket_path
 

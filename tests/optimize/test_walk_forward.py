@@ -585,7 +585,7 @@ class TestExport:
         count2 = wf._log_wfa_run(results, stability)
         assert count2 == 2
 
-        log_file = tmp_path / "walk_forward" / "wfa_log.jsonl"
+        log_file = tmp_path / "walk_forward_results" / "wfa_log.jsonl"
         assert log_file.exists()
         lines = [line for line in log_file.read_text().splitlines() if line.strip()]
         assert len(lines) == 2
@@ -628,7 +628,7 @@ class TestStrategyJsonHelpers:
         result = wf._save_window_params(0, json_path)
 
         assert result == {"buy": {"rsi": 30}}
-        saved = tmp_path / "walk_forward" / "window_0_params.json"
+        saved = tmp_path / "walk_forward_results" / "window_0_params.json"
         assert saved.exists()
 
     def test_restore_params(self, walkforward_conf, tmp_path):
@@ -667,7 +667,7 @@ class TestStrategyJsonHelpers:
 class TestLockFile:
     def test_get_lock_filename(self, walkforward_conf, tmp_path):
         path = WalkForward.get_lock_filename(walkforward_conf)
-        assert "walk_forward.lock" in path
+        assert "walk_forward_results.lock" in path
         assert str(tmp_path) in path
 
 
@@ -1069,7 +1069,7 @@ class TestStartWalkForward:
 class TestInit:
     def test_creates_wfa_dir(self, walkforward_conf, tmp_path):
         WalkForward(walkforward_conf)
-        assert (tmp_path / "walk_forward").is_dir()
+        assert (tmp_path / "walk_forward_results").is_dir()
 
     def test_config_mapping(self, walkforward_conf):
         wf = WalkForward(walkforward_conf)
@@ -2676,7 +2676,7 @@ class TestCPCVVerdict:
 class TestLoadLatestConsensus:
     def test_load_from_consensus_file(self, walkforward_conf, tmp_path):
         wf = WalkForward(walkforward_conf)
-        consensus_file = tmp_path / "walk_forward" / "HyperoptableStrategy_consensus_2024.json"
+        consensus_file = tmp_path / "walk_forward_results" / "HyperoptableStrategy_consensus_2024.json"
         consensus_file.parent.mkdir(parents=True, exist_ok=True)
         data = {"params": {"buy": {"rsi": 25}}, "strategy_name": "HyperoptableStrategy"}
         consensus_file.write_text(rapidjson.dumps(data))
@@ -2837,7 +2837,7 @@ class TestHTMLReport:
         generate_wfa_html_report(data, out)
         content = out.read_text()
         assert "Windows" in content
-        assert "20180601" in content
+        assert "2018-06-01" in content
 
     def test_equity_chart_svg(self, tmp_path):
         from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
@@ -2856,7 +2856,7 @@ class TestHTMLReport:
         out = tmp_path / "report.html"
         generate_wfa_html_report(data, out)
         content = out.read_text()
-        assert "<svg" not in content
+        assert 'id="sec-equity"' not in content
 
     def test_self_contained_no_external(self, tmp_path):
         from freqtrade.optimize.wfa_html_report import generate_wfa_html_report
@@ -3052,6 +3052,7 @@ class TestGlossary:
             "dsr",
             "calmar",
             "dd",
+            "dof",
             "hhi",
             "pf",
             "mc",
@@ -3091,8 +3092,11 @@ class TestGlossary:
         from freqtrade.optimize.wfa_glossary import VERDICT_GUIDE
 
         assert set(VERDICT_GUIDE.keys()) == {"A", "B", "C", "D", "F"}
-        for grade, text in VERDICT_GUIDE.items():
-            assert len(text) > 20, f"Grade {grade} guide too short"
+        for grade, pair in VERDICT_GUIDE.items():
+            assert isinstance(pair, tuple) and len(pair) == 2
+            en, fr = pair
+            assert len(en) > 20, f"Grade {grade} EN guide too short"
+            assert len(fr) > 20, f"Grade {grade} FR guide too short"
 
 
 class TestBeginnerConsole:

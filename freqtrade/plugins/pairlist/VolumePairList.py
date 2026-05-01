@@ -41,7 +41,6 @@ class VolumePairList(IPairList):
         self._min_value: float | None = self._pairlistconfig.get("min_value", 0)
         self._max_value: float | None = self._pairlistconfig.get("max_value", None)
         self._refresh_period = self._pairlistconfig.get("refresh_period", 1800)
-        self._pair_cache: FtTTLCache = FtTTLCache(maxsize=1, ttl=self._refresh_period)
         self._lookback_days: int = self._pairlistconfig.get("lookback_days", 0)
         self._lookback_timeframe: str = self._pairlistconfig.get("lookback_timeframe", "1d")
         self._lookback_period: int = self._pairlistconfig.get("lookback_period", 0)
@@ -65,6 +64,8 @@ class VolumePairList(IPairList):
 
         # whether to use range lookback or not
         self._use_range = (self._tf_in_min > 0) and (self._lookback_period > 0)
+        cache_size = 1000 if self._use_range else 1
+        self._pair_cache: FtTTLCache = FtTTLCache(maxsize=cache_size, ttl=self._refresh_period)
 
         if self._use_range and (self._refresh_period < _tf_in_sec):
             raise OperationalException(
@@ -274,6 +275,7 @@ class VolumePairList(IPairList):
                 for sym, val in shared.items():
                     if val is not None:
                         shared_volumes[sym] = val["quoteVolume"]
+                        self._pair_cache[sym] = val["quoteVolume"]
 
             needed_pairs: ListPairsWithTimeframes = [
                 (p, self._lookback_timeframe, self._def_candletype)
@@ -288,6 +290,10 @@ class VolumePairList(IPairList):
                 sym = p["symbol"]
                 if sym in shared_volumes:
                     filtered_tickers[i]["quoteVolume"] = shared_volumes[sym]
+                    continue
+                cached_vol = self._pair_cache.get(sym)
+                if cached_vol is not None:
+                    filtered_tickers[i]["quoteVolume"] = cached_vol
                     continue
 
                 contract_size = self._exchange.markets[sym].get("contractSize", 1.0) or 1.0
@@ -317,6 +323,7 @@ class VolumePairList(IPairList):
 
                     filtered_tickers[i]["quoteVolume"] = quoteVolume
                     newly_computed[sym] = {"quoteVolume": float(quoteVolume)}
+                    self._pair_cache[sym] = float(quoteVolume)
                 else:
                     filtered_tickers[i]["quoteVolume"] = 0
 

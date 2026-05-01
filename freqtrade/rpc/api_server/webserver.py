@@ -214,6 +214,7 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_download_data import router as api_download_data
         from freqtrade.rpc.api_server.api_pair_history import router as api_pair_history
         from freqtrade.rpc.api_server.api_pairlists import router as api_pairlists
+        from freqtrade.rpc.api_server.api_stratdev import router as api_stratdev
         from freqtrade.rpc.api_server.api_trading import router as api_trading
         from freqtrade.rpc.api_server.api_v1 import router as api_v1
         from freqtrade.rpc.api_server.api_v1 import router_public as api_v1_public
@@ -270,6 +271,12 @@ class ApiServer(RPCHandler):
             prefix="/api/v1",
             tags=["Download-data", "Webserver"],
             dependencies=[Depends(http_basic_or_jwt_token), Depends(is_webserver_mode)],
+        )
+        app.include_router(
+            api_stratdev,
+            prefix="/api/v1",
+            tags=["Strategy-Dev"],
+            dependencies=[Depends(http_basic_or_jwt_token)],
         )
         app.include_router(ws_router, prefix="/api/v1")
         # UI Router MUST be last!

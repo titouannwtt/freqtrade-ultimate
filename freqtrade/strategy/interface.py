@@ -153,6 +153,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         self.config = config
         # Dict to determine if analysis is necessary
         self.__last_candle_seen_per_pair: dict[str, datetime] = {}
+        self._outdated_warned: dict[str, float] = {}
         super().__init__(config)
 
         # Gather informative pairs from @informative-decorated methods.
@@ -1302,11 +1303,16 @@ class IStrategy(ABC, HyperStrategyMixin):
         timeframe_minutes = timeframe_to_minutes(timeframe)
         offset = self.config.get("exchange", {}).get("outdated_offset", 5)
         if latest_date < (dt_now() - timedelta(minutes=timeframe_minutes * 2 + offset)):
-            logger.warning(
-                "Outdated history for pair %s. Last tick is %s minutes old",
-                pair,
-                int((dt_now() - latest_date).total_seconds() // 60),
-            )
+            import time
+            now_ts = time.monotonic()
+            last_warned = self._outdated_warned.get(pair, 0.0)
+            if now_ts - last_warned >= 3600:
+                logger.warning(
+                    "Outdated history for pair %s. Last tick is %s minutes old",
+                    pair,
+                    int((dt_now() - latest_date).total_seconds() // 60),
+                )
+                self._outdated_warned[pair] = now_ts
             return None, None
         return latest, latest_date
 

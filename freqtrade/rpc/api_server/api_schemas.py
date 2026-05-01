@@ -761,6 +761,18 @@ class CacheDaemonStatus(BaseModel):
     positions_gets: int = 0
     positions_cache_hits: int = 0
     positions_hit_rate_pct: float = 0.0
+    # Connection churn
+    total_connects: int = 0
+    total_disconnects: int = 0
+    peak_clients: int = 0
+    short_lived_connections: int = 0
+    # Circuit breaker / backoff
+    shed_count: int = 0
+    backoff_count: int = 0
+    backoff_active: bool = False
+    backoff_remaining_s: float = 0.0
+    consecutive_backoffs: int = 0
+    current_backoff_duration_s: int = 0
 
 
 class PairlistCacheStatus(BaseModel):
@@ -816,6 +828,20 @@ class TokenBucketState(BaseModel):
     queue_depths: dict[str, int] = {}
 
 
+class FtpairlistStats(BaseModel):
+    clients: int = 0
+    gets: int = 0
+    hits: int = 0
+    puts: int = 0
+    entries: int = 0
+    hit_rate_pct: float = 0.0
+
+
+class ExchangeRateLimit(BaseModel):
+    rate_limit_ms: int = 0
+    max_requests_per_min: int = 0
+
+
 class RateMetricsResponse(BaseModel):
     exchange: str = ""
     timeline: list[RateTimelineBucket] = []
@@ -823,6 +849,8 @@ class RateMetricsResponse(BaseModel):
     recent_429s: list[RateLimitEvent] = []
     summary: dict[str, Any] = {}
     ftcache_extended: dict[str, Any] = {}
+    ftpairlist: FtpairlistStats | None = None
+    exchange_rate_limit: ExchangeRateLimit | None = None
 
 
 class CustomDataEntry(BaseModel):
@@ -836,3 +864,56 @@ class CustomDataEntry(BaseModel):
 class ListCustomData(BaseModel):
     trade_id: int
     custom_data: list[CustomDataEntry]
+
+
+# ---- Fleet Orchestrator schemas
+
+
+class FleetBotStatus(BaseModel):
+    bot_id: str
+    config_file: str = ""
+    exchange: str
+    trading_mode: str
+    strategy: str
+    timeframe: str
+    pairs_count: int
+    state: str
+    uptime_s: float
+    last_heartbeat_ago_s: float
+    pid: int
+    api_port: int = 0
+    dry_run: bool = False
+
+
+class FleetDaemonInfo(BaseModel):
+    uptime_s: float
+    socket_path: str = ""
+    active_connections: int = 0
+    total_series: int = 0
+    total_events: int = 0
+
+
+class FleetRateLimiterInfo(BaseModel):
+    tokens_available: float
+    tokens_max: float
+    backoff_active: bool = False
+    shed_count: int = 0
+    backoff_count: int = 0
+
+
+class FleetStatusResponse(BaseModel):
+    daemon: FleetDaemonInfo
+    bots: list[FleetBotStatus]
+    rate_limiters: dict[str, FleetRateLimiterInfo]
+    recent_events_count: dict[str, int]
+
+
+class FleetEvent(BaseModel):
+    ts: float
+    event_type: str
+    bot_id: str | None = None
+    details: dict[str, Any] = {}
+
+
+class FleetEventsResponse(BaseModel):
+    events: list[FleetEvent]

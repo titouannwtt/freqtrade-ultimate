@@ -117,7 +117,15 @@ git merge upstream/stable --no-edit
 - **Never use Hyperliquid sub-accounts.** Single wallet `0xC234...` for all volume. Rate-limit fix = VPN/proxy, never wallet-level.
 - When fixing trade DB issues, use `python3` with `sqlite3` module (no `sqlite3` CLI).
 - Strategies use `"stake_amount": "unlimited"` — sizing is in `custom_stake_amount()`.
-- Bot restart: `kill <pid>` then `launch_bot.sh` auto-restarts after 60s, or via `screen -S <session> -X stuff './launch_bot.sh ...\n'`.
+- **Bot restart procedure** (always follow this exact sequence):
+  1. `screen -x <nom_du_bot>` — attach to the existing screen session
+  2. Stop the `launch_bot.sh` script entirely (Ctrl+C during the countdown, then Ctrl+C again to kill freqtrade if still running) — the bot stops and the auto-restart loop is interrupted
+  3. Relaunch manually: `./launch_bot.sh <config>.json`
+  Never use `kill <pid>` from outside the screen — always attach and stop interactively.
+- **Bot launch procedure** (new bot):
+  1. `screen -S <nom_du_bot>` — create a new named screen session
+  2. `cd freqtrade && source ./.venv/bin/activate`
+  3. `./launch_bot.sh hyperliquid_hippo_dynv1_short_sharpe.json` (example)
 - **Never use `pkill`/`kill -9` on hyperopt** — leaves orphaned workers. Use `screen -S <session> -X stuff $'\003'` (Ctrl+C).
 
 ## Detailed guides (loaded on demand)

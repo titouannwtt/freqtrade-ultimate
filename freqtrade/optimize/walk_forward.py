@@ -152,13 +152,17 @@ class WalkForward:
 
         self.results: list[WindowResult] = []
         self.holdout_result: WindowResult | None = None
+        self._start_ts: datetime | None = None
 
-        self._wfa_dir = Path(config["user_data_dir"]) / "walk_forward"
+        old_dir = Path(config["user_data_dir"]) / "walk_forward"
+        self._wfa_dir = Path(config["user_data_dir"]) / "walk_forward_results"
+        if old_dir.exists() and not self._wfa_dir.exists():
+            old_dir.rename(self._wfa_dir)
         self._wfa_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def get_lock_filename(config: Config) -> str:
-        return str(Path(config["user_data_dir"]) / "walk_forward.lock")
+        return str(Path(config["user_data_dir"]) / "walk_forward_results.lock")
 
     # ------------------------------------------------------------------
     # Window computation
@@ -1315,6 +1319,61 @@ class WalkForward:
         logger.info(f"Consensus exported: {filename.name}")
         return filename
 
+    def _snapshot_config(self) -> dict[str, Any] | None:
+        from freqtrade.configuration.config_secrets import sanitize_config
+
+        original = self.config.get("original_config")
+        if original:
+            return sanitize_config(original)
+        return sanitize_config(self.config)
+
+    def _read_strategy_source(self) -> str | None:
+        fn = HyperoptTools.get_strategy_filename(self.config, self.strategy_name)
+        if fn and fn.is_file():
+            return fn.read_text(encoding="utf-8")
+        return None
+
+    def _read_strategy_params(self) -> str | None:
+        fn = HyperoptTools.get_strategy_filename(self.config, self.strategy_name)
+        if fn:
+            params_file = fn.with_suffix(".json")
+            if params_file.is_file():
+                return params_file.read_text(encoding="utf-8")
+        return None
+
+    _WFA_CMD_FLAGS: list[tuple[str, str, Any]] = [
+        ("strategy", "--strategy", None),
+        ("hyperopt_loss", "--hyperopt-loss", None),
+        ("timerange", "--timerange", None),
+        ("timeframe", "--timeframe", None),
+    ]
+
+    def _reconstruct_wfa_command(self) -> str:
+        parts = ["freqtrade walk-forward"]
+        cfg = self.config
+        for key, flag, skip_val in self._WFA_CMD_FLAGS:
+            val = cfg.get(key)
+            if val is not None and val != skip_val:
+                parts.append(f"{flag} {val}")
+        if self.n_windows != 5:
+            parts.append(f"--wf-windows {self.n_windows}")
+        if self.train_ratio != 0.75:
+            parts.append(f"--wf-train-ratio {self.train_ratio}")
+        if self.embargo_days != 7:
+            parts.append(f"--wf-embargo-days {self.embargo_days}")
+        epochs = cfg.get("epochs", 150)
+        if epochs != 150:
+            parts.append(f"--epochs {epochs}")
+        if self.wf_mode != "rolling":
+            parts.append(f"--wf-mode {self.wf_mode}")
+        configs = cfg.get("config", [])
+        if isinstance(configs, list):
+            for c in configs:
+                parts.append(f"-c {c}")
+        elif configs:
+            parts.append(f"-c {configs}")
+        return " ".join(parts)
+
     def _build_results_data(
         self,
         all_results: list[WindowResult],
@@ -1434,6 +1493,17 @@ class WalkForward:
             "holdout": None,
             "param_stability": stability,
             "consensus_params": consensus,
+            "exchange": self.config.get("exchange", {}).get("name", ""),
+            "timeframe": self.config.get("timeframe", ""),
+            "timerange": self.config.get("timerange", ""),
+            "stake_currency": self.config.get("stake_currency", "USDT"),
+            "pairlist": self.config.get("exchange", {}).get("pair_whitelist", []),
+            "config": self._snapshot_config(),
+            "strategy_source": self._read_strategy_source(),
+            "strategy_params_snapshot": self._read_strategy_params(),
+            "command": self._reconstruct_wfa_command(),
+            "run_start_ts": (int(self._start_ts.timestamp()) if self._start_ts else None),
+            "run_end_ts": int(datetime.now(UTC).timestamp()),
         }
 
         for r in all_results:
@@ -2364,6 +2434,7 @@ class WalkForward:
         self._log_next_steps(grade)
 
     def start(self) -> None:
+        self._start_ts = datetime.now(UTC)
         if self.wf_mode == "cpcv":
             return self._start_cpcv()
 
