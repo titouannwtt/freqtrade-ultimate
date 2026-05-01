@@ -1,4 +1,5 @@
 {
+    "shared_ohlcv_cache": {"enabled": false},
     "stake_currency": "BTC",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.95,

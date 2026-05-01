@@ -2926,6 +2926,20 @@ class Exchange:
         cache: bool,
         drop_incomplete: bool,
     ) -> DataFrame:
+        if not isinstance(ticks, list):
+            logger.warning(
+                "ticks for %s/%s is %s, not list — returning empty df",
+                pair, timeframe, type(ticks).__name__,
+            )
+            ticks = []
+        elif ticks:
+            first = ticks[0]
+            if not isinstance(first, (list, tuple)) or len(first) < 6:
+                logger.warning(
+                    "ticks rows for %s/%s have bad shape (first=%s) — returning empty df",
+                    pair, timeframe, repr(first)[:120],
+                )
+                ticks = []
         # keeping last candle time as last refreshed time of the pair
         if ticks and cache:
             idx = -2 if drop_incomplete and len(ticks) > 1 else -1

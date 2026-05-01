@@ -302,9 +302,16 @@ class OhlcvCacheClient:
             ct_ret = CandleType(resp.get("candle_type", ct_str))
         except (ValueError, KeyError):
             ct_ret = candle_type if isinstance(candle_type, CandleType) else CandleType.SPOT
+        data = resp.get("data", [])
+        if not isinstance(data, list):
+            logger.warning(
+                "daemon returned data as %s for %s/%s — discarding",
+                type(data).__name__, pair, timeframe,
+            )
+            data = []
         return (
             resp.get("pair", pair), resp.get("timeframe", timeframe), ct_ret,
-            resp.get("data", []), resp.get("drop_incomplete", True),
+            data, resp.get("drop_incomplete", True),
         )
 
     # ---------------- centralized rate limiter
