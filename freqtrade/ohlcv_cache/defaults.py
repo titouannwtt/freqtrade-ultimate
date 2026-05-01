@@ -58,12 +58,41 @@ GLOBAL_DEFAULTS: dict = {
 }
 
 
-# Per-exchange defaults. Rate limits are "per second" budgets for the
-# OHLCV-fetching endpoint(s) of each exchange.
+# Hyperliquid API weight map.  The HL API charges a "weight" per request
+# type.  Total budget is 1200 weight / minute / IP.  We convert to a
+# weight-per-second TokenBucket so the daemon never exceeds the limit.
+#
+# Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits
+HL_WEIGHT_MAP: dict[str, float] = {
+    "fetch":           4.0,   # candleSnapshot
+    "tickers":        20.0,   # info (allMids + meta)
+    "positions_get":   2.0,   # clearinghouseState
+    "positions_put":   0.0,   # local cache write, no API call
+    "balances_get":    2.0,   # clearinghouseState
+    "balances_put":    0.0,   # local cache write, no API call
+    "markets":        20.0,   # meta (load_markets)
+    "funding_rates":  20.0,   # info
+    "leverage_tiers": 20.0,   # meta
+    "acquire":         1.0,   # default for bot-side REST (orders)
+}
+
+HL_WEIGHT_BUDGET_PER_MIN = 1200
+# Conservative: use 85% of the real budget to leave headroom for
+# order placement traffic that bypasses the daemon.
+HL_EFFECTIVE_BUDGET_PER_MIN = int(HL_WEIGHT_BUDGET_PER_MIN * 0.85)
+
+
+# Per-exchange defaults. Rate limits are "per second" budgets.
+# For Hyperliquid: weight-based (1 unit = 1 weight).
+# For others: flat token-based (1 unit = 1 request).
 EXCHANGE_DEFAULTS: dict[str, dict] = {
     "hyperliquid": {
-        "rate_per_s": 10,
-        "burst": 15,
+        # 1020 weight/min ÷ 60 = 17 weight/sec steady, burst 30
+        "rate_per_s": HL_EFFECTIVE_BUDGET_PER_MIN / 60.0,
+        "burst": 30.0,
+        "weight_mode": True,
+        "weight_budget_per_min": HL_EFFECTIVE_BUDGET_PER_MIN,
+        "weight_map": HL_WEIGHT_MAP,
         "refresh_overlap_candles": 5,
         "max_candles_per_call": 5000,
         "supports_mark": True,

@@ -18,7 +18,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from freqtrade.enums import CandleType, MarginMode, TradingMode
-from freqtrade.exceptions import TemporaryError
+from freqtrade.exceptions import DDosProtection, TemporaryError
 from freqtrade.ohlcv_cache.client import (
     CacheRateLimited,
     CacheTimedOut,
@@ -55,8 +55,10 @@ class CachedExchangeMixin:
     _ftcache_client: Any = None  # OhlcvCacheClient | False sentinel
     _ftcache_warned: bool = False
     _ftcache_open_pairs: frozenset[str] = frozenset()
+    _ftcache_init_complete: bool = False
+    _ftcache_pending_identity: dict | None = None
 
-    _ACQUIRE_TIMEOUT_S: float = 30.0
+    _ACQUIRE_TIMEOUT_S: float = 120.0
     _STALE_POSITIONS_WARN_AGE_S: float = 120.0
 
     # Local fallback caches for rate-limited scenarios
@@ -64,6 +66,8 @@ class CachedExchangeMixin:
     _ftcache_last_positions_ts: float = 0.0
     _ftcache_tickers_fresh_ts: float = 0.0
     _ftcache_last_balances: dict | None = None
+    _ftcache_last_backoff_active: bool = False
+    _ftcache_last_backoff_ts: float = 0.0
 
     def ftcache_set_open_pairs(self, pairs: set[str] | frozenset[str]) -> None:
         """Inform the cache layer which pairs currently have open positions.
@@ -72,6 +76,22 @@ class CachedExchangeMixin:
         use the freshest possible data.
         """
         self._ftcache_open_pairs = frozenset(pairs)
+
+    def ftcache_mark_init_complete(self) -> None:
+        """Signal that the bot has completed initialization.
+
+        After this call, rate-limited calls use their normal priorities
+        instead of being escalated to CRITICAL.
+        """
+        if not self._ftcache_init_complete:
+            self._ftcache_init_complete = True
+            logger.info("bot init complete — switching to normal rate-limit priorities")
+
+    def _ftcache_init_priority(self, requested: int | None) -> int | None:
+        """During init phase, escalate essential calls to CRITICAL."""
+        if self._ftcache_init_complete:
+            return requested
+        return OhlcvCacheClient.CRITICAL
 
     def _ftcache_enabled(self) -> bool:
         from freqtrade.enums import RunMode
@@ -109,11 +129,15 @@ class CachedExchangeMixin:
                 trading_mode=trading_mode_val,
                 bot_config=self._config,  # type: ignore[attr-defined]
             )
+            if self._ftcache_pending_identity:
+                self._ftcache_client.set_bot_identity(self._ftcache_pending_identity)
+                self._ftcache_pending_identity = None
             logger.info(
                 "cache client ready for %s/%s",
                 self.id,  # type: ignore[attr-defined]
                 trading_mode_val,
             )
+            self._ftcache_disable_ccxt_ratelimit()
         except Exception as e:
             if not self._ftcache_warned:
                 logger.warning(
@@ -122,6 +146,35 @@ class CachedExchangeMixin:
                 )
                 self._ftcache_warned = True
             self._ftcache_client = False
+
+    def _ftcache_disable_ccxt_ratelimit(self) -> None:
+        """Reduce ccxt's built-in rate limiter when daemon is active.
+
+        The daemon handles rate limiting for mixin-controlled calls (OHLCV,
+        tickers, positions, balances).  But non-mixin calls (fetch_order,
+        create_order, fetch_l2_order_book) still go through ccxt directly
+        and need a throttle to avoid exhausting the shared rate limit budget.
+
+        We reduce from the config value (often 1000ms) to 200ms — fast enough
+        to not slow down order management, slow enough to prevent 15 bots from
+        flooding the API with unmetered calls.
+        """
+        target_rate_ms = 200
+        for api in (
+            getattr(self, "_api", None),
+            getattr(self, "_api_async", None),
+            getattr(self, "_ws_async", None),
+        ):
+            if api is None:
+                continue
+            old_rate = getattr(api, "rateLimit", 0)
+            if old_rate > target_rate_ms:
+                api.rateLimit = target_rate_ms
+                logger.info(
+                    "reduced ccxt rateLimit on %s from %dms to %dms"
+                    " (daemon handles mixin calls, ccxt throttles the rest)",
+                    type(api).__name__, old_rate, target_rate_ms,
+                )
 
     def _ftcache_warn_deprecated_config(self) -> None:
         """Inform the user that ccxt-level rate-limit knobs are now managed
@@ -195,38 +248,112 @@ class CachedExchangeMixin:
             )
         return self._ftcache_last_positions
 
+    _LOOP_LOCK_TIMEOUT_S: float = 5.0
+
+    def _ftcache_run_on_loop(self, coro):
+        """Run an async daemon call, serialized with _loop_lock.
+
+        Prevents event loop races between the worker thread
+        (refresh_latest_ohlcv) and the Uvicorn API thread.
+
+        Returns (True, result) on success.
+        Returns (False, None) if the lock is held beyond timeout.
+        Exceptions from the coroutine propagate normally.
+        """
+        lock = getattr(self, '_loop_lock', None)
+        if lock is None:
+            return False, None
+        if not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
+            return False, None
+        try:
+            return True, self.loop.run_until_complete(coro)  # type: ignore[attr-defined]
+        finally:
+            lock.release()
+
+    def _ftcache_local_backoff_check(self, priority: int | None) -> bool:
+        """Fallback when _loop_lock unavailable — conservative by default.
+
+        Only allows CRITICAL (orders) through. Everything else is shed
+        to prevent unmetered direct API calls.
+        """
+        effective_prio = priority if priority is not None else 2
+        if effective_prio <= OhlcvCacheClient.CRITICAL:
+            return True
+        return False
+
+    def _ftcache_report_429(self, method: str = "", pair: str = "") -> None:
+        """Notify daemon that this bot received a 429 on a direct ccxt call.
+
+        The daemon triggers backoff so ALL bots' subsequent requests are
+        queued by priority (CRITICAL first) at a reduced rate.
+        """
+        client = self._ftcache_get_client()
+        if client is None:
+            return
+        try:
+            ok, _ = self._ftcache_run_on_loop(
+                client.report_429(method=method, pair=pair),
+            )
+            if ok:
+                logger.info(
+                    "reported 429 to daemon (method=%s pair=%s)"
+                    " — all bots will queue by priority",
+                    method, pair,
+                )
+        except Exception as e:
+            logger.debug("report_429 to daemon failed (non-fatal): %s", e)
+
     def _ftcache_acquire_sync(self, priority: int | None = None, cost: float = 1.0) -> bool:
         """Acquire a rate token synchronously (blocks until granted).
 
         Called before any non-OHLCV REST call so that ALL API traffic
         from all bots shares the daemon's centralized rate limit.
 
-        Returns True if the token was granted, False if the request was
-        shed (429 backoff active, non-critical priority).
+        During a 429 backoff, the daemon queues this request and serves it
+        by priority (CRITICAL first). This call blocks until the token is
+        granted or times out.
+
+        Returns True when the token was granted (or daemon unavailable).
+        Returns False only when the _loop_lock is unavailable and local
+        backoff check rejects the request.
         """
         client = self._ftcache_get_client()
         if client is None:
             return True
         try:
-            loop = self.loop  # type: ignore[attr-defined]
-            if loop.is_running():
+            lock = getattr(self, '_loop_lock', None)
+            if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
                 self._ftcache_bump("acquire_skip_loop")
+                return self._ftcache_local_backoff_check(priority)
+            try:
+                self.loop.run_until_complete(  # type: ignore[attr-defined]
+                    asyncio.wait_for(
+                        client.acquire_rate_token(priority=priority, cost=cost),
+                        timeout=self._ACQUIRE_TIMEOUT_S,
+                    ),
+                )
+                self._ftcache_last_backoff_active = False
                 return True
-            loop.run_until_complete(
-                asyncio.wait_for(
-                    client.acquire_rate_token(priority=priority, cost=cost),
-                    timeout=self._ACQUIRE_TIMEOUT_S,
-                ),
+            finally:
+                lock.release()
+        except CacheTimedOut:
+            self._ftcache_bump("acquire_timeout")
+            logger.info(
+                "rate token acquire timed out after %.0fs — allowing but not rate-limited "
+                "(priority=%s, cost=%.0f)",
+                self._ACQUIRE_TIMEOUT_S, priority, cost,
             )
             return True
-        except CacheRateLimited:
-            self._ftcache_bump("rate_limited")
-            logger.info(
-                "rate token shed (429 backoff active) — skipping non-critical call"
-            )
-            return False
-        except (CacheUnavailable, TimeoutError):
+        except CacheUnavailable:
             self._ftcache_bump("acquire_timeout")
+            return True
+        except TimeoutError:
+            self._ftcache_bump("acquire_timeout")
+            logger.info(
+                "rate token acquire timed out after %.0fs — allowing "
+                "(priority=%s, cost=%.0f)",
+                self._ACQUIRE_TIMEOUT_S, priority, cost,
+            )
             return True
         except Exception as e:
             logger.debug("rate token acquire failed (%s), proceeding without", e)
@@ -306,13 +433,13 @@ class CachedExchangeMixin:
     ) -> Tickers:
         """Shared tickers: one fetch via daemon for all bots."""
         client = self._ftcache_get_client()
-        loop = self.loop  # type: ignore[attr-defined]
         if client is None:
             return super().get_tickers(  # type: ignore[misc]
                 symbols=symbols, cached=cached, market_type=market_type,
             )
-        if symbols is not None or loop.is_running():
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
+        if symbols is not None:
+            prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            self._ftcache_acquire_sync(priority=prio_gt)
             return super().get_tickers(  # type: ignore[misc]
                 symbols=symbols, cached=cached, market_type=market_type,
             )
@@ -328,9 +455,15 @@ class CachedExchangeMixin:
             mt_str = ""
             if market_type is not None:
                 mt_str = market_type.value if hasattr(market_type, "value") else str(market_type)
-            tickers = loop.run_until_complete(
+            ok, tickers = self._ftcache_run_on_loop(
                 client.get_tickers(market_type=mt_str),
             )
+            if not ok:
+                prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+                self._ftcache_acquire_sync(priority=prio_gt)
+                return super().get_tickers(  # type: ignore[misc]
+                    symbols=symbols, cached=cached, market_type=market_type,
+                )
             if not isinstance(tickers, dict):
                 logger.warning(
                     "daemon returned tickers as %s — falling back to ccxt",
@@ -346,6 +479,8 @@ class CachedExchangeMixin:
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
             self._ftcache_bump("stale_tickers")
+            self._ftcache_last_backoff_active = True
+            self._ftcache_last_backoff_ts = time.monotonic()
             if self._ftcache_tickers_fresh_ts:
                 age = time.monotonic() - self._ftcache_tickers_fresh_ts
             else:
@@ -374,10 +509,7 @@ class CachedExchangeMixin:
         self, pair: str | None = None, params: dict | None = None,
     ) -> list[CcxtPosition]:
         """Shared positions: first bot fetches, others read from cache."""
-        loop = self.loop  # type: ignore[attr-defined]
-
         if pair is not None:
-            # Try extracting from bulk cache instead of per-pair API call
             if self._ftcache_last_positions is not None:
                 age = time.monotonic() - self._ftcache_last_positions_ts
                 if age < 30.0:
@@ -385,82 +517,99 @@ class CachedExchangeMixin:
                         p for p in self._ftcache_last_positions
                         if p.get("symbol") == pair
                     ]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
             return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
 
         client = self._ftcache_get_client()
         if client is None:
             return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
-        if loop.is_running():
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
-            return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
 
-        # Try shared cache first
+        # Try shared cache first (thread-safe via _loop_lock)
         try:
-            hit, positions = loop.run_until_complete(
-                client.get_positions(),
-            )
-            if hit:
-                if not isinstance(positions, list) or (
-                    positions and not isinstance(positions[0], dict)
-                ):
-                    logger.warning(
-                        "daemon returned positions as %s — falling back to ccxt",
-                        type(positions[0]).__name__ if positions else type(positions).__name__,
+            ok, result = self._ftcache_run_on_loop(client.get_positions())
+            if ok:
+                hit, positions = result
+                if hit:
+                    if not isinstance(positions, list) or (
+                        positions and not isinstance(positions[0], dict)
+                    ):
+                        logger.warning(
+                            "daemon returned positions as %s — falling back to ccxt",
+                            type(positions[0]).__name__ if positions else type(positions).__name__,
+                        )
+                        raise CacheUnavailable("positions data corrupted")
+                    self._log_exchange_response(  # type: ignore[attr-defined]
+                        "fetch_positions", positions, add_info="from ftcache",
                     )
-                    raise CacheUnavailable("positions data corrupted")
-                self._log_exchange_response(  # type: ignore[attr-defined]
-                    "fetch_positions", positions, add_info="from ftcache",
-                )
-                self._ftcache_save_positions(positions)
-                self._ftcache_record_cached("fetch_positions")
-                return positions
+                    self._ftcache_save_positions(positions)
+                    self._ftcache_record_cached("fetch_positions")
+                    return positions
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
+            self._ftcache_last_backoff_active = True
+            self._ftcache_last_backoff_ts = time.monotonic()
             stale = self._ftcache_get_stale_positions()
             if stale is not None:
                 self._ftcache_bump("stale_positions")
                 return stale
             logger.warning(
                 "positions rate-limited, no local fallback"
-                " — forced direct fetch (first call)",
+                " — forced HIGH-priority fetch (first call, cost=2)",
             )
         except CacheUnavailable:
             pass
 
         # Cache miss — do the actual fetch (with rate token) and push result
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
-        positions = super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
+        prio_pos = self._ftcache_init_priority(OhlcvCacheClient.HIGH)
+        if not self._ftcache_acquire_sync(priority=prio_pos, cost=2.0):
+            stale = self._ftcache_get_stale_positions()
+            if stale is not None:
+                return stale
+            if not self._ftcache_init_complete:
+                logger.warning("positions shed during init — retrying CRITICAL")
+                self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+            else:
+                logger.warning("positions acquire shed + no stale data — returning empty")
+                return []
+        try:
+            positions = super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
+        except DDosProtection:
+            self._ftcache_last_backoff_active = True
+            self._ftcache_last_backoff_ts = time.monotonic()
+            stale = self._ftcache_get_stale_positions()
+            if stale is not None:
+                return stale
+            raise
         self._ftcache_save_positions(positions)
 
         try:
-            loop.run_until_complete(
-                client.push_positions(positions),
-            )
+            self._ftcache_run_on_loop(client.push_positions(positions))
         except CacheUnavailable:
             pass
 
         return positions
 
     # -------------------------------------------------------------------- rate-limited REST calls
+    # Weights match Hyperliquid API costs (see defaults.py HL_WEIGHT_MAP).
+    # For non-HL exchanges these are still 1.0 (flat mode in TokenBucket).
 
     def create_order(self, **kwargs) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
         return super().create_order(**kwargs)  # type: ignore[misc]
 
     def cancel_order(
         self, order_id: str, pair: str, params: dict | None = None,
     ) -> dict[str, Any]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
         return super().cancel_order(order_id, pair, params)  # type: ignore[misc]
 
     def fetch_order(
         self, order_id: str, pair: str, params: dict | None = None,
     ) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=1.0)
         return super().fetch_order(order_id, pair, params)  # type: ignore[misc]
 
     def get_balances(self, params: dict | None = None) -> CcxtBalances:
@@ -469,28 +618,39 @@ class CachedExchangeMixin:
             return super().get_balances(params)  # type: ignore[misc]
 
         client = self._ftcache_get_client()
-        loop = self.loop  # type: ignore[attr-defined]
-        if client is not None and not loop.is_running():
+        if client is not None:
             try:
-                hit, balances = loop.run_until_complete(client.get_balances())
-                if hit:
-                    self._ftcache_record_cached("get_balances")
-                    return balances
-            except (CacheUnavailable, CacheTimedOut):
+                ok, result = self._ftcache_run_on_loop(client.get_balances())
+                if ok:
+                    hit, balances = result
+                    if hit:
+                        self._ftcache_record_cached("get_balances")
+                        return balances
+            except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
                 pass
 
-        if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL):
+        prio = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+        if not self._ftcache_acquire_sync(priority=prio, cost=2.0):
             if hasattr(self, "_ftcache_last_balances") and self._ftcache_last_balances:
                 logger.info("get_balances shed — using last known balances")
                 return self._ftcache_last_balances
-            logger.warning("get_balances shed — no stale data, skipping (NOT calling ccxt)")
-            raise TemporaryError("get_balances shed during 429 backoff")
-        balances = super().get_balances(params)  # type: ignore[misc]
+            logger.warning(
+                "get_balances shed with no stale data (init?) "
+                "— retrying with CRITICAL priority to unblock startup",
+            )
+            if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0):
+                raise DDosProtection("get_balances shed even at CRITICAL priority")
+        try:
+            balances = super().get_balances(params)  # type: ignore[misc]
+        except DDosProtection:
+            self._ftcache_last_backoff_active = True
+            self._ftcache_last_backoff_ts = time.monotonic()
+            raise
         self._ftcache_last_balances = balances
 
-        if client is not None and not loop.is_running():
+        if client is not None:
             try:
-                loop.run_until_complete(client.push_balances(balances))
+                self._ftcache_run_on_loop(client.push_balances(balances))
             except CacheUnavailable:
                 pass
 
@@ -498,7 +658,7 @@ class CachedExchangeMixin:
 
     def fetch_l2_order_book(self, pair: str, limit: int = 100) -> OrderBook:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
         return super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
 
     # -------------------------------------------------------------------- remaining REST calls
@@ -509,38 +669,40 @@ class CachedExchangeMixin:
         from freqtrade.util.datetime_helpers import dt_ts
 
         client = self._ftcache_get_client()
-        loop = self.loop  # type: ignore[attr-defined]
-        if client is not None and not loop.is_running():
+        if client is not None:
             try:
-                hit, markets = loop.run_until_complete(client.get_markets())
-                if hit and markets:
-                    if not isinstance(markets, dict):
-                        logger.warning(
-                            "daemon returned markets as %s (len=%d)"
-                            " — falling back to direct ccxt fetch",
-                            type(markets).__name__, len(markets),
+                ok, result = self._ftcache_run_on_loop(client.get_markets())
+                if ok:
+                    hit, markets = result
+                    if hit and markets:
+                        if not isinstance(markets, dict):
+                            logger.warning(
+                                "daemon returned markets as %s (len=%d)"
+                                " — falling back to direct ccxt fetch",
+                                type(markets).__name__, len(markets),
+                            )
+                            raise CacheUnavailable("markets data is not a dict")
+                        self._markets = markets  # type: ignore[attr-defined]
+                        self._last_markets_refresh = dt_ts()
+                        self._ftcache_record_cached("reload_markets")
+                        logger.debug(
+                            "reload_markets from shared cache (%d symbols)",
+                            len(markets),
                         )
-                        raise CacheUnavailable("markets data is not a dict")
-                    self._markets = markets  # type: ignore[attr-defined]
-                    self._last_markets_refresh = dt_ts()
-                    self._ftcache_record_cached("reload_markets")
-                    logger.debug(
-                        "reload_markets from shared cache (%d symbols)",
-                        len(markets),
-                    )
-                    if (
-                        load_leverage_tiers
-                        and getattr(self, "trading_mode", None) == TradingMode.FUTURES
-                    ):
-                        self.fill_leverage_tiers()  # type: ignore[attr-defined]
-                    return
+                        if (
+                            load_leverage_tiers
+                            and getattr(self, "trading_mode", None) == TradingMode.FUTURES
+                        ):
+                            self.fill_leverage_tiers()  # type: ignore[attr-defined]
+                        return
             except (CacheRateLimited, CacheTimedOut):
                 if hasattr(self, "_markets") and self._markets:  # type: ignore[attr-defined]
                     logger.info("reload_markets shed — using existing markets")
                     return
             except CacheUnavailable:
                 pass
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
+        prio_mkts = self._ftcache_init_priority(OhlcvCacheClient.HIGH)
+        self._ftcache_acquire_sync(priority=prio_mkts, cost=20.0)
         return super().reload_markets(force, load_leverage_tiers=load_leverage_tiers)  # type: ignore[misc]
 
     def fetch_ticker(self, pair: str) -> Ticker:
@@ -561,29 +723,29 @@ class CachedExchangeMixin:
             if tickers and cache_age < 15.0:
                 pass
             else:
-                loop = self.loop  # type: ignore[attr-defined]
-                if not loop.is_running():
-                    try:
-                        all_tickers = loop.run_until_complete(
-                            client.get_tickers(market_type=""),
-                        )
+                try:
+                    ok, all_tickers = self._ftcache_run_on_loop(
+                        client.get_tickers(market_type=""),
+                    )
+                    if ok:
                         with self._cache_lock:  # type: ignore[attr-defined]
                             self._fetch_tickers_cache[cache_key] = all_tickers  # type: ignore[attr-defined]
                         self._ftcache_tickers_fresh_ts = time.monotonic()
                         if pair in all_tickers:
                             self._ftcache_record_cached("fetch_ticker", pair=pair)
                             return all_tickers[pair]
-                    except (CacheRateLimited, CacheTimedOut, CacheUnavailable):
-                        pass
+                except (CacheRateLimited, CacheTimedOut, CacheUnavailable):
+                    pass
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL):
+            prio_tick = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            if not self._ftcache_acquire_sync(priority=prio_tick):
                 cache_key = "fetch_tickers"
                 with self._cache_lock:  # type: ignore[attr-defined]
                     stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
                 if stale and pair in stale:
                     logger.debug("fetch_ticker shed — using stale cache for %s", pair)
                     return stale[pair]
-                raise TemporaryError(f"fetch_ticker shed for {pair} during 429 backoff")
+                raise DDosProtection(f"fetch_ticker shed for {pair} during 429 backoff")
         return super().fetch_ticker(pair)  # type: ignore[misc]
 
     def fetch_funding_rate(self, pair: str) -> FundingRate:
@@ -592,20 +754,21 @@ class CachedExchangeMixin:
             return super().fetch_funding_rate(pair)  # type: ignore[misc]
 
         client = self._ftcache_get_client()
-        loop = self.loop  # type: ignore[attr-defined]
-        if client is not None and not loop.is_running():
+        if client is not None:
             try:
-                hit, all_rates = loop.run_until_complete(client.get_funding_rates())
-                if hit and pair in all_rates:
-                    self._ftcache_record_cached("fetch_funding_rate")
-                    return all_rates[pair]
+                ok, result = self._ftcache_run_on_loop(client.get_funding_rates())
+                if ok:
+                    hit, all_rates = result
+                    if hit and pair in all_rates:
+                        self._ftcache_record_cached("fetch_funding_rate")
+                        return all_rates[pair]
             except (CacheRateLimited, CacheTimedOut):
                 pass
             except CacheUnavailable:
                 pass
 
         if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL):
-            raise TemporaryError(f"fetch_funding_rate shed for {pair} during 429 backoff")
+            raise DDosProtection(f"fetch_funding_rate shed for {pair} during 429 backoff")
         return super().fetch_funding_rate(pair)  # type: ignore[misc]
 
     def fetch_trading_fees(self) -> dict[str, Any]:
@@ -634,13 +797,14 @@ class CachedExchangeMixin:
     def get_leverage_tiers(self) -> dict[str, list[dict]]:
         """Fetch leverage tiers from daemon's shared cache when possible."""
         client = self._ftcache_get_client()
-        loop = self.loop  # type: ignore[attr-defined]
-        if client is not None and not loop.is_running():
+        if client is not None:
             try:
-                hit, tiers = loop.run_until_complete(client.get_leverage_tiers())
-                if hit and tiers:
-                    self._ftcache_record_cached("get_leverage_tiers")
-                    return tiers
+                ok, result = self._ftcache_run_on_loop(client.get_leverage_tiers())
+                if ok:
+                    hit, tiers = result
+                    if hit and tiers:
+                        self._ftcache_record_cached("get_leverage_tiers")
+                        return tiers
             except (CacheRateLimited, CacheTimedOut):
                 pass
             except CacheUnavailable:

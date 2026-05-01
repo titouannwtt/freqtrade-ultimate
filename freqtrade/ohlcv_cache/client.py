@@ -90,6 +90,8 @@ class OhlcvCacheClient:
         self._respawn_cfg: dict | None = respawn_cfg
         self._bot_identity: dict | None = None
         self._registered = False
+        self.hold_off_s: float = 0.0
+        self.hold_off_reason: str = ""
 
     # ---------------- connection lifecycle
 
@@ -172,9 +174,14 @@ class OhlcvCacheClient:
                 resp = loads_response(line)
                 if resp.get("ok"):
                     self._registered = True
+                    self.hold_off_s = float(resp.get("hold_off_s", 0))
+                    self.hold_off_reason = resp.get("hold_off_reason", "")
                     logger.info(
-                        "registered with fleet orchestrator (fleet_size=%d stagger=%.0fs)",
-                        resp.get("fleet_size", 0), resp.get("stagger_s", 0),
+                        "registered with fleet orchestrator "
+                        "(fleet_size=%d hold_off=%.0fs reason=%s)",
+                        resp.get("fleet_size", 0),
+                        self.hold_off_s,
+                        self.hold_off_reason or "none",
                     )
         except Exception as e:
             logger.debug("fleet register failed (non-fatal): %s", e)
@@ -315,6 +322,23 @@ class OhlcvCacheClient:
         )
 
     # ---------------- centralized rate limiter
+
+    async def report_429(self, method: str = "", pair: str = "") -> None:
+        """Notify daemon that a bot received a 429 on a direct ccxt call.
+
+        The daemon will trigger backoff for ALL bots so subsequent requests
+        are queued by priority instead of hitting the exchange.
+        """
+        try:
+            await self._send_and_receive({
+                "op": "report_429",
+                "req_id": uuid.uuid4().hex,
+                "exchange": self.exchange_id,
+                "method": method,
+                "pair": pair,
+            })
+        except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
+            pass
 
     async def acquire_rate_token(
         self, priority: int | None = None, cost: float = 1.0,

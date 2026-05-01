@@ -39,6 +39,7 @@ from typing import Any
 
 from freqtrade.ohlcv_cache.coordinator import RequestCoordinator
 from freqtrade.ohlcv_cache.defaults import (
+    EXCHANGE_DEFAULTS,
     resolve_exchange_config,
     resolve_global_config,
 )
@@ -87,16 +88,33 @@ class TokenBucket:
     NORMAL = 2
     LOW = 3
 
-    # Requests at or above this priority are shed during backoff
-    _SHED_THRESHOLD = NORMAL
+    # Graduated backoff levels: (duration_s, shed_threshold, rate_factor, label)
+    # shed_threshold: requests at or above this priority are shed
+    # rate_factor: divisor applied to refill rate (higher = slower)
+    _BACKOFF_LEVELS: list[tuple[int, int, float, str]] = [
+        # Level 1 — SOFT: shed only LOW, rate ÷2
+        (15, 3, 2.0, "SOFT"),     # LOW=3 → only LOW shed
+        # Level 2 — MEDIUM: shed NORMAL+LOW, rate ÷4
+        (30, 2, 4.0, "MEDIUM"),   # NORMAL=2 → NORMAL+LOW shed
+        # Level 3 — HARD: shed everything except CRITICAL, rate ÷10
+        # 65s > HL's 60s rolling window so backoff outlasts the rate limit
+        (65, 1, 10.0, "HARD"),    # HIGH=1 → HIGH+NORMAL+LOW shed
+    ]
 
-    _BACKOFF_DURATIONS = [30, 60, 120, 240]  # escalating on consecutive 429s
-    _BACKOFF_COOLDOWN_S = 300  # reset escalation after 5 min without 429
+    _BACKOFF_COOLDOWN_S = 90  # reset escalation after 90s without 429
 
-    def __init__(self, rate_per_s: float, burst: float) -> None:
+    def __init__(
+        self, rate_per_s: float, burst: float,
+        weight_mode: bool = False,
+        weight_budget_per_min: int = 0,
+        exchange: str = "",
+    ) -> None:
         self.rate_per_s = rate_per_s
         self.burst = burst
         self.tokens = float(burst)
+        self.weight_mode = weight_mode
+        self.weight_budget_per_min = weight_budget_per_min
+        self.exchange = exchange
         self._last_refill = time.monotonic()
         self._lock = asyncio.Lock()
         self._backoff_until = 0.0
@@ -104,13 +122,30 @@ class TokenBucket:
         self._rampup_until = 0.0
         self._consecutive_backoffs = 0
         self._last_backoff_trigger = 0.0
+        self._current_shed_threshold = self.LOW + 1  # shed nothing by default
+        self._current_backoff_label = ""
         # Priority queue: (priority, -capital, counter, cost, future)
         self._waiters: list[tuple[int, float, int, float, asyncio.Future]] = []
         self._counter = 0
         self._drain_task: asyncio.Task | None = None
         # Stats
         self.shed_count = 0
+        self.queued_during_backoff = 0
         self.backoff_count = 0
+        # Weight tracking: sliding window of (monotonic_ts, weight) for last 60s
+        self._weight_window: deque[tuple[float, float]] = deque()
+        self._weight_used_last_min: float = 0.0
+        if weight_mode:
+            logger.info(
+                "TokenBucket[%s] WEIGHT MODE: %.1f weight/sec, burst=%.0f, "
+                "budget=%d weight/min",
+                exchange, rate_per_s, burst, weight_budget_per_min,
+            )
+        else:
+            logger.info(
+                "TokenBucket[%s] FLAT MODE: %.1f req/sec, burst=%.0f",
+                exchange, rate_per_s, burst,
+            )
 
     @property
     def backoff_active(self) -> bool:
@@ -139,21 +174,68 @@ class TokenBucket:
         self._last_refill = now
         self.tokens = min(self.burst, self.tokens + elapsed * self._effective_rate())
 
+    def _record_weight(self, cost: float) -> None:
+        """Track weight consumed in a 60s sliding window."""
+        now = time.monotonic()
+        self._weight_window.append((now, cost))
+        self._weight_used_last_min += cost
+        cutoff = now - 60.0
+        while self._weight_window and self._weight_window[0][0] < cutoff:
+            _, old_cost = self._weight_window.popleft()
+            self._weight_used_last_min -= old_cost
+        self._weight_used_last_min = max(0.0, self._weight_used_last_min)
+
+    @property
+    def weight_used_last_min(self) -> float:
+        now = time.monotonic()
+        cutoff = now - 60.0
+        while self._weight_window and self._weight_window[0][0] < cutoff:
+            _, old_cost = self._weight_window.popleft()
+            self._weight_used_last_min -= old_cost
+        return max(0.0, self._weight_used_last_min)
+
     async def acquire(
         self, cost: float = 1.0, priority: int = 2, capital: float = 0.0,
     ) -> None:
-        # Circuit breaker: shed non-critical requests during backoff
-        if priority >= self._SHED_THRESHOLD and self.backoff_active:
-            self.shed_count += 1
-            raise RateLimitShed(
-                f"request shed (priority={priority}) during 429 backoff "
-                f"({self.backoff_remaining_s:.0f}s remaining)"
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "acquire request: cost=%.1f priority=%d capital=%.0f "
+                "tokens=%.1f/%s backoff=%s weight_1m=%.0f%s",
+                cost, priority, capital,
+                self.tokens, self.burst,
+                "ACTIVE" if self.backoff_active else "off",
+                self.weight_used_last_min,
+                f"/{self.weight_budget_per_min}" if self.weight_mode else "",
             )
+        # Clear stale backoff state if backoff has expired
+        if not self.backoff_active:
+            self._clear_backoff_state()
+
+        # During backoff: queue ALL requests (served by priority via drain loop)
+        if self.backoff_active:
+            self.queued_during_backoff += 1
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "backoff active — queuing request (priority=%d, cost=%.0f, "
+                    "queue_depth=%d, %s %.0fs remaining)",
+                    priority, cost, len(self._waiters) + 1,
+                    self._current_backoff_label, self.backoff_remaining_s,
+                )
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future = loop.create_future()
+            entry = (priority, -capital, self._counter, cost, future)
+            self._counter += 1
+            heapq.heappush(self._waiters, entry)
+            self._ensure_drain()
+            await future
+            self._record_weight(cost)
+            return
 
         async with self._lock:
             self._refill()
             if not self._waiters and self.tokens >= cost:
                 self.tokens -= cost
+                self._record_weight(cost)
                 return
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -162,6 +244,7 @@ class TokenBucket:
         heapq.heappush(self._waiters, entry)
         self._ensure_drain()
         await future
+        self._record_weight(cost)
 
     def _ensure_drain(self) -> None:
         if self._drain_task is None or self._drain_task.done():
@@ -174,12 +257,11 @@ class TokenBucket:
         while self._waiters:
             async with self._lock:
                 now = time.monotonic()
-                if now < self._backoff_until:
-                    self._shed_low_priority_waiters()
-                    wait = self._backoff_until - now
-                else:
+                in_backoff = now < self._backoff_until
+
+                if not in_backoff:
+                    self._clear_backoff_state()
                     if self._backoff_factor > 1.0:
-                        self._shed_low_priority_waiters()
                         self._backoff_factor = max(1.0, self._backoff_factor / 2.0)
                         served_since_backoff = 0
                         if self._backoff_factor <= 1.0:
@@ -188,44 +270,44 @@ class TokenBucket:
                             logger.info(
                                 "back-off relaxed to %.1fx", self._backoff_factor,
                             )
-                    self._refill()
-                    if self._waiters:
-                        entry = self._waiters[0]
-                        cost = entry[3]
-                        if self.tokens >= cost:
-                            heapq.heappop(self._waiters)
-                            self.tokens -= cost
-                            future = entry[4]
-                            if not future.done():
-                                future.set_result(None)
-                            served_since_backoff += 1
-                            effective_rate = self._effective_rate()
-                            spacing = 1.0 / max(effective_rate, 0.1)
-                            if served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
-                                spacing = max(spacing, 2.0)
-                            await asyncio.sleep(spacing)
+                    if self.weight_mode and self.weight_budget_per_min > 0:
+                        used = self.weight_used_last_min
+                        headroom = self.weight_budget_per_min * 0.50
+                        if used > headroom:
+                            wait_for_decay = max(1.0, (used - headroom) / max(self._effective_rate(), 0.1))
+                            wait_for_decay = min(wait_for_decay, 15.0)
+                            if served_since_backoff == 0:
+                                logger.info(
+                                    "post-backoff weight gate: %.0f/%.0f used "
+                                    "(headroom=%.0f%%), waiting %.1fs for decay",
+                                    used, self.weight_budget_per_min,
+                                    headroom / self.weight_budget_per_min * 100,
+                                    wait_for_decay,
+                                )
+                            await asyncio.sleep(wait_for_decay)
                             continue
-                    effective_rate = self._effective_rate()
-                    needed = (self._waiters[0][3] - self.tokens) if self._waiters else 1.0
-                    wait = needed / max(effective_rate, 0.001)
-            await asyncio.sleep(wait)
 
-    def _shed_low_priority_waiters(self) -> None:
-        """Cancel all NORMAL/LOW waiters during backoff — they should not wait."""
-        kept: list[tuple[int, float, int, float, asyncio.Future]] = []
-        for entry in self._waiters:
-            priority, _cap, _cnt, _cost, future = entry
-            if priority >= self._SHED_THRESHOLD:
-                if not future.done():
-                    future.set_exception(RateLimitShed("shed during backoff"))
-                self.shed_count += 1
-            else:
-                kept.append(entry)
-        if len(kept) < len(self._waiters):
-            shed_n = len(self._waiters) - len(kept)
-            logger.info("shed %d low-priority waiters during backoff", shed_n)
-            self._waiters = kept
-            heapq.heapify(self._waiters)
+                self._refill()
+                if self._waiters:
+                    entry = self._waiters[0]
+                    cost = entry[3]
+                    if self.tokens >= cost:
+                        heapq.heappop(self._waiters)
+                        self.tokens -= cost
+                        future = entry[4]
+                        if not future.done():
+                            future.set_result(None)
+                        served_since_backoff += 1
+                        effective_rate = self._effective_rate()
+                        spacing = 1.0 / max(effective_rate, 0.1)
+                        if in_backoff or served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
+                            spacing = max(spacing, 2.0)
+                        await asyncio.sleep(spacing)
+                        continue
+                effective_rate = self._effective_rate()
+                needed = (self._waiters[0][3] - self.tokens) if self._waiters else 1.0
+                wait = needed / max(effective_rate, 0.001)
+            await asyncio.sleep(wait)
 
     def trigger_backoff(
         self, factor: float = 2.0, event_log: EventLog | None = None,
@@ -233,33 +315,76 @@ class TokenBucket:
     ) -> None:
         now = time.monotonic()
         if now < self._backoff_until:
+            logger.debug(
+                "trigger_backoff ignored — already in %s backoff (%.0fs remaining)",
+                self._current_backoff_label, self.backoff_remaining_s,
+            )
             return
         # Reset escalation if enough time passed since last 429
         if (now - self._last_backoff_trigger) > self._BACKOFF_COOLDOWN_S:
+            if self._consecutive_backoffs > 0:
+                logger.info(
+                    "backoff escalation reset (%.0fs since last 429, cooldown=%.0fs)",
+                    now - self._last_backoff_trigger, self._BACKOFF_COOLDOWN_S,
+                )
             self._consecutive_backoffs = 0
-        idx = min(self._consecutive_backoffs, len(self._BACKOFF_DURATIONS) - 1)
-        duration_s = self._BACKOFF_DURATIONS[idx]
+
+        idx = min(self._consecutive_backoffs, len(self._BACKOFF_LEVELS) - 1)
+        duration_s, shed_threshold, rate_factor, label = self._BACKOFF_LEVELS[idx]
         self._consecutive_backoffs += 1
         self._last_backoff_trigger = now
-        self._backoff_factor = min(max(self._backoff_factor, factor), 4.0)
+        self._backoff_factor = rate_factor
         self._backoff_until = now + duration_s
-        rampup_s = min(duration_s * 0.5, 30.0)
+        self._current_shed_threshold = shed_threshold
+        self._current_backoff_label = label
+        rampup_s = min(duration_s * 0.5, 15.0)
         self._rampup_until = now + duration_s + rampup_s
         self.backoff_count += 1
+
+        queued_n = len(self._waiters)
         logger.warning(
-            "rate-limit back-off triggered: factor=%.1fx for %.0fs "
-            "(level %d/%d, NORMAL/LOW requests will be shed)",
-            self._backoff_factor, duration_s,
-            idx + 1, len(self._BACKOFF_DURATIONS),
+            "429 backoff → %s: %.0fs, rate÷%.0f, queuing all requests by priority "
+            "(level %d/%d, escalation=%d, %d already queued)",
+            label, duration_s, rate_factor,
+            idx + 1, len(self._BACKOFF_LEVELS),
+            self._consecutive_backoffs, queued_n,
         )
         if event_log:
             event_log.emit(
-                "backoff_start", exchange=exchange,
+                "backoff_start", exchange=exchange or self.exchange,
                 duration_s=duration_s,
                 level=idx + 1,
-                factor=self._backoff_factor,
+                label=label,
+                factor=rate_factor,
+                queued=queued_n,
             )
-        self._shed_low_priority_waiters()
+
+    def _clear_backoff_state(self) -> None:
+        """Reset shed threshold and de-escalate when backoff expires.
+
+        Each successful backoff completion (no new 429 during the period)
+        steps escalation down by 1.  Combined with the post-backoff weight
+        gate this breaks the HARD→burst→429→HARD permanent cycle.
+        """
+        if not self.backoff_active and self._current_shed_threshold <= self.LOW:
+            old_label = self._current_backoff_label
+            self._current_shed_threshold = self.LOW + 1
+            if old_label:
+                if self._consecutive_backoffs > 0:
+                    self._consecutive_backoffs = max(0, self._consecutive_backoffs - 1)
+                    logger.info(
+                        "backoff %s expired — de-escalated to level %d/%d, "
+                        "resuming all priorities",
+                        old_label, self._consecutive_backoffs,
+                        len(self._BACKOFF_LEVELS),
+                    )
+                else:
+                    logger.info(
+                        "backoff %s expired — shed threshold cleared, "
+                        "resuming all priorities",
+                        old_label,
+                    )
+                self._current_backoff_label = ""
 
     def relax_backoff(self) -> None:
         if self._backoff_factor > 1.0:
@@ -287,11 +412,13 @@ class ExchangeFetcher:
     def __init__(
         self, exchange: str, trading_mode: str, budget: TokenBucket,
         event_log: EventLog | None = None,
+        weight_map: dict[str, float] | None = None,
     ) -> None:
         self.exchange = exchange
         self.trading_mode = trading_mode
         self.budget = budget
         self._event_log = event_log
+        self._weight_map = weight_map or {}
         self._client: Any = None
         self._lock = asyncio.Lock()
 
@@ -327,7 +454,8 @@ class ExchangeFetcher:
         params: dict[str, Any] = {}
         if candle_type and candle_type not in ("spot", "futures"):
             params["price"] = candle_type
-        await self.budget.acquire(1.0, priority=priority, capital=capital)
+        ohlcv_weight = self._weight_map.get("fetch", 1.0)
+        await self.budget.acquire(ohlcv_weight, priority=priority, capital=capital)
         try:
             data = await asyncio.wait_for(
                 client.fetch_ohlcv(
@@ -700,9 +828,20 @@ class Daemon:
             b = TokenBucket(
                 rate_per_s=ex_cfg.get("rate_per_s", 5),
                 burst=ex_cfg.get("burst", 10),
+                weight_mode=ex_cfg.get("weight_mode", False),
+                weight_budget_per_min=int(ex_cfg.get("weight_budget_per_min", 0)),
+                exchange=exchange,
             )
             self.budgets[exchange] = b
         return b
+
+    def _get_weight(self, exchange: str, op: str) -> float:
+        """Resolve the API weight for a given operation on an exchange."""
+        ex_cfg = self._exchange_cfg(exchange)
+        wmap = ex_cfg.get("weight_map")
+        if wmap:
+            return float(wmap.get(op, 1.0))
+        return 1.0
 
     def _collect_budget_stats(self) -> dict:
         """Aggregate token bucket state across all exchanges for stats op."""
@@ -715,24 +854,35 @@ class Daemon:
             for waiter in bucket._waiters:
                 prio_name = prio_names.get(waiter[0], "low")
                 q_depths[prio_name] += 1
-            result[f"budget_{exchange}"] = {
+            budget_entry: dict[str, Any] = {
                 "tokens_available": round(bucket.tokens, 2),
                 "tokens_max": bucket.burst,
-                "refill_rate": bucket.rate_per_s,
+                "refill_rate": round(bucket.rate_per_s, 2),
+                "weight_mode": bucket.weight_mode,
                 "backoff_active": bucket.backoff_active,
                 "backoff_factor": round(bucket._backoff_factor, 2),
                 "backoff_remaining_s": round(backoff_remaining, 1),
                 "queue_depths": q_depths,
                 "shed_count": bucket.shed_count,
+                "queued_during_backoff": bucket.queued_during_backoff,
                 "backoff_count": bucket.backoff_count,
                 "consecutive_backoffs": bucket._consecutive_backoffs,
+                "current_backoff_label": bucket._current_backoff_label or "none",
+                "current_shed_threshold": bucket._current_shed_threshold,
                 "current_backoff_duration_s": (
-                    bucket._BACKOFF_DURATIONS[
+                    bucket._BACKOFF_LEVELS[
                         min(bucket._consecutive_backoffs - 1,
-                            len(bucket._BACKOFF_DURATIONS) - 1)
-                    ] if bucket._consecutive_backoffs > 0 else 0
+                            len(bucket._BACKOFF_LEVELS) - 1)
+                    ][0] if bucket._consecutive_backoffs > 0 else 0
                 ),
             }
+            if bucket.weight_mode:
+                budget_entry["weight_used_last_min"] = round(bucket.weight_used_last_min, 1)
+                budget_entry["weight_budget_per_min"] = bucket.weight_budget_per_min
+                budget_entry["weight_utilization_pct"] = round(
+                    bucket.weight_used_last_min / bucket.weight_budget_per_min * 100, 1
+                ) if bucket.weight_budget_per_min > 0 else 0.0
+            result[f"budget_{exchange}"] = budget_entry
         if len(self.budgets) == 1:
             only_key = next(iter(result))
             for k, v in result[only_key].items():
@@ -743,8 +893,12 @@ class Daemon:
         k = (exchange, trading_mode)
         f = self.fetchers.get(k)
         if f is None:
-            f = ExchangeFetcher(exchange, trading_mode, self._get_budget(exchange),
-                                event_log=self.event_log)
+            ex_cfg = self._exchange_cfg(exchange)
+            f = ExchangeFetcher(
+                exchange, trading_mode, self._get_budget(exchange),
+                event_log=self.event_log,
+                weight_map=ex_cfg.get("weight_map"),
+            )
             self.fetchers[k] = f
         return f
 
@@ -910,6 +1064,7 @@ class Daemon:
 
         had_any_cache = series.n_candles > 0
         errors = 0
+        shed_errors = 0
         for chunk in chunks:
             key = (
                 exchange, trading_mode, pair, timeframe, candle_type,
@@ -922,6 +1077,9 @@ class Daemon:
                 )
             try:
                 await self.coordinator.run(key, _do_fetch)
+            except RateLimitShed:
+                errors += 1
+                shed_errors += 1
             except Exception:
                 errors += 1
 
@@ -940,12 +1098,18 @@ class Daemon:
 
         data_rows = series.slice_range(start_ms, end_ms)
         if not data_rows and errors:
+            if shed_errors > 0:
+                err_type = "RateLimitShed"
+                err_msg = f"{errors} chunk(s) shed during backoff, no cached data"
+            else:
+                err_type = "FetchFailed"
+                err_msg = f"{errors} chunk(s) failed, no cached data"
             return {
                 "req_id": req["req_id"], "ok": False,
                 "pair": pair, "timeframe": timeframe,
                 "candle_type": candle_type,
-                "error_type": "FetchFailed",
-                "error_message": f"{errors} chunk(s) failed, no cached data",
+                "error_type": err_type,
+                "error_message": err_msg,
                 "latency_ms": (time.monotonic() - t0) * 1000,
             }
 
@@ -981,34 +1145,51 @@ class Daemon:
         Bots call this before any non-OHLCV REST call (create_order, etc.)
         so ALL API traffic shares one rate limit.
 
-        During a 429 backoff, NORMAL/LOW priority requests are immediately
-        refused with ``throttled: true`` so bots can skip non-essential work.
-        CRITICAL/HIGH requests (orders, exits) always go through.
+        During a 429 backoff, requests are queued and served by priority
+        (CRITICAL first) at a reduced rate. The bot blocks until its token
+        is granted.
         """
         exchange = req.get("exchange", "hyperliquid")
         priority = int(req.get("priority", TokenBucket.NORMAL))
         capital = float(req.get("capital", 0.0))
-        cost = float(req.get("cost", 1.0))
+        default_weight = self._get_weight(exchange, "acquire")
+        cost = float(req.get("cost", default_weight))
         budget = self._get_budget(exchange)
         self.stats.acquire_total += 1
-        try:
-            await budget.acquire(cost, priority=priority, capital=capital)
-        except RateLimitShed:
-            return {
-                "req_id": req.get("req_id", ""), "ok": False,
-                "throttled": True,
-                "backoff_remaining_s": budget.backoff_remaining_s,
-                "error_type": "RateLimitShed",
-                "error_message": (
-                    f"429 backoff active ({budget.backoff_remaining_s:.0f}s left)"
-                    f" — non-critical request shed (priority={priority})"
-                ),
-            }
+        await budget.acquire(cost, priority=priority, capital=capital)
         resp: dict[str, Any] = {"req_id": req.get("req_id", ""), "ok": True}
         if budget.backoff_active:
             resp["backoff_active"] = True
             resp["backoff_remaining_s"] = budget.backoff_remaining_s
         return resp
+
+    async def _handle_report_429(self, req: dict) -> dict:
+        """A bot reports a 429 received on a direct ccxt call.
+
+        Triggers the same backoff as daemon-internal 429s so ALL bots
+        queue their requests through the priority system.
+        """
+        exchange = req.get("exchange", "hyperliquid")
+        method = req.get("method", "unknown")
+        pair = req.get("pair", "")
+        budget = self._get_budget(exchange)
+        logger.warning(
+            "bot reported 429 on direct ccxt call: %s %s — triggering backoff",
+            method, pair or "(no pair)",
+        )
+        if self._event_log:
+            self._event_log.emit(
+                "rate_limit_429", exchange=exchange,
+                method=method, pair=pair, source="bot_report",
+            )
+        budget.trigger_backoff(
+            2.0, event_log=self._event_log, exchange=exchange,
+        )
+        return {
+            "req_id": req.get("req_id", ""), "ok": True,
+            "backoff_active": budget.backoff_active,
+            "backoff_remaining_s": budget.backoff_remaining_s,
+        }
 
     # --------- centralized rate limiter: shared tickers
 
@@ -1048,7 +1229,11 @@ class Daemon:
         self._tickers_inflight[cache_key] = evt
         try:
             budget = self._get_budget(exchange)
-            await budget.acquire(1.0, priority=TokenBucket.NORMAL)
+            tickers_weight = self._get_weight(exchange, "tickers")
+            logger.debug(
+                "tickers fetch starting for %s (weight=%.0f)", cache_key, tickers_weight,
+            )
+            await budget.acquire(tickers_weight, priority=TokenBucket.NORMAL)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             params: dict[str, Any] = {}
@@ -1209,7 +1394,11 @@ class Daemon:
         self._markets_inflight[cache_key] = evt
         try:
             budget = self._get_budget(exchange)
-            await budget.acquire(1.0, priority=TokenBucket.NORMAL)
+            markets_weight = self._get_weight(exchange, "markets")
+            logger.debug(
+                "markets fetch starting for %s (weight=%.0f)", cache_key, markets_weight,
+            )
+            await budget.acquire(markets_weight, priority=TokenBucket.NORMAL)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
@@ -1282,7 +1471,11 @@ class Daemon:
         self._funding_rates_inflight[cache_key] = evt
         try:
             budget = self._get_budget(exchange)
-            await budget.acquire(1.0, priority=TokenBucket.NORMAL)
+            fr_weight = self._get_weight(exchange, "funding_rates")
+            logger.debug(
+                "funding_rates fetch starting for %s (weight=%.0f)", cache_key, fr_weight,
+            )
+            await budget.acquire(fr_weight, priority=TokenBucket.NORMAL)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
@@ -1344,7 +1537,11 @@ class Daemon:
         self._leverage_tiers_inflight[cache_key] = evt
         try:
             budget = self._get_budget(exchange)
-            await budget.acquire(1.0, priority=TokenBucket.LOW)
+            lt_weight = self._get_weight(exchange, "leverage_tiers")
+            logger.debug(
+                "leverage_tiers fetch starting for %s (weight=%.0f)", cache_key, lt_weight,
+            )
+            await budget.acquire(lt_weight, priority=TokenBucket.LOW)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
@@ -1376,6 +1573,44 @@ class Daemon:
 
     # --------- fleet handlers
 
+    def _compute_hold_off(self, exchange: str, initializing_count: int) -> tuple[float, str]:
+        """Compute how long a newly registering bot should wait before heavy init.
+
+        Returns (hold_off_s, reason).
+        """
+        reasons: list[str] = []
+        hold_off = 0.0
+
+        # 1. Stagger based on how many bots are already initializing
+        if initializing_count > 1:
+            stagger = (initializing_count - 1) * 15.0
+            hold_off += stagger
+            reasons.append(f"{initializing_count} bots initializing (+{stagger:.0f}s)")
+
+        # 2. If backoff is active, wait for it to expire + margin
+        budget = self.budgets.get(exchange)
+        if budget and budget.backoff_active:
+            remaining = budget.backoff_remaining_s
+            backoff_hold = remaining + 10.0
+            hold_off += backoff_hold
+            reasons.append(
+                f"{budget._current_backoff_label} backoff active "
+                f"({remaining:.0f}s remaining, +{backoff_hold:.0f}s)"
+            )
+
+        # 3. If weight utilization is high (>70%), add delay
+        if budget and budget.weight_mode and budget.weight_budget_per_min > 0:
+            util_pct = budget.weight_used_last_min / budget.weight_budget_per_min * 100
+            if util_pct > 70:
+                load_hold = 15.0
+                hold_off += load_hold
+                reasons.append(f"high load ({util_pct:.0f}% weight util, +{load_hold:.0f}s)")
+
+        # Cap at 120s to prevent indefinite wait
+        hold_off = min(hold_off, 120.0)
+        reason = "; ".join(reasons) if reasons else "none"
+        return hold_off, reason
+
     def _handle_register(self, req: dict, conn_id: int) -> dict:
         bot_id = req.get("bot_id", "")
         if not bot_id:
@@ -1383,23 +1618,30 @@ class Daemon:
                     "error_message": "bot_id required"}
         entry = self.registry.register(bot_id, req, conn_id)
         initializing_count = self.registry.count_initializing(entry.exchange)
-        stagger_s = max(0.0, (initializing_count - 1) * 15.0)
+        hold_off_s, hold_off_reason = self._compute_hold_off(
+            entry.exchange, initializing_count,
+        )
+
         self.event_log.emit("bot_connect", bot_id=bot_id,
                             exchange=entry.exchange, strategy=entry.strategy,
                             pid=entry.pid, config_file=entry.config_file)
-        if stagger_s > 0:
-            self.event_log.emit("stagger_applied", bot_id=bot_id,
-                                stagger_s=stagger_s,
+        if hold_off_s > 0:
+            self.event_log.emit("admission_held", bot_id=bot_id,
+                                hold_off_s=round(hold_off_s, 1),
+                                reason=hold_off_reason,
                                 initializing_count=initializing_count)
         logger.info(
-            "bot registered: %s (exchange=%s strategy=%s pid=%d) fleet_size=%d stagger=%.0fs",
+            "bot registered: %s (exchange=%s strategy=%s pid=%d) "
+            "fleet_size=%d hold_off=%.0fs reason=%s",
             bot_id, entry.exchange, entry.strategy, entry.pid,
-            self.registry.size, stagger_s,
+            self.registry.size, hold_off_s, hold_off_reason,
         )
         return {
             "req_id": req.get("req_id", ""),
             "ok": True,
-            "stagger_s": stagger_s,
+            "stagger_s": hold_off_s,
+            "hold_off_s": hold_off_s,
+            "hold_off_reason": hold_off_reason,
             "fleet_size": self.registry.size,
         }
 
@@ -1421,13 +1663,19 @@ class Daemon:
     def _handle_fleet_status(self, req: dict) -> dict:
         budget_stats: dict[str, dict] = {}
         for exchange, bucket in self.budgets.items():
-            budget_stats[exchange] = {
+            entry: dict[str, Any] = {
                 "tokens_available": round(bucket.tokens, 1),
                 "tokens_max": bucket.burst,
+                "weight_mode": bucket.weight_mode,
                 "backoff_active": bucket.backoff_active,
                 "shed_count": bucket.shed_count,
+                "queued_during_backoff": bucket.queued_during_backoff,
                 "backoff_count": bucket.backoff_count,
             }
+            if bucket.weight_mode:
+                entry["weight_used_last_min"] = round(bucket.weight_used_last_min, 1)
+                entry["weight_budget_per_min"] = bucket.weight_budget_per_min
+            budget_stats[exchange] = entry
         return {
             "req_id": req.get("req_id", ""),
             "ok": True,
@@ -1507,6 +1755,8 @@ class Daemon:
             }
         if op == "acquire":
             return await self._handle_acquire(req)
+        if op == "report_429":
+            return await self._handle_report_429(req)
         if op == "tickers":
             return await self._handle_tickers(req)
         if op == "positions_put":
@@ -1670,12 +1920,19 @@ class Daemon:
         budget_lines = []
         for exchange, bucket in self.budgets.items():
             q_total = len(bucket._waiters)
+            weight_info = ""
+            if bucket.weight_mode:
+                w_used = bucket.weight_used_last_min
+                w_budget = bucket.weight_budget_per_min
+                w_pct = (w_used / w_budget * 100) if w_budget > 0 else 0
+                weight_info = f" w={w_used:.0f}/{w_budget}({w_pct:.0f}%)"
             budget_lines.append(
                 f"{exchange}: tokens={bucket.tokens:.1f}/{bucket.burst} "
                 f"backoff={'ACTIVE' if bucket.backoff_active else 'off'} "
-                f"queue={q_total} shed={bucket.shed_count} "
+                f"queue={q_total} queued_bo={bucket.queued_during_backoff} "
                 f"429s={bucket.backoff_count} "
                 f"escalation={bucket._consecutive_backoffs}"
+                f"{weight_info}"
             )
         budget_str = " | ".join(budget_lines) if budget_lines else "none"
         conn_stats = (
