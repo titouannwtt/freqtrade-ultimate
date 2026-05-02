@@ -246,6 +246,10 @@ CONF_SCHEMA = {
             "type": "string",
             "enum": BACKTEST_CACHE_AGE,
         },
+        "skip_wallet_history_migration": {
+            "description": "Disable wallet history migration.",
+            "type": "boolean",
+        },
         # Hyperopt
         "hyperopt_path": {
             "description": "Specify additional lookup path for Hyperopt Loss functions.",

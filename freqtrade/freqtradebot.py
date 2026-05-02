@@ -130,132 +130,145 @@ class FreqtradeBot(LoggingMixin):
         exchange_config: ExchangeConfig = deepcopy(config["exchange"])
         # Remove credentials from original exchange config to avoid accidental credential exposure
         remove_exchange_credentials(config["exchange"], True)
-
-        self.exchange = ExchangeResolver.load_exchange(
-            self.config, exchange_config=exchange_config, load_leverage_tiers=True
-        )
-        _tracer.mark("exchange loaded", exchange=self.exchange.name)
-
-        # Register with fleet orchestrator (ftcache extension)
-        config_files = config.get("config_files", [""])
-        bot_identity = {
-            "bot_id": config.get("bot_name", ""),
-            "config_file": Path(config_files[0]).name if config_files else "",
-            "exchange": config["exchange"]["name"],
-            "trading_mode": config.get("trading_mode", "spot"),
-            "strategy": config.get("strategy", ""),
-            "timeframe": config.get("timeframe", "15m"),
-            "dry_run": config.get("dry_run", False),
-            "api_port": config.get("api_server", {}).get("listen_port", 0),
-            "pid": os.getpid(),
-        }
-        ftcache_client = getattr(self.exchange, '_ftcache_client', None)
-        if ftcache_client and ftcache_client:
-            ftcache_client.set_bot_identity(bot_identity)
-        else:
-            self.exchange._ftcache_pending_identity = bot_identity
-
-        self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
-        _tracer.mark("strategy loaded", strategy=self.strategy.__class__.__name__)
-
-        # Check config consistency here since strategies can set certain options
-        validate_config_consistency(config)
-        self.exchange.validate_config(self.config)
-        _tracer.mark("config validated")
-
-        init_db(self.config["db_url"])
-        _tracer.mark("db initialized")
-
-        self.wallets = Wallets(self.config, self.exchange)
-        _tracer.mark("wallets synced")
-
-        PairLocks.timeframe = self.config["timeframe"]
-
-        self.trading_mode: TradingMode = self.config.get("trading_mode", TradingMode.SPOT)
-        self.margin_mode: MarginMode = self.config.get("margin_mode", MarginMode.NONE)
-        self.last_process: datetime | None = None
-
-        # RPC runs in separate threads, can start handling external commands just after
-        # initialization, even before Freqtradebot has a chance to start its throttling,
-        # so anything in the Freqtradebot instance should be ready (initialized), including
-        # the initial state of the bot.
-        # Keep this at the end of this initialization method.
-        self.rpc: RPCManager = RPCManager(self)
-
-        self.dataprovider = DataProvider(self.config, self.exchange, rpc=self.rpc)
-        self.pairlists = PairListManager(self.exchange, self.config, self.dataprovider)
-
-        self.dataprovider.add_pairlisthandler(self.pairlists)
-
-        # Start API server after all bot components are initialized
-        # to avoid FreqUI polling endpoints that reference uninitialized attributes
-        if config.get("api_server", {}).get("enabled", False):
-            from freqtrade.rpc.api_server import ApiServer
-            ApiServer(config)
-        _tracer.mark("API server started")
-
-        # Attach Dataprovider to strategy instance
-        self.strategy.dp = self.dataprovider
-        # Attach Wallets to strategy instance
-        self.strategy.wallets = self.wallets
-
-        # Init ExternalMessageConsumer if enabled
-        self.emc = (
-            ExternalMessageConsumer(self.config, self.dataprovider)
-            if self.config.get("external_message_consumer", {}).get("enabled", False)
-            else None
-        )
-
-        logger.info("Starting initial pairlist refresh")
-        self.active_pair_whitelist = self._refresh_active_whitelist()
-        _tracer.mark("pairlist refreshed", pairs=len(self.active_pair_whitelist))
-
-        # Set initial bot state from config
-        initial_state = self.config.get("initial_state")
-        self.state = State[initial_state.upper()] if initial_state else State.STOPPED
-
-        self._position_guard_last_warn: dict[str, float] = {}
-
-        # Protect exit-logic from forcesell and vice versa
-        self._exit_lock = Lock()
-        timeframe_secs = timeframe_to_seconds(self.strategy.timeframe)
-        self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
-        LoggingMixin.__init__(self, logger, timeframe_secs)
-
-        self._schedule = Scheduler()
-
-        if self.trading_mode == TradingMode.FUTURES:
-
-            def update():
-                self.update_funding_fees()
-                self.update_all_liquidation_prices()
-                self.sync_leverage_from_exchange()
-                self.wallets.update()
-
-            # This would be more efficient if scheduled in utc time, and performed at each
-            # funding interval, specified by funding_fee_times on the exchange classes
-            # However, this reduces the precision - and might therefore lead to problems.
-            for time_slot in range(0, 24):
-                for minutes in [1, 31]:
-                    t = str(time(time_slot, minutes, 2))
-                    self._schedule.every().day.at(t).do(update)
-
-        self._schedule.every().day.at("00:02").do(self.exchange.ws_connection_reset)
-
-        self.strategy.ft_bot_start()
-        # Initialize protections AFTER bot start - otherwise parameters are not loaded.
-        self.protections = ProtectionManager(self.config, self.strategy.protections)
-        _tracer.summary()
-
-        def log_took_too_long(duration: float, time_limit: float):
-            logger.warning(
-                f"Strategy analysis took {duration:.2f}s, more than 25% of the timeframe "
-                f"({time_limit:.2f}s). This can lead to delayed orders and missed signals."
-                "Consider either reducing the amount of work your strategy performs "
-                "or reduce the amount of pairs in the Pairlist."
+        try:
+            self.exchange = ExchangeResolver.load_exchange(
+                self.config, exchange_config=exchange_config, load_leverage_tiers=True
             )
 
-        self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
+            _tracer.mark("exchange loaded", exchange=self.exchange.name)
+
+            # Register with fleet orchestrator (ftcache extension)
+            config_files = config.get("config_files", [""])
+            bot_identity = {
+                "bot_id": config.get("bot_name", ""),
+                "config_file": Path(config_files[0]).name if config_files else "",
+                "exchange": config["exchange"]["name"],
+                "trading_mode": config.get("trading_mode", "spot"),
+                "strategy": config.get("strategy", ""),
+                "timeframe": config.get("timeframe", "15m"),
+                "dry_run": config.get("dry_run", False),
+                "api_port": config.get("api_server", {}).get("listen_port", 0),
+                "pid": os.getpid(),
+            }
+            ftcache_client = getattr(self.exchange, '_ftcache_client', None)
+            if ftcache_client and ftcache_client:
+                ftcache_client.set_bot_identity(bot_identity)
+            else:
+                self.exchange._ftcache_pending_identity = bot_identity
+
+            self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
+            _tracer.mark("strategy loaded", strategy=self.strategy.__class__.__name__)
+
+            # Check config consistency here since strategies can set certain options
+            validate_config_consistency(config)
+            # Re-validate exchange compatibility
+            self.exchange.validate_config(self.config)
+            _tracer.mark("config validated")
+
+            init_db(self.config["db_url"])
+            _tracer.mark("db initialized")
+
+            self.wallets = Wallets(self.config, self.exchange)
+            _tracer.mark("wallets synced")
+
+            PairLocks.timeframe = self.config["timeframe"]
+
+            self.trading_mode: TradingMode = self.config.get("trading_mode", TradingMode.SPOT)
+            self.margin_mode: MarginMode = self.config.get("margin_mode", MarginMode.NONE)
+            self.last_process: datetime | None = None
+
+            # RPC runs in separate threads, can start handling external commands just after
+            # initialization, even before Freqtradebot has a chance to start its throttling,
+            # so anything in the Freqtradebot instance should be ready (initialized), including
+            # the initial state of the bot.
+            # Keep this at the end of this initialization method.
+            self.rpc: RPCManager = RPCManager(self)
+
+            self.dataprovider = DataProvider(self.config, self.exchange, rpc=self.rpc)
+            self.pairlists = PairListManager(self.exchange, self.config, self.dataprovider)
+
+            self.dataprovider.add_pairlisthandler(self.pairlists)
+
+            # Attach Dataprovider to strategy instance
+            self.strategy.dp = self.dataprovider
+            # Attach Wallets to strategy instance
+            self.strategy.wallets = self.wallets
+
+            # Start API server after all bot components are initialized
+            # to avoid FreqUI polling endpoints that reference uninitialized attributes
+            if config.get("api_server", {}).get("enabled", False):
+                from freqtrade.rpc.api_server import ApiServer
+                ApiServer(config)
+            _tracer.mark("API server started")
+
+            # Init ExternalMessageConsumer if enabled
+            self.emc: ExternalMessageConsumer | None = (
+                ExternalMessageConsumer(self.config, self.dataprovider)
+                if self.config.get("external_message_consumer", {}).get("enabled", False)
+                else None
+            )
+
+            logger.info("Starting initial pairlist refresh")
+            with MeasureTime(
+                lambda duration, _: logger.info(f"Initial Pairlist refresh took {duration:.2f}s"), 0
+            ):
+                self.active_pair_whitelist = self._refresh_active_whitelist()
+
+            _tracer.mark("pairlist refreshed", pairs=len(self.active_pair_whitelist))
+
+            # Set initial bot state from config
+            initial_state = self.config.get("initial_state")
+            self.state = State[initial_state.upper()] if initial_state else State.STOPPED
+
+            self._position_guard_last_warn: dict[str, float] = {}
+
+            # Protect exit-logic from forcesell and vice versa
+            self._exit_lock = Lock()
+            timeframe_secs = timeframe_to_seconds(self.strategy.timeframe)
+            self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
+            LoggingMixin.__init__(self, logger, timeframe_secs)
+
+            self._schedule = Scheduler()
+
+            if self.trading_mode == TradingMode.FUTURES:
+
+                def update():
+                    self.update_funding_fees()
+                    self.update_all_liquidation_prices()
+                    self.sync_leverage_from_exchange()
+                    self.wallets.update()
+
+                # This would be more efficient if scheduled in utc time, and performed at each
+                # funding interval, specified by funding_fee_times on the exchange classes
+                # However, this reduces the precision - and might therefore lead to problems.
+                for time_slot in range(0, 24):
+                    for minutes in [1, 31]:
+                        t = str(time(time_slot, minutes, 2))
+                        self._schedule.every().day.at(t).do(update)
+
+            self._schedule.every().day.at("00:02").do(self.exchange.ws_connection_reset)
+            self._schedule.every().day.at("00:07").do(self.wallets.record_wallet_state)
+
+            self.strategy.ft_bot_start()
+            # Initialize protections AFTER bot start - otherwise parameters are not loaded.
+            self.protections = ProtectionManager(self.config, self.strategy.protections)
+
+            _tracer.summary()
+
+            def log_took_too_long(duration: float, time_limit: float):
+                logger.warning(
+                    f"Strategy analysis took {duration:.2f}s, more than 25% of the timeframe "
+                    f"({time_limit:.2f}s). This can lead to delayed orders and missed signals."
+                    "Consider either reducing the amount of work your strategy performs "
+                    "or reduce the amount of pairs in the Pairlist."
+                )
+
+            self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
+
+        except Exception as e:
+            # Graceful shutdown in case of failed initialization.
+            self.cleanup()
+            raise e from e
 
     def notify_status(self, msg: str, msg_type=RPCMessageType.STATUS) -> None:
         """
@@ -281,14 +294,18 @@ class FreqtradeBot(LoggingMixin):
             logger.warning(f"Exception during cleanup: {e.__class__.__name__} {e}")
 
         finally:
-            self.strategy.ft_bot_cleanup()
+            if getattr(self, "strategy", None):
+                self.strategy.ft_bot_cleanup()
 
-        self.rpc.cleanup()
-        if self.emc:
+        if getattr(self, "rpc", None):
+            self.rpc.cleanup()
+        if hasattr(self, "emc") and self.emc:
             self.emc.shutdown()
-        self.exchange.close()
+        if getattr(self, "exchange", None):
+            self.exchange.close()
         try:
-            Trade.commit()
+            if hasattr(Trade, "session"):
+                Trade.commit()
         except Exception:
             # Exceptions here will be happening if the db disappeared.
             # At which point we can no longer commit anyway.
@@ -299,7 +316,7 @@ class FreqtradeBot(LoggingMixin):
         Called on startup and after reloading the bot - triggers notifications and
         performs startup tasks
         """
-        migrate_live_content(self.config, self.exchange)
+        migrate_live_content(self.config, self.exchange, self.wallets.get_starting_balance())
         set_startup_time()
 
         self.rpc.startup_messages(self.config, self.pairlists, self.protections)
