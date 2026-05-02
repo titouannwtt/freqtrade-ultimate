@@ -577,16 +577,19 @@ class OhlcvCacheClient:
             uptime = _sync_ping_daemon(client._socket_path)
             if uptime is not None and uptime > 60:
                 logger.info(
-                    "daemon warm (uptime=%.0fs) — skipping client stagger", uptime,
+                    "daemon warm (uptime=%.0fs) — skipping stagger", uptime,
                 )
                 return 0.0
             if uptime is not None:
                 logger.info(
-                    "daemon cold (uptime=%.0fs) — applying stagger", uptime,
+                    "daemon cold (uptime=%.0fs) — short stagger", uptime,
                 )
-        except Exception:
-            pass
-        return random.uniform(0, stagger_max)  # noqa: S311
+                return random.uniform(0, min(5.0, stagger_max))  # noqa: S311
+        except Exception as exc:
+            logger.warning("smart stagger ping failed: %s — skipping stagger", exc)
+            return 0.0
+        logger.info("stagger ping returned None — skipping stagger")
+        return 0.0
 
 
 # ---------------- spawn helpers (module-level, sync)

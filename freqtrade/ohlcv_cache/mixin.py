@@ -704,19 +704,13 @@ class CachedExchangeMixin:
                             )
                             raise CacheUnavailable("markets data is not a dict")
                         self._markets = markets  # type: ignore[attr-defined]
-                        api_sync = getattr(self, "_api", None)
-                        api_async = getattr(self, "_api_async", None)
-                        ws_async = getattr(self, "_ws_async", None)
-                        if api_async and hasattr(api_async, "markets"):
-                            api_async.markets = markets
-                            api_async.markets_by_id = None
-                            api_async.set_markets(markets)
-                        if api_sync and api_async:
-                            api_sync.set_markets_from_exchange(api_async)
-                            api_sync.options = api_async.options
-                        if ws_async and api_async:
-                            ws_async.set_markets_from_exchange(api_async)
-                            ws_async.options = api_async.options
+                        for api in (
+                            getattr(self, "_api", None),
+                            getattr(self, "_api_async", None),
+                            getattr(self, "_ws_async", None),
+                        ):
+                            if api is not None:
+                                api.set_markets(markets)
                         self._last_markets_refresh = dt_ts()
                         self._ftcache_record_cached("reload_markets")
                         logger.debug(
