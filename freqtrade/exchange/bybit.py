@@ -99,7 +99,7 @@ class Bybit(Exchange):
                 else:
                     self.unified_account = False
                     logger.info("Bybit: Standard account.")
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(

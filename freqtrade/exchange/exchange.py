@@ -6,11 +6,14 @@ Cryptocurrency Exchanges support
 import asyncio
 import inspect
 import logging
+import pickle
 import signal
+import time as time_module
 from collections.abc import Coroutine, Generator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from math import floor, isnan
+from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, TypeGuard, TypeVar
 from uuid import uuid4
@@ -307,14 +310,28 @@ class Exchange:
             exchange_conf.get("markets_refresh_interval", 60) * 60 * 1000
         )
 
+        _ex_t0 = time_module.monotonic()
         if validate:
             # Initial markets load
             self.reload_markets(True, load_leverage_tiers=False)
+            _dt = time_module.monotonic() - _ex_t0
+            logger.info("[exchange-init] markets loaded (%.1fs)", _dt)
             self.validate_config(self._config)
 
         if self.trading_mode != TradingMode.SPOT and load_leverage_tiers:
+            _lt_t0 = time_module.monotonic()
             self.fill_leverage_tiers()
+            logger.info(
+                "[exchange-init] leverage tiers loaded (%.1fs)",
+                time_module.monotonic() - _lt_t0,
+            )
         self.ft_additional_exchange_init()
+        _kl_t0 = time_module.monotonic()
+        self._load_persisted_klines()
+        logger.info(
+            "[exchange-init] klines cache loaded (%.1fs, total exchange init: %.1fs)",
+            time_module.monotonic() - _kl_t0, time_module.monotonic() - _ex_t0,
+        )
 
     def __del__(self):
         """
@@ -323,6 +340,8 @@ class Exchange:
         self.close()
 
     def close(self):
+        if getattr(self, "_klines", None):
+            self.persist_klines()
         if self._exchange_ws:
             self._exchange_ws.cleanup()
         logger.debug("Exchange object destroyed, closing async loop")
@@ -353,6 +372,96 @@ class Exchange:
 
         if self.loop and not self.loop.is_closed():
             self.loop.close()
+
+    def _klines_cache_path(self) -> Path:
+        """Build the path for the klines cache file."""
+        datadir = self._config.get("datadir", Path.home() / ".freqtrade")
+        cache_dir = Path(datadir) / "klines_cache"
+        exchange_name = self._config.get("exchange", {}).get("name", "unknown")
+        trading_mode = self._config.get("trading_mode", "spot")
+        return cache_dir / f"{exchange_name}_{trading_mode}.pkl"
+
+    def persist_klines(self) -> None:
+        """Save klines and refresh times to disk for fast restart."""
+        try:
+            runmode = self._config.get("runmode")
+            if runmode not in TRADE_MODES:
+                return
+            if not self._klines:
+                return
+
+            cache_path = self._klines_cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            data = {
+                "klines": self._klines,
+                "pairs_last_refresh_time": self._pairs_last_refresh_time,
+                "saved_at": dt_ts(),
+            }
+            with cache_path.open("wb") as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            logger.info(
+                f"Persisted klines cache: {len(self._klines)} pairs "
+                f"to {cache_path} ({cache_path.stat().st_size / 1024:.0f} KB)"
+            )
+        except Exception:
+            logger.warning("Failed to persist klines cache.", exc_info=True)
+
+    def _load_persisted_klines(self) -> None:
+        """Load klines from disk cache if available and not too stale."""
+        try:
+            runmode = self._config.get("runmode")
+            if runmode not in TRADE_MODES:
+                return
+
+            cache_path = self._klines_cache_path()
+            if not cache_path.exists():
+                return
+
+            with cache_path.open("rb") as f:
+                data = pickle.load(f)  # noqa: S301
+
+            saved_at = data.get("saved_at", 0)
+            now = dt_ts()
+            cache_age_sec = (now - saved_at) / 1000
+
+            # Determine max staleness: startup_candle_count * timeframe_seconds * 2
+            timeframe = self._config.get("timeframe", "5m")
+            tf_secs = timeframe_to_seconds(timeframe)
+            startup_count = self._config.get("startup_candle_count", 0)
+            max_age_sec = max(startup_count * tf_secs * 2, tf_secs * 100)
+
+            if cache_age_sec > max_age_sec:
+                logger.info(
+                    f"Klines cache too stale ({cache_age_sec:.0f}s > "
+                    f"{max_age_sec:.0f}s max), discarding."
+                )
+                cache_path.unlink(missing_ok=True)
+                return
+
+            cached_klines = data.get("klines", {})
+            cached_refresh = data.get("pairs_last_refresh_time", {})
+
+            if not cached_klines:
+                return
+
+            restored = 0
+            for key, df in cached_klines.items():
+                if key not in self._klines and not df.empty:
+                    self._klines[key] = df
+                    # Restore last refresh time so _build_ohlcv_dl_jobs sees
+                    # the data as "recently refreshed" and only downloads delta
+                    if key in cached_refresh:
+                        self._pairs_last_refresh_time[key] = cached_refresh[key]
+                    restored += 1
+
+            logger.info(
+                f"Restored {restored} pairs from klines cache "
+                f"(age: {cache_age_sec:.0f}s, file: {cache_path})"
+            )
+        except Exception:
+            logger.warning("Failed to load klines cache.", exc_info=True)
 
     def _init_async_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.new_event_loop()
@@ -561,6 +670,17 @@ class Exchange:
         markets = self.markets
         if not markets:
             raise OperationalException("Markets were not loaded.")
+        if not isinstance(markets, dict):
+            logger.error(
+                "self._markets is %s — forcing direct reload",
+                type(markets).__name__,
+            )
+            self.reload_markets(force=True)
+            markets = self.markets
+            if not isinstance(markets, dict):
+                raise OperationalException(
+                    f"Markets still not a dict after reload ({type(markets).__name__})"
+                )
 
         if base_currencies:
             markets = {k: v for k, v in markets.items() if v["base"] in base_currencies}
@@ -700,7 +820,7 @@ class Exchange:
     async def _api_reload_markets(self, reload: bool = False) -> None:
         try:
             await self._api_async.load_markets(reload=reload, params={})
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1510,7 +1630,7 @@ class Exchange:
                 f"Tried to {side} amount {amount} at rate {rate}. "
                 f"Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1665,7 +1785,7 @@ class Exchange:
                 f"Tried to {side} amount {amount} at rate {limit_rate} with "
                 f"stop-price {stop_price_norm}. Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1698,7 +1818,7 @@ class Exchange:
             raise InvalidOrderException(
                 f"Tried to get an invalid order (pair: {pair} id: {order_id}). Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1728,7 +1848,7 @@ class Exchange:
             raise InvalidOrderException(
                 f"Tried to get an invalid order (pair: {pair} id: {order_id}). Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1801,7 +1921,7 @@ class Exchange:
             return order
         except ccxt.InvalidOrder as e:
             raise InvalidOrderException(f"Could not cancel order. Message: {e}") from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1889,7 +2009,7 @@ class Exchange:
 
             self._log_exchange_response("fetch_balance", balances, add_info=params)
             return balances
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1916,7 +2036,7 @@ class Exchange:
             positions: list[CcxtPosition] = self._api.fetch_positions(symbols, params=params or {})
             self._log_exchange_response("fetch_positions", positions)
             return positions
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -1968,7 +2088,7 @@ class Exchange:
             self._log_exchange_response("fetch_orders", orders)
             orders = [self._order_contracts_to_amount(o) for o in orders]
             return orders
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2011,7 +2131,7 @@ class Exchange:
             trading_fees: dict[str, Any] = self._api.fetch_trading_fees()
             self._log_exchange_response("fetch_trading_fees", trading_fees)
             return trading_fees
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2044,7 +2164,7 @@ class Exchange:
                 f"Exchange {self._api.name} does not support fetching bids/asks in batch. "
                 f"Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2099,7 +2219,7 @@ class Exchange:
             self.reload_markets(True)
             # Re-raise exception to repeat the call.
             raise TemporaryError from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2163,7 +2283,7 @@ class Exchange:
                 raise ExchangeError(f"Pair {pair} not available")
             data: Ticker = self._api.fetch_ticker(pair)
             return data
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2187,7 +2307,7 @@ class Exchange:
             raise OperationalException(
                 f"Exchange {self._api.name} does not support fetching funding rate. Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2237,7 +2357,7 @@ class Exchange:
             raise OperationalException(
                 f"Exchange {self._api.name} does not support fetching order book. Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2325,8 +2445,14 @@ class Exchange:
         """
         Get rate from ticker.
         """
-        ticker_rate = ticker[price_side]
-        if ticker["last"] and ticker_rate:
+        ticker_rate = ticker.get(price_side)
+        if ticker_rate is None and ticker.get("last"):
+            logger.warning(
+                "Ticker %s is None for %s — falling back to 'last' price",
+                price_side, ticker.get("symbol", "?"),
+            )
+            ticker_rate = ticker["last"]
+        if ticker.get("last") and ticker_rate:
             if side == "entry" and ticker_rate > ticker["last"]:
                 balance = conf_strategy.get("price_last_balance", 0.0)
                 ticker_rate = ticker_rate + balance * (ticker["last"] - ticker_rate)
@@ -2438,7 +2564,7 @@ class Exchange:
             matched_trades = self._trades_contracts_to_amount(matched_trades)
 
             return matched_trades
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2496,7 +2622,7 @@ class Exchange:
                 price=price,
                 takerOrMaker=taker_or_maker,
             )["rate"]
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -2835,6 +2961,20 @@ class Exchange:
         cache: bool,
         drop_incomplete: bool,
     ) -> DataFrame:
+        if not isinstance(ticks, list):
+            logger.warning(
+                "ticks for %s/%s is %s, not list — returning empty df",
+                pair, timeframe, type(ticks).__name__,
+            )
+            ticks = []
+        elif ticks:
+            first = ticks[0]
+            if not isinstance(first, (list, tuple)) or len(first) < 6:
+                logger.warning(
+                    "ticks rows for %s/%s have bad shape (first=%s) — returning empty df",
+                    pair, timeframe, repr(first)[:120],
+                )
+                ticks = []
         # keeping last candle time as last refreshed time of the pair
         if ticks and cache:
             idx = -2 if drop_incomplete and len(ticks) > 1 else -1
@@ -3033,7 +3173,7 @@ class Exchange:
                 f"Exchange {self._api.name} does not support fetching historical "
                 f"candle (OHLCV) data. Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -3318,7 +3458,7 @@ class Exchange:
                 f"Exchange {self._api.name} does not support fetching historical trade data."
                 f"Message: {e}"
             ) from e
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -3534,7 +3674,7 @@ class Exchange:
                 "funding_history", funding_history, add_info=f"pair: {pair}, since: {since}"
             )
             return sum(fee["amount"] for fee in funding_history)
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -3547,7 +3687,7 @@ class Exchange:
     def get_leverage_tiers(self) -> dict[str, list[dict]]:
         try:
             return self._api.fetch_leverage_tiers()
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -3562,7 +3702,7 @@ class Exchange:
         try:
             tier = await self._api_async.fetch_market_leverage_tiers(symbol)
             return symbol, tier
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -3794,7 +3934,7 @@ class Exchange:
         try:
             res = self._api.set_leverage(symbol=pair, leverage=leverage)
             self._log_exchange_response("set_leverage", res)
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.BadRequest, ccxt.OperationRejected, ccxt.InsufficientFunds) as e:
             if not accept_fail:
@@ -3845,7 +3985,7 @@ class Exchange:
         try:
             res = self._api.set_margin_mode(margin_mode.value, pair, params)
             self._log_exchange_response("set_margin_mode", res)
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.BadRequest, ccxt.OperationRejected) as e:
             if not accept_fail:
@@ -3892,6 +4032,11 @@ class Exchange:
 
         mark_comb: PairWithTimeframe = (pair, timeframe, mark_price_type)
         funding_comb: PairWithTimeframe = (pair, timeframe_ff, CandleType.FUNDING_RATE)
+
+        if self.loop.is_running():
+            raise ExchangeError(
+                "Cannot fetch funding fees — event loop already running"
+            )
 
         candle_histories = self.refresh_latest_ohlcv(
             [mark_comb, funding_comb],

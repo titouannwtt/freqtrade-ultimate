@@ -58,6 +58,17 @@ class Worker:
         self._throttle_secs = internals_config.get("process_throttle_secs", PROCESS_THROTTLE_SECS)
         self._heartbeat_interval = internals_config.get("heartbeat_interval", 60)
 
+        # Per-bot candle boundary jitter to prevent thundering herd.
+        # Deterministic hash of bot_name so the jitter is stable across restarts
+        # but different for each bot.  Spread over 0-25s.
+        import hashlib
+        bot_name = self._config.get("bot_name", "")
+        hash_val = int(hashlib.md5(bot_name.encode()).hexdigest()[:8], 16)
+        self._candle_jitter_s = (hash_val % 250) / 10.0  # 0.0 to 25.0 seconds
+        logger.info(
+            "candle boundary jitter for '%s': %.1fs", bot_name, self._candle_jitter_s,
+        )
+
         self._sd_notify = (
             sdnotify.SystemdNotifier()
             if self._config.get("internals", {}).get("sd_notify", False)
@@ -100,10 +111,13 @@ class Worker:
                 State.RUNNING,
                 State.PAUSED,
             ):
-                self.freqtrade.startup()
+                self._apply_admission_hold_off()
+                self._startup_with_patience()
 
             if state == State.STOPPED:
                 self.freqtrade.check_for_open_trades()
+
+            self._notify_fleet_state(state)
 
             # Reset heartbeat timestamp to log the heartbeat message at
             # first throttling iteration when the state changes
@@ -120,12 +134,15 @@ class Worker:
             # Ping systemd watchdog before throttling
             self._notify(f"WATCHDOG=1\nSTATUS=State: {state_str}.")
 
-            # Use an offset of 1s to ensure a new candle has been issued
+            # Use an offset of 1s + per-bot jitter to stagger candle boundary wakeups.
+            # Without jitter, all 14 bots wake at the exact same second and flood
+            # the daemon with 560 OHLCV requests simultaneously.
+            jitter = getattr(self, '_candle_jitter_s', 0.0)
             self._throttle(
                 func=self._process_running,
                 throttle_secs=self._throttle_secs,
                 timeframe=self._config["timeframe"] if self._config else None,
-                timeframe_offset=1,
+                timeframe_offset=1 + jitter,
             )
 
         if self._heartbeat_interval:
@@ -190,6 +207,70 @@ class Worker:
     def _sleep(sleep_duration: float) -> None:
         """Local sleep method - to improve testability"""
         time.sleep(sleep_duration)
+
+    def _apply_admission_hold_off(self) -> None:
+        """Wait if the daemon requested a hold-off at registration time.
+
+        This prevents thundering-herd init storms when many bots start at once
+        or when the daemon is already under backoff pressure.
+        """
+        client = getattr(self.freqtrade.exchange, '_ftcache_client', None)
+        if not client:
+            return
+        hold_off = getattr(client, 'hold_off_s', 0.0)
+        if hold_off <= 0:
+            return
+        reason = getattr(client, 'hold_off_reason', '')
+        logger.info(
+            "admission hold-off: waiting %.0fs before startup (%s)",
+            hold_off, reason or "fleet stagger",
+        )
+        import time as _time
+        _time.sleep(hold_off)
+        logger.info("admission hold-off complete, proceeding with startup")
+
+    def _startup_with_patience(self, max_retries: int = 6, base_wait: float = 10.0) -> None:
+        """Run startup() with patience: retry on rate-limit errors instead of crashing.
+
+        During init, the daemon may be in backoff and API calls can fail.
+        Instead of crashing the bot, we retry with exponential backoff
+        (10s, 20s, 40s, 80s, 120s, 120s) — up to ~6 minutes total.
+        """
+        from freqtrade.exceptions import DDosProtection
+        for attempt in range(max_retries):
+            try:
+                self.freqtrade.startup()
+                return
+            except (TemporaryError, DDosProtection) as e:
+                wait = min(base_wait * (2 ** attempt), 120.0)
+                logger.warning(
+                    "startup() failed (attempt %d/%d): %s — retrying in %.0fs",
+                    attempt + 1, max_retries, e, wait,
+                )
+                time.sleep(wait)
+        logger.warning("startup() failed after %d attempts — proceeding anyway", max_retries)
+
+    def _notify_fleet_state(self, state: State) -> None:
+        state_map = {
+            State.RUNNING: "running",
+            State.PAUSED: "paused",
+            State.STOPPED: "stopped",
+        }
+        state_str = state_map.get(state)
+        if not state_str:
+            return
+        exchange = self.freqtrade.exchange
+        run_on_loop = getattr(exchange, '_ftcache_run_on_loop', None)
+        client = getattr(exchange, '_ftcache_client', None)
+        if not run_on_loop or not client:
+            return
+        try:
+            pairs_count = len(
+                getattr(self.freqtrade, 'active_pair_whitelist', None) or []
+            )
+            run_on_loop(client.update_state(state_str, pairs_count=pairs_count))
+        except Exception:  # noqa: S110
+            pass
 
     def _process_stopped(self) -> None:
         self.freqtrade.process_stopped()

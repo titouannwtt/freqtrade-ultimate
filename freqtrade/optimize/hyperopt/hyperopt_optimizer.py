@@ -138,6 +138,8 @@ class HyperOptimizer:
         self.backtesting.exchange.loop = None  # type: ignore
         self.backtesting.exchange._loop_lock = None  # type: ignore
         self.backtesting.exchange._cache_lock = None  # type: ignore
+        if hasattr(self.backtesting.exchange, '_metrics'):
+            self.backtesting.exchange._metrics._lock = None  # type: ignore
         # self.backtesting.exchange = None  # type: ignore
         self.backtesting.pairlists = None  # type: ignore
 

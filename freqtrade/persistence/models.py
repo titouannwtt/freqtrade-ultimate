@@ -53,7 +53,11 @@ def init_db(db_url: str) -> None:
     :param db_url: Database to use
     :return: None
     """
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {
+        "pool_size": 20,
+        "max_overflow": 40,
+        "pool_timeout": 120,
+    }
 
     if db_url == "sqlite:///":
         raise OperationalException(

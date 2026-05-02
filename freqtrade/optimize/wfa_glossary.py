@@ -11,6 +11,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "A WFE above 50% means more than half the in-sample edge "
             "persists out-of-sample — a sign the strategy generalizes."
         ),
+        "explanation_fr": (
+            "Rendement test annualisé divisé par le rendement training. "
+            "Un WFE > 50% signifie que plus de la moitié de l'edge "
+            "in-sample persiste hors-échantillon — signe de généralisation."
+        ),
         "thresholds": [
             (-99, "negative", "#ef4444"),
             (0, "poor", "#f97316"),
@@ -28,6 +33,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "Measures trading edge quality by comparing average profit per "
             "trade to its variability. Higher is better, but values above 5 "
             "suggest overfitting — real edges rarely look that clean."
+        ),
+        "explanation_fr": (
+            "Mesure la qualité de l'edge en comparant le profit moyen par "
+            "trade à sa variabilité. Plus c'est haut, mieux c'est, mais "
+            "au-dessus de 5, c'est suspect — les vrais edges sont rarement aussi nets."
         ),
         "thresholds": [
             (-99, "losing", "#ef4444"),
@@ -48,6 +58,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "look good by chance. DSR corrects for this — above 0.95 means "
             "the edge is likely real, not a statistical fluke."
         ),
+        "explanation_fr": (
+            "Le ratio de Sharpe corrigé pour le nombre d'essais. "
+            "Quand on teste des centaines de combinaisons, certaines "
+            "semblent bonnes par chance. Le DSR corrige ce biais — "
+            "au-dessus de 0.95, l'edge est probablement réel."
+        ),
         "thresholds": [
             (0, "not significant", "#ef4444"),
             (0.5, "weak", "#f97316"),
@@ -63,6 +79,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "Annualized return divided by maximum drawdown. A Calmar of 2 "
             "means you earn twice what you risk losing. Below 0.5 suggests "
             "the drawdown pain is not worth the return."
+        ),
+        "explanation_fr": (
+            "Rendement annualisé divisé par le drawdown maximum. Un Calmar "
+            "de 2 signifie que vous gagnez 2x ce que vous risquez de perdre. "
+            "En dessous de 0.5, la douleur du DD ne vaut pas le rendement."
         ),
         "thresholds": [
             (-99, "losing", "#ef4444"),
@@ -81,6 +102,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "The largest drop from a peak equity value to a subsequent "
             "trough, as a percentage. This is the worst loss you would "
             "have experienced if you entered at the peak."
+        ),
+        "explanation_fr": (
+            "La plus grande chute depuis un pic d'equity jusqu'au creux "
+            "suivant, en pourcentage. C'est la pire perte subie si "
+            "vous étiez entré au sommet."
         ),
         "thresholds": [
             (0, "none", "#22c55e"),
@@ -101,6 +127,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "one trade dominates. Above 0.15 is a warning sign — your "
             "strategy's success depends on too few trades."
         ),
+        "explanation_fr": (
+            "Mesure la concentration des profits entre les trades. "
+            "Un HHI proche de 0 = profits répartis ; proche de 1 = "
+            "un trade domine. Au-dessus de 0.15, la stratégie dépend "
+            "de trop peu de trades."
+        ),
         "thresholds": [
             (0, "diversified", "#22c55e"),
             (0.10, "acceptable", "#84cc16"),
@@ -117,6 +149,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "Total gross profit divided by total gross loss. A value of "
             "1.0 is break-even. Above 1.2 suggests a durable edge; below "
             "1.0 means the strategy is losing money overall."
+        ),
+        "explanation_fr": (
+            "Profit brut total divisé par la perte brute totale. 1.0 = "
+            "seuil de rentabilité. Au-dessus de 1.2, edge durable ; "
+            "en dessous de 1.0, la stratégie perd de l'argent."
         ),
         "thresholds": [
             (0, "losing", "#ef4444"),
@@ -136,6 +173,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "1,000 times to see how drawdown varies with ordering alone — "
             "revealing whether your equity curve was lucky or robust."
         ),
+        "explanation_fr": (
+            "Vos trades ont eu lieu dans un ordre précis, mais auraient pu "
+            "survenir différemment. Monte Carlo mélange la séquence 1000 fois "
+            "pour voir comment le DD varie — révèle si votre courbe d'equity "
+            "était chanceuse ou robuste."
+        ),
         "thresholds": [],
         "source": "Carver",
     },
@@ -148,6 +191,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "ratio from Monte Carlo. A value near 1.0 means worst-case "
             "performance is close to typical — the edge is robust. Below "
             "0.3 means unlucky trade ordering wrecks the risk profile."
+        ),
+        "explanation_fr": (
+            "Ratio entre le 5e percentile et la médiane du rendement/DD "
+            "Monte Carlo. Proche de 1.0 = robuste. En dessous de 0.3, "
+            "un mauvais ordre de trades détruit le profil de risque."
         ),
         "thresholds": [
             (0, "fragile", "#ef4444"),
@@ -166,6 +214,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "than in erratic jumps. Above 0.5 is smooth; below 0 means "
             "the equity curve is declining."
         ),
+        "explanation_fr": (
+            "Pente de la courbe d'equity divisée par son erreur standard. "
+            "Un K-ratio élevé = croissance régulière. Au-dessus de 0.5 = "
+            "lisse ; en dessous de 0, la courbe décline."
+        ),
         "thresholds": [
             (-99, "declining", "#ef4444"),
             (0, "choppy", "#f97316"),
@@ -183,6 +236,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "strategy makes money on average; negative means it loses. "
             "This is the most basic measure of whether the strategy works."
         ),
+        "explanation_fr": (
+            "Le profit (ou perte) moyen par trade. Positif = la stratégie "
+            "gagne de l'argent en moyenne. C'est la mesure la plus "
+            "fondamentale de l'efficacité d'une stratégie."
+        ),
         "thresholds": [
             (-99, "losing", "#ef4444"),
             (0, "profitable", "#22c55e"),
@@ -198,6 +256,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "Without it, lagged indicators computed at the end of training "
             "could 'see' into the test period, inflating results."
         ),
+        "explanation_fr": (
+            "Un tampon de jours entre les périodes train et test. "
+            "Sans embargo, les indicateurs retardés calculés en fin "
+            "de training pourraient voir dans la période test, gonflant "
+            "les résultats."
+        ),
         "thresholds": [],
         "source": "Lopez de Prado",
     },
@@ -211,6 +275,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "of returns and a probability of loss — a much stronger test "
             "of whether the strategy is genuinely profitable."
         ),
+        "explanation_fr": (
+            "Au lieu de tester N fenêtres séquentielles, CPCV teste toutes "
+            "les combinaisons possibles de splits. Donne une distribution de "
+            "rendements et une probabilité de perte — un test bien plus solide."
+        ),
         "thresholds": [],
         "source": "Lopez de Prado, Advances in Financial ML",
     },
@@ -223,6 +292,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "nudged by 5-10%. Low sensitivity means the strategy is robust "
             "to small parameter errors; high sensitivity means it only "
             "works at exact parameter values — a sign of overfitting."
+        ),
+        "explanation_fr": (
+            "Mesure combien le profit change quand les paramètres sont "
+            "perturbés de 5-10%. Faible sensibilité = robuste ; haute "
+            "sensibilité = ne marche qu'avec des valeurs exactes — "
+            "signe de surapprentissage."
         ),
         "thresholds": [
             (0, "robust", "#22c55e"),
@@ -241,6 +316,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "optimization landscape is noisy and the 'best' parameters "
             "are not meaningfully better than alternatives."
         ),
+        "explanation_fr": (
+            "Lancer l'optimiseur avec différentes seeds devrait trouver "
+            "des paramètres similaires. Si la convergence est faible, "
+            "le paysage d'optimisation est bruité et les 'meilleurs' "
+            "paramètres ne sont pas significativement meilleurs."
+        ),
         "thresholds": [
             (0, "unstable", "#ef4444"),
             (0.4, "marginal", "#eab308"),
@@ -256,6 +337,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "The percentage of all CPCV backtest paths that ended with "
             "a negative return. Below 15% is strong evidence the strategy "
             "works; above 30% means it loses money in many data splits."
+        ),
+        "explanation_fr": (
+            "Le pourcentage de chemins CPCV terminant avec un rendement "
+            "négatif. En dessous de 15% = preuve solide. Au-dessus de 30% "
+            "= la stratégie perd dans beaucoup de splits."
         ),
         "thresholds": [
             (0, "strong", "#22c55e"),
@@ -275,6 +361,11 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "this measures how consistent the strategy is across different "
             "data splits."
         ),
+        "explanation_fr": (
+            "Le Sharpe calculé sur tous les chemins CPCV. Contrairement "
+            "au Sharpe classique (un seul backtest), il mesure la cohérence "
+            "de la stratégie à travers différents splits de données."
+        ),
         "thresholds": [
             (-99, "losing", "#ef4444"),
             (0, "weak", "#f97316"),
@@ -292,6 +383,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "Negative skew (< -1) means occasional large losses — "
             "typical of DCA without stop-loss. Positive skew means "
             "occasional large wins."
+        ),
+        "explanation_fr": (
+            "Mesure l'asymétrie de la distribution des rendements. "
+            "Skew négatif (< -1) = grosses pertes occasionnelles — "
+            "typique du DCA sans stop-loss. Skew positif = gros "
+            "gains occasionnels."
         ),
         "thresholds": [
             (-99, "extreme neg", "#ef4444"),
@@ -311,6 +408,12 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "are more frequent than a normal distribution predicts. "
             "Risk models assuming normality underestimate real risk."
         ),
+        "explanation_fr": (
+            "Un excès de kurtosis > 3 signifie que les événements "
+            "extrêmes sont plus fréquents que prévu par une loi "
+            "normale. Les modèles de risque gaussiens sous-estiment "
+            "le risque réel."
+        ),
         "thresholds": [
             (-99, "thin tails", "#22c55e"),
             (3, "fat tails", "#eab308"),
@@ -327,8 +430,39 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "the edge may be luck, not a repeatable pattern. "
             "Robust strategies remain profitable without their best trades."
         ),
+        "explanation_fr": (
+            "Si retirer les 1-2 meilleurs trades fait tomber le profit "
+            "à zéro, l'edge est peut-être de la chance, pas un pattern "
+            "répétable. Les stratégies robustes restent rentables sans "
+            "leurs meilleurs trades."
+        ),
         "thresholds": [],
         "source": "Community",
+    },
+    "dof": {
+        "name": "Degrees of Freedom",
+        "abbrev": "DoF",
+        "one_liner": "Trades / params ratio. Higher = more reliable results",
+        "explanation": (
+            "The ratio of trades to optimized parameters. With too "
+            "few trades per parameter, the optimizer can perfectly "
+            "fit noise. Aim for at least 30 trades per parameter; "
+            "below 10 is a red flag."
+        ),
+        "explanation_fr": (
+            "Le ratio trades / paramètres optimisés. Avec trop "
+            "peu de trades par paramètre, l'optimiseur peut "
+            "parfaitement fitter le bruit. Visez au moins 30 "
+            "trades par paramètre ; en dessous de 10 c'est un "
+            "signal d'alarme."
+        ),
+        "thresholds": [
+            (0, "critical", "#ef4444"),
+            (5, "low", "#f97316"),
+            (10, "acceptable", "#eab308"),
+            (30, "good", "#22c55e"),
+        ],
+        "source": "",
     },
     "expected_max_sharpe": {
         "name": "Expected Maximum Sharpe",
@@ -340,42 +474,69 @@ METRIC_GLOSSARY: dict[str, dict] = {
             "sqrt(2*ln(N)). If your Sharpe is below this, "
             "the result is likely a statistical artifact."
         ),
+        "explanation_fr": (
+            "Quand vous testez N combinaisons, le meilleur Sharpe est "
+            "biaisé à la hausse. Du bruit pur donne E[max] = sqrt(2*ln(N)). "
+            "Si votre Sharpe est en dessous, le résultat est probablement "
+            "un artefact statistique."
+        ),
         "thresholds": [],
         "source": "Bailey & Lopez de Prado",
     },
 }
 
 
-VERDICT_GUIDE: dict[str, str] = {
+VERDICT_GUIDE: dict[str, tuple[str, str]] = {
     "A": (
         "All checks passed. Deploy to dry-run with your intended position "
         "size. Monitor for 2-4 weeks, comparing live fills to backtest "
-        "assumptions. Watch for slippage and execution differences."
+        "assumptions. Watch for slippage and execution differences.",
+        "Tous les critères validés. Déployer en dry-run avec la taille "
+        "de position prévue. Surveiller 2 à 4 semaines en comparant les "
+        "fills live aux hypothèses du backtest. Surveiller le slippage "
+        "et les différences d'exécution.",
     ),
     "B": (
         "Most checks passed. Safe to dry-run at reduced size (50%). "
         "Review any failed checks — they may not be dealbreakers. "
-        "Run for 4+ weeks before considering live capital."
+        "Run for 4+ weeks before considering live capital.",
+        "La plupart des critères validés. Dry-run à taille réduite "
+        "(50%) est sûr. Examiner les critères échoués — ils ne sont "
+        "pas forcément rédhibitoires. Tourner 4+ semaines avant "
+        "d'engager du capital réel.",
     ),
     "C": (
         "Mixed signals. Do NOT deploy yet. Common fixes: add more data "
         "history, reduce parameter count, freeze unstable params, or "
-        "switch loss function (try CalmarHyperOptLoss)."
+        "switch loss function (try CalmarHyperOptLoss).",
+        "Signaux mitigés. NE PAS déployer pour l'instant. Corrections "
+        "courantes : ajouter plus d'historique, réduire le nombre de "
+        "paramètres, fixer les params instables, ou changer de "
+        "fonction de perte (essayer CalmarHyperOptLoss).",
     ),
     "D": (
         "Most criteria failed. The strategy likely overfits or has no "
         "durable edge. Try: simplify entry/exit logic, increase "
-        "--wf-min-test-trades, check if market regime changed."
+        "--wf-min-test-trades, check if market regime changed.",
+        "La plupart des critères ont échoué. La stratégie surapprend "
+        "probablement ou n'a pas d'edge durable. Essayer : simplifier "
+        "la logique d'entrée/sortie, augmenter --wf-min-test-trades, "
+        "vérifier si le régime de marché a changé.",
     ),
     "F": (
         "Critical failure — the strategy lost money out-of-sample or "
         "shows clear overfitting. Go back to strategy design. If the "
-        "equity curve degrades window-by-window, the edge is decaying."
+        "equity curve degrades window-by-window, the edge is decaying.",
+        "Échec critique — la stratégie a perdu de l'argent "
+        "hors-échantillon ou montre un surapprentissage évident. "
+        "Revenir à la conception de la stratégie. Si la courbe "
+        "d'equity se dégrade fenêtre par fenêtre, l'edge se dissipe.",
     ),
 }
 
 
 PERCENTILE_HINT = "p5 = worst 5% of scenarios, p50 = median (typical), p95 = best 5% of scenarios."
+PERCENTILE_HINT_FR = "p5 = pire 5% des scénarios, p50 = médiane (typique), p95 = meilleur 5%."
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +555,13 @@ METRIC_GLOSSARY.update(
                 "Above 1 is good, above 2 is excellent — but "
                 "in-sample Sharpe above 3 is almost always "
                 "overfitting."
+            ),
+            "explanation_fr": (
+                "Rendement annualisé divisé par la volatilité. "
+                "Mesure le rendement par unité de risque. Au-dessus "
+                "de 1 = bon, au-dessus de 2 = excellent — mais un "
+                "Sharpe in-sample > 3 est presque toujours du "
+                "surapprentissage."
             ),
             "thresholds": [
                 (-99, "losing", "#ef4444"),
@@ -414,6 +582,12 @@ METRIC_GLOSSARY.update(
                 "penalized. Better for strategies with positively "
                 "skewed returns."
             ),
+            "explanation_fr": (
+                "Rendement annualisé divisé par la déviation baissière "
+                "uniquement. Contrairement au Sharpe, la volatilité "
+                "haussière n'est pas pénalisée. Mieux adapté aux "
+                "stratégies à skew positif."
+            ),
             "thresholds": [
                 (-99, "losing", "#ef4444"),
                 (0, "flat", "#f97316"),
@@ -432,6 +606,12 @@ METRIC_GLOSSARY.update(
                 "A high win rate (>60%) feels comfortable but means "
                 "nothing without considering payoff ratio. A 40% "
                 "win rate with 3:1 payoff beats 80% with 0.3:1."
+            ),
+            "explanation_fr": (
+                "Pourcentage de trades clôturés avec un profit. "
+                "Un taux élevé (>60%) rassure mais ne veut rien dire "
+                "sans le ratio de payoff. Un taux de 40% avec un "
+                "payoff de 3:1 bat 80% avec 0.3:1."
             ),
             "thresholds": [
                 (0, "very low", "#ef4444"),
@@ -453,6 +633,12 @@ METRIC_GLOSSARY.update(
                 "strategies. DCA strategies often have payoff "
                 "below 1 but compensate with high win rate."
             ),
+            "explanation_fr": (
+                "Gain moyen divisé par la perte moyenne. Un payoff > 2 "
+                "= les gagnants sont bien plus gros que les perdants. "
+                "Les stratégies DCA ont souvent un payoff < 1 mais "
+                "compensent par un taux de gain élevé."
+            ),
             "thresholds": [
                 (0, "tiny wins", "#ef4444"),
                 (0.5, "low", "#f97316"),
@@ -472,6 +658,13 @@ METRIC_GLOSSARY.update(
                 "backtest durations. A 50% CAGR on 2 years is "
                 "more meaningful than 100% total profit on an "
                 "unknown period."
+            ),
+            "explanation_fr": (
+                "Le rendement annuel géométrique moyen. Contrairement "
+                "au profit total, le CAGR est comparable entre "
+                "différentes durées de backtest. Un CAGR de 50% sur "
+                "2 ans est plus significatif que 100% de profit total "
+                "sur une période inconnue."
             ),
             "thresholds": [
                 (-99, "losing", "#ef4444"),
@@ -493,75 +686,137 @@ METRIC_GLOSSARY.update(
 SAMPLER_GLOSSARY: dict[str, dict] = {
     "NSGAIIISampler": {
         "name": "NSGA-III",
-        "one_liner": ("Genetic multi-objective, good diversity. Default."),
+        "one_liner": "Genetic multi-objective, good diversity. Default.",
+        "one_liner_fr": "Génétique multi-objectif, bonne diversité. Par défaut.",
         "explanation": (
             "Evolutionary algorithm that maintains a diverse "
             "population across the Pareto front. Best when the "
             "loss function has multiple implicit objectives."
         ),
+        "explanation_fr": (
+            "Algorithme évolutionnaire qui maintient une population "
+            "diversifiée sur le front de Pareto. Idéal quand la "
+            "fonction de perte a plusieurs objectifs implicites."
+        ),
         "when_to_use": (
             "Default choice. Works well with all loss functions, "
             "especially multi-metric ones like MoutonMeanRev."
         ),
+        "when_to_use_fr": (
+            "Choix par défaut. Fonctionne bien avec toutes les "
+            "fonctions de perte, surtout les multi-métriques "
+            "comme MoutonMeanRev."
+        ),
     },
     "NSGAIISampler": {
         "name": "NSGA-II (older variant)",
-        "one_liner": ("Genetic multi-objective, less diverse than III."),
+        "one_liner": "Genetic multi-objective, less diverse than III.",
+        "one_liner_fr": "Génétique multi-objectif, moins divers que III.",
         "explanation": (
-            "Predecessor of NSGA-III with less sophisticated diversity maintenance. Rarely better."
+            "Predecessor of NSGA-III with less sophisticated "
+            "diversity maintenance. Rarely better."
         ),
-        "when_to_use": ("Try if NSGA-III results are unsatisfying."),
+        "explanation_fr": (
+            "Prédécesseur de NSGA-III avec un maintien de "
+            "diversité moins sophistiqué. Rarement meilleur."
+        ),
+        "when_to_use": "Try if NSGA-III results are unsatisfying.",
+        "when_to_use_fr": "Essayez si les résultats NSGA-III ne sont pas satisfaisants.",
     },
     "TPESampler": {
         "name": "TPE (Tree-structured Parzen Estimator)",
-        "one_liner": ("Bayesian, fast convergence on single-objective."),
+        "one_liner": "Bayesian, fast convergence on single-objective.",
+        "one_liner_fr": "Bayésien, convergence rapide sur objectif unique.",
         "explanation": (
             "Models the search space as a probability "
             "distribution and focuses sampling on promising "
             "regions. Converges faster than genetic algorithms "
             "but explores less diversity."
         ),
+        "explanation_fr": (
+            "Modélise l'espace de recherche comme une distribution "
+            "de probabilité et concentre l'échantillonnage sur les "
+            "régions prometteuses. Converge plus vite que les "
+            "algorithmes génétiques mais explore moins."
+        ),
         "when_to_use": (
             "Best for simple losses (Sharpe, Calmar) where "
             "you want fast convergence. Use with 300-500 epochs."
         ),
+        "when_to_use_fr": (
+            "Idéal pour les pertes simples (Sharpe, Calmar) quand "
+            "on veut une convergence rapide. 300-500 epochs."
+        ),
     },
     "CmaEsSampler": {
         "name": "CMA-ES",
-        "one_liner": ("Gradient-free, for continuous spaces. Powerful."),
+        "one_liner": "Gradient-free, for continuous spaces. Powerful.",
+        "one_liner_fr": "Sans gradient, pour espaces continus. Puissant.",
         "explanation": (
             "Adapts a covariance matrix to model correlations "
             "between parameters. Excellent for continuous "
             "parameter spaces where parameters interact."
+        ),
+        "explanation_fr": (
+            "Adapte une matrice de covariance pour modéliser les "
+            "corrélations entre paramètres. Excellent pour les "
+            "espaces continus avec interactions entre paramètres."
         ),
         "when_to_use": (
             "Best when most parameters are continuous "
             "(FloatRange, DecimalParameter). Less effective "
             "with many categorical or integer parameters."
         ),
+        "when_to_use_fr": (
+            "Idéal quand la majorité des paramètres sont continus "
+            "(FloatRange, DecimalParameter). Moins efficace avec "
+            "beaucoup de paramètres catégoriels ou entiers."
+        ),
     },
     "GPSampler": {
         "name": "GP (Gaussian Process)",
-        "one_liner": ("Gaussian process model. Expensive, thorough."),
+        "one_liner": "Gaussian process model. Expensive, thorough.",
+        "one_liner_fr": "Modèle de processus gaussien. Coûteux, exhaustif.",
         "explanation": (
             "Fits a Gaussian process to model the loss "
             "surface. Very sample-efficient but slow with "
             "many parameters (>10)."
         ),
+        "explanation_fr": (
+            "Ajuste un processus gaussien pour modéliser la "
+            "surface de perte. Très efficace en échantillons "
+            "mais lent avec beaucoup de paramètres (>10)."
+        ),
         "when_to_use": (
-            "Best for strategies with few parameters (<8) where each epoch is expensive."
+            "Best for strategies with few parameters (<8) "
+            "where each epoch is expensive."
+        ),
+        "when_to_use_fr": (
+            "Idéal pour les stratégies avec peu de paramètres "
+            "(<8) où chaque epoch est coûteux."
         ),
     },
     "QMCSampler": {
         "name": "QMC (Quasi-Monte Carlo)",
-        "one_liner": ("Uniform exploration. Pure random, no learning."),
+        "one_liner": "Uniform exploration. Pure random, no learning.",
+        "one_liner_fr": "Exploration uniforme. Aléatoire pur, pas d'apprentissage.",
         "explanation": (
             "Low-discrepancy sequence that covers the search "
             "space more evenly than pure random. Does not "
             "learn from previous results."
         ),
+        "explanation_fr": (
+            "Séquence à faible discrépance qui couvre l'espace "
+            "de recherche plus uniformément que le pur aléatoire. "
+            "N'apprend pas des résultats précédents."
+        ),
         "when_to_use": (
-            "Use for initial landscape mapping before switching to a learning sampler."
+            "Use for initial landscape mapping before "
+            "switching to a learning sampler."
+        ),
+        "when_to_use_fr": (
+            "Pour cartographier l'espace de recherche "
+            "avant de passer à un échantillonneur qui apprend."
         ),
     },
 }

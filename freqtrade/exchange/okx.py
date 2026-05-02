@@ -93,7 +93,7 @@ class Okx(Exchange):
                 self._log_exchange_response("fetch_accounts", accounts)
                 if len(accounts) > 0:
                     self.net_only = accounts[0].get("info", {}).get("posMode") == "net_mode"
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -163,7 +163,7 @@ class Okx(Exchange):
                 )
                 self._log_exchange_response("set_leverage", res)
 
-            except ccxt.DDoSProtection as e:
+            except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
                 raise DDosProtection(e) from e
             except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
                 already_set = self.__fetch_leverage_already_set(pair, leverage, side)
@@ -225,7 +225,7 @@ class Okx(Exchange):
             return self._convert_stop_order(pair, order_id, order_reg)
         except (ccxt.OrderNotFound, ccxt.InvalidOrder):
             pass
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -251,7 +251,7 @@ class Okx(Exchange):
                     return self._convert_stop_order(pair, order_id, order)
             except (ccxt.OrderNotFound, ccxt.InvalidOrder):
                 pass
-            except ccxt.DDoSProtection as e:
+            except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
                 raise DDosProtection(e) from e
             except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
                 raise TemporaryError(

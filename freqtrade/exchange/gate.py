@@ -77,7 +77,7 @@ class Gate(Exchange):
                 else:
                     self.unified_account = False
                     logger.info("Gate: Classic account.")
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(

@@ -52,7 +52,13 @@ class Wallets:
             self._start_cap = _start_cap
 
         self._last_wallet_refresh: datetime | None = None
-        self.update()
+        try:
+            self.update()
+        except Exception as e:
+            logger.warning(
+                "wallet init failed (%s) — proceeding with empty wallets, "
+                "will retry on first process cycle", e,
+            )
 
     def __repr__(self) -> str:
         return (
@@ -185,7 +191,10 @@ class Wallets:
         self._positions = _positions
 
     def _update_live(self) -> None:
+        import time as _time
+        _t0 = _time.monotonic()
         balances = self._exchange.get_balances()
+        _t1 = _time.monotonic()
         _wallets = {}
 
         for currency in balances:
@@ -198,8 +207,17 @@ class Wallets:
                 )
 
         positions = self._exchange.fetch_positions()
+        _t2 = _time.monotonic()
+        if (_t2 - _t0) > 2.0:
+            logger.info(
+                "[wallets] _update_live: get_balances=%.1fs, fetch_positions=%.1fs, total=%.1fs",
+                _t1 - _t0, _t2 - _t1, _t2 - _t0,
+            )
         _parsed_positions = {}
         for position in positions:
+            if not isinstance(position, dict):
+                logger.warning("position entry is %s, not dict — skipping", type(position).__name__)
+                continue
             symbol = position["symbol"]
             if position["side"] is None or position["collateral"] == 0.0:
                 # Position is not open ...

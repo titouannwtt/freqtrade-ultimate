@@ -224,6 +224,22 @@ def rate_metrics(
     return rpc._rpc_rate_metrics(window=window, bucket_s=bucket_s)
 
 
+@router.get("/fleet/status", tags=["Fleet"])
+def fleet_status(rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_fleet_status()
+
+
+@router.get("/fleet/events", tags=["Fleet"])
+def fleet_events(
+    since: float = Query(0),
+    types: str = Query(""),
+    limit: int = Query(100, ge=1, le=1000),
+    rpc: RPC = Depends(get_rpc),
+):
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    return rpc._rpc_fleet_events(since_ts=since, event_types=type_list, limit=limit)
+
+
 def _query_cache_daemons() -> dict:
     from freqtrade.ohlcv_cache.healthcheck import _query_unix
 
@@ -264,6 +280,20 @@ def _query_cache_daemons() -> dict:
                 "positions_gets": p_gets,
                 "positions_cache_hits": p_hits,
                 "positions_hit_rate_pct": round(p_hits / p_gets * 100, 1) if p_gets > 0 else 0,
+                "total_connects": stats.get("total_connects", 0),
+                "total_disconnects": stats.get("total_disconnects", 0),
+                "peak_clients": stats.get("peak_clients", 0),
+                "short_lived_connections": stats.get("short_lived_connections", 0),
+                "shed_count": stats.get("shed_count", 0),
+                "backoff_count": stats.get("backoff_count", 0),
+                "backoff_active": stats.get("backoff_active", False),
+                "backoff_remaining_s": stats.get("backoff_remaining_s", 0),
+                "consecutive_backoffs": stats.get("consecutive_backoffs", 0),
+                "current_backoff_duration_s": stats.get("current_backoff_duration_s", 0),
+                "weight_mode": stats.get("weight_mode", False),
+                "weight_used_last_min": stats.get("weight_used_last_min", 0.0),
+                "weight_budget_per_min": stats.get("weight_budget_per_min", 0),
+                "weight_utilization_pct": stats.get("weight_utilization_pct", 0.0),
             }
     except Exception:
         logger.debug("ftcache status query failed", exc_info=True)

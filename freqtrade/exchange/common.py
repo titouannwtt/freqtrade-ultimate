@@ -145,11 +145,80 @@ def calculate_backoff(retrycount, max_retries):
     return (max_retries - retrycount) ** 2 + 1
 
 
+def _report_429_to_daemon(exchange_obj, method_name: str = "") -> bool:
+    """Notify the daemon that a 429 was received on a direct ccxt call.
+
+    Returns True if the daemon was notified (daemon manages the backoff),
+    False if no daemon is available (caller should do its own backoff).
+    """
+    report_fn = getattr(exchange_obj, "_ftcache_report_429", None)
+    if report_fn is None:
+        return False
+    try:
+        report_fn(method=method_name)
+        return True
+    except Exception:  # noqa: S110
+        return False
+
+
+def _reacquire_rate_token(exchange_obj) -> None:
+    """Re-acquire a rate token from ftcache before a retry.
+
+    The @retrier decorator calls f() directly (base Exchange method),
+    bypassing the CachedExchangeMixin. Without this, retries hit the
+    exchange API without rate limiting.
+    """
+    acquire_fn = getattr(exchange_obj, "_ftcache_acquire_sync", None)
+    if acquire_fn is not None:
+        try:
+            acquire_fn()
+        except Exception:  # noqa: S110
+            pass
+
+
+async def _report_429_to_daemon_async(exchange_obj, method_name: str = "") -> bool:
+    """Async version: notify daemon of a 429."""
+    get_client = getattr(exchange_obj, "_ftcache_get_client", None)
+    if get_client is None:
+        return False
+    client = get_client()
+    if client is None:
+        return False
+    try:
+        await asyncio.wait_for(
+            client.report_429(method=method_name),
+            timeout=5.0,
+        )
+        return True
+    except Exception:  # noqa: S110
+        return False
+
+
+async def _reacquire_rate_token_async(exchange_obj) -> None:
+    """Async version: acquire rate token directly via the client."""
+    get_client = getattr(exchange_obj, "_ftcache_get_client", None)
+    if get_client is None:
+        return
+    client = get_client()
+    if client is None:
+        return
+    try:
+        await asyncio.wait_for(
+            client.acquire_rate_token(priority=None, cost=1.0),
+            timeout=10.0,
+        )
+    except Exception:  # noqa: S110
+        pass
+
+
 def retrier_async(f):
     _fname = getattr(f, "__name__", "unknown")
 
     async def wrapper(*args, **kwargs):
         count = kwargs.pop("count", API_RETRY_COUNT)
+        is_retry = count < API_RETRY_COUNT
+        if is_retry and args:
+            await _reacquire_rate_token_async(args[0])
         kucoin = args[0].name == "KuCoin"  # Check if the exchange is KuCoin.
         t0 = time.monotonic()
         try:
@@ -169,19 +238,28 @@ def retrier_async(f):
                 kwargs["count"] = count
                 if isinstance(ex, DDosProtection):
                     if kucoin and "429000" in str(ex):
-                        # Temporary fix for 429000 error on kucoin
-                        # see https://github.com/freqtrade/freqtrade/issues/5700 for details.
                         _get_logging_mixin().log_once(
                             f"Kucoin 429 error, avoid triggering DDosProtection backoff delay. "
                             f"{count} tries left before giving up",
                             logmethod=logger.warning,
                         )
-                        # Reset msg to avoid logging too many times.
                         msg = ""
                     else:
-                        backoff_delay = calculate_backoff(count + 1, API_RETRY_COUNT)
-                        logger.info(f"Applying DDosProtection backoff delay: {backoff_delay}")
-                        await asyncio.sleep(backoff_delay)
+                        daemon_notified = await _report_429_to_daemon_async(
+                            args[0], _fname,
+                        )
+                        if daemon_notified:
+                            logger.info(
+                                "429 reported to daemon — retry will wait "
+                                "for daemon rate token (priority queue)",
+                            )
+                        else:
+                            backoff_delay = calculate_backoff(count + 1, API_RETRY_COUNT)
+                            logger.info(
+                                "Applying DDosProtection backoff delay: "
+                                "%s (no daemon)", backoff_delay,
+                            )
+                            await asyncio.sleep(backoff_delay)
                 if msg:
                     logger.warning(msg)
                 return await wrapper(*args, **kwargs)
@@ -215,6 +293,9 @@ def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
         @wraps(f)
         def wrapper(*args, **kwargs):
             count = kwargs.pop("count", retries)
+            is_retry = count < retries
+            if is_retry and args:
+                _reacquire_rate_token(args[0])
             t0 = time.monotonic()
             try:
                 result = f(*args, **kwargs)
@@ -233,10 +314,23 @@ def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
                     logger.warning(msg + f"Retrying still for {count} times.")
                     count -= 1
                     kwargs.update({"count": count})
-                    if isinstance(ex, DDosProtection | RetryableOrderError):
-                        # increasing backoff
+                    if isinstance(ex, DDosProtection):
+                        daemon_notified = _report_429_to_daemon(args[0], _fname) if args else False
+                        if daemon_notified:
+                            logger.info(
+                                "429 reported to daemon — retry will wait "
+                                "for daemon rate token (priority queue)",
+                            )
+                        else:
+                            backoff_delay = calculate_backoff(count + 1, retries)
+                            logger.info(
+                                "Applying DDosProtection backoff delay: "
+                                "%s (no daemon)", backoff_delay,
+                            )
+                            time.sleep(backoff_delay)
+                    elif isinstance(ex, RetryableOrderError):
                         backoff_delay = calculate_backoff(count + 1, retries)
-                        logger.info(f"Applying DDosProtection backoff delay: {backoff_delay}")
+                        logger.info(f"Applying RetryableOrderError backoff delay: {backoff_delay}")
                         time.sleep(backoff_delay)
                     return wrapper(*args, **kwargs)
                 else:

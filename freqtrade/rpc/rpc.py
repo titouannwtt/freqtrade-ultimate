@@ -1868,6 +1868,36 @@ class RPC:
 
         return res
 
+    def _rpc_fleet_status(self) -> dict[str, Any]:
+        try:
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            sock = default_socket_path()
+            return _query_unix(sock, {"op": "fleet_status", "req_id": "api-fleet"})
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _rpc_fleet_events(
+        self, since_ts: float = 0,
+        event_types: list[str] | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            sock = default_socket_path()
+            req: dict[str, Any] = {
+                "op": "fleet_events", "req_id": "api-events",
+                "since_ts": since_ts, "limit": limit,
+            }
+            if event_types:
+                req["event_types"] = event_types
+            return _query_unix(sock, req)
+        except Exception as e:
+            return {"error": str(e), "events": []}
+
     def _rpc_rate_metrics(
         self, window: int = 3600, bucket_s: int = 10,
     ) -> dict[str, Any]:
@@ -1890,14 +1920,21 @@ class RPC:
             sock = default_socket_path()
             stats = _query_unix(sock, {"op": "stats", "req_id": "rate-metrics"})
             if stats.get("ok"):
+                budget_key = f"budget_{exchange.name.lower()}"
+                budget = stats.get(budget_key, {})
+                if not budget:
+                    for k, v in stats.items():
+                        if k.startswith("budget_") and isinstance(v, dict):
+                            budget = v
+                            break
                 result["current"] = {
-                    "tokens_available": stats.get("tokens_available", 0),
-                    "tokens_max": stats.get("tokens_max", 0),
-                    "refill_rate": stats.get("refill_rate", 0),
-                    "backoff_active": stats.get("backoff_active", False),
-                    "backoff_factor": stats.get("backoff_factor", 1.0),
-                    "backoff_remaining_s": stats.get("backoff_remaining_s", 0),
-                    "queue_depths": stats.get("queue_depths", {}),
+                    "tokens_available": budget.get("tokens_available", 0),
+                    "tokens_max": budget.get("tokens_max", 0),
+                    "refill_rate": budget.get("refill_rate", 0),
+                    "backoff_active": budget.get("backoff_active", False),
+                    "backoff_factor": budget.get("backoff_factor", 1.0),
+                    "backoff_remaining_s": budget.get("backoff_remaining_s", 0),
+                    "queue_depths": budget.get("queue_depths", {}),
                 }
                 result["ftcache_extended"] = {
                     k: stats.get(k, 0) for k in [
@@ -1941,6 +1978,20 @@ class RPC:
                     "entries": pl_stats.get("entries", 0),
                     "hit_rate_pct": round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0,
                 }
+                pl_by_method = pl_stats.get("by_method", {})
+                if pl_by_method and "summary" in result and "by_method" in result["summary"]:
+                    for method_name, mstats in pl_by_method.items():
+                        m_gets = mstats.get("gets", 0)
+                        m_hits = mstats.get("hits", 0)
+                        m_misses = m_gets - m_hits
+                        result["summary"]["by_method"][f"pl:{method_name}"] = {
+                            "count": m_gets,
+                            "cached": m_hits,
+                            "direct": m_misses,
+                            "errors": 0,
+                            "avg_latency_ms": 0,
+                            "p95_latency_ms": 0,
+                        }
         except Exception:  # noqa: S110
             pass
 

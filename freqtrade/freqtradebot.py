@@ -3,10 +3,13 @@ Freqtrade is the main module of this bot. It contains the FreqtradeBot class.
 """
 
 import logging
+import os
+import time as time_module
 import traceback
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
+from pathlib import Path
 from threading import Lock
 from time import sleep
 from typing import Any
@@ -69,6 +72,39 @@ from freqtrade.wallets import Wallets
 
 logger = logging.getLogger(__name__)
 
+_SLOW_PHASE_THRESHOLD_S = 2.0
+
+
+class _StartupTracer:
+    """Lightweight startup instrumentation — logs each init phase with elapsed time."""
+
+    def __init__(self) -> None:
+        self._t0 = time_module.monotonic()
+        self._last = self._t0
+        self._phases: list[tuple[str, float]] = []
+
+    def mark(self, label: str, **extra: Any) -> None:
+        now = time_module.monotonic()
+        elapsed = now - self._t0
+        delta = now - self._last
+        suffix = " ".join(f"{k}={v}" for k, v in extra.items()) if extra else ""
+        slow = " ⚠ SLOW" if delta > _SLOW_PHASE_THRESHOLD_S else ""
+        logger.info(
+            "[startup +%.1fs] %s (%.1fs)%s%s",
+            elapsed, label, delta, f" {suffix}" if suffix else "", slow,
+        )
+        self._phases.append((label, delta))
+        self._last = now
+
+    def summary(self) -> None:
+        total = time_module.monotonic() - self._t0
+        slow = [(l, d) for l, d in self._phases if d > _SLOW_PHASE_THRESHOLD_S]
+        if slow:
+            details = ", ".join(f"{l}={d:.1f}s" for l, d in slow)
+            logger.info("[startup] READY in %.1fs — slow phases: %s", total, details)
+        else:
+            logger.info("[startup] READY in %.1fs — no slow phases", total)
+
 
 class FreqtradeBot(LoggingMixin):
     """
@@ -82,6 +118,7 @@ class FreqtradeBot(LoggingMixin):
         :param config: configuration dict, you can use Configuration.get_config()
         to get the config dict.
         """
+        _tracer = _StartupTracer()
         self.active_pair_whitelist: list[str] = []
 
         # Init bot state
@@ -90,10 +127,6 @@ class FreqtradeBot(LoggingMixin):
         # Init objects
         self.config = config
 
-        # Start API server early so FreqUI is reachable during exchange/pairlist init
-        if config.get("api_server", {}).get("enabled", False):
-            from freqtrade.rpc.api_server import ApiServer
-            ApiServer(config)
         exchange_config: ExchangeConfig = deepcopy(config["exchange"])
         # Remove credentials from original exchange config to avoid accidental credential exposure
         remove_exchange_credentials(config["exchange"], True)
@@ -102,16 +135,41 @@ class FreqtradeBot(LoggingMixin):
                 self.config, exchange_config=exchange_config, load_leverage_tiers=True
             )
 
+            _tracer.mark("exchange loaded", exchange=self.exchange.name)
+
+            # Register with fleet orchestrator (ftcache extension)
+            config_files = config.get("config_files", [""])
+            bot_identity = {
+                "bot_id": config.get("bot_name", ""),
+                "config_file": Path(config_files[0]).name if config_files else "",
+                "exchange": config["exchange"]["name"],
+                "trading_mode": config.get("trading_mode", "spot"),
+                "strategy": config.get("strategy", ""),
+                "timeframe": config.get("timeframe", "15m"),
+                "dry_run": config.get("dry_run", False),
+                "api_port": config.get("api_server", {}).get("listen_port", 0),
+                "pid": os.getpid(),
+            }
+            ftcache_client = getattr(self.exchange, '_ftcache_client', None)
+            if ftcache_client and ftcache_client:
+                ftcache_client.set_bot_identity(bot_identity)
+            else:
+                self.exchange._ftcache_pending_identity = bot_identity
+
             self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
+            _tracer.mark("strategy loaded", strategy=self.strategy.__class__.__name__)
 
             # Check config consistency here since strategies can set certain options
             validate_config_consistency(config)
             # Re-validate exchange compatibility
             self.exchange.validate_config(self.config)
+            _tracer.mark("config validated")
 
             init_db(self.config["db_url"])
+            _tracer.mark("db initialized")
 
             self.wallets = Wallets(self.config, self.exchange)
+            _tracer.mark("wallets synced")
 
             PairLocks.timeframe = self.config["timeframe"]
 
@@ -136,6 +194,13 @@ class FreqtradeBot(LoggingMixin):
             # Attach Wallets to strategy instance
             self.strategy.wallets = self.wallets
 
+            # Start API server after all bot components are initialized
+            # to avoid FreqUI polling endpoints that reference uninitialized attributes
+            if config.get("api_server", {}).get("enabled", False):
+                from freqtrade.rpc.api_server import ApiServer
+                ApiServer(config)
+            _tracer.mark("API server started")
+
             # Init ExternalMessageConsumer if enabled
             self.emc: ExternalMessageConsumer | None = (
                 ExternalMessageConsumer(self.config, self.dataprovider)
@@ -148,6 +213,8 @@ class FreqtradeBot(LoggingMixin):
                 lambda duration, _: logger.info(f"Initial Pairlist refresh took {duration:.2f}s"), 0
             ):
                 self.active_pair_whitelist = self._refresh_active_whitelist()
+
+            _tracer.mark("pairlist refreshed", pairs=len(self.active_pair_whitelist))
 
             # Set initial bot state from config
             initial_state = self.config.get("initial_state")
@@ -185,6 +252,8 @@ class FreqtradeBot(LoggingMixin):
             self.strategy.ft_bot_start()
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
             self.protections = ProtectionManager(self.config, self.strategy.protections)
+
+            _tracer.summary()
 
             def log_took_too_long(duration: float, time_limit: float):
                 logger.warning(
@@ -269,9 +338,15 @@ class FreqtradeBot(LoggingMixin):
         otherwise a new trade is created.
         :return: True if one or more trades has been created or closed, False otherwise
         """
+        _cycle_t0 = time_module.monotonic()
+        _cycle_phases: list[tuple[str, float]] = []
+
+        def _cp(label: str) -> None:
+            _cycle_phases.append((label, time_module.monotonic()))
 
         # Check whether markets have to be reloaded and reload them when it's needed
         self.exchange.reload_markets()
+        _cp("markets")
 
         self.update_trades_without_assigned_fees()
 
@@ -279,17 +354,22 @@ class FreqtradeBot(LoggingMixin):
         trades: list[Trade] = Trade.get_open_trades()
 
         self.active_pair_whitelist = self._refresh_active_whitelist(trades)
+        _cp("pairlist")
 
         # Inform ftcache which pairs have open positions (CRITICAL priority)
         if hasattr(self.exchange, 'ftcache_set_open_pairs'):
             open_pairs = {t.pair for t in trades}
             self.exchange.ftcache_set_open_pairs(open_pairs)
 
+        if hasattr(self.exchange, 'ftcache_mark_init_complete'):
+            self.exchange.ftcache_mark_init_complete()
+
         # Refreshing candles
         self.dataprovider.refresh(
             self.pairlists.create_pair_list(self.active_pair_whitelist),
             self.strategy.gather_informative_pairs(),
         )
+        _cp("candles")
 
         strategy_safe_wrapper(self.strategy.bot_loop_start, supress_error=True)(
             current_time=datetime.now(UTC)
@@ -297,10 +377,12 @@ class FreqtradeBot(LoggingMixin):
 
         with self._measure_execution:
             self.strategy.analyze(self.active_pair_whitelist)
+        _cp("analyze")
 
         with self._exit_lock:
             # Check for exchange cancellations, timeouts and user requested replace
             self.manage_open_orders()
+        _cp("orders")
 
         # Protect from collisions with force_exit.
         # Without this, freqtrade may try to recreate stoploss_on_exchange orders
@@ -310,6 +392,7 @@ class FreqtradeBot(LoggingMixin):
             # First process current opened trades (positions)
             self.exit_positions(trades)
             Trade.commit()
+        _cp("exits")
 
         # Check if we need to adjust our current positions before attempting to enter new trades.
         if self.strategy.position_adjustment_enable:
@@ -319,7 +402,19 @@ class FreqtradeBot(LoggingMixin):
         # Then looking for entry opportunities
         if self.state == State.RUNNING and self.get_free_open_trades():
             self.enter_positions()
+        _cp("entries")
         self._schedule.run_pending()
+
+        cycle_total = time_module.monotonic() - _cycle_t0
+        if cycle_total > 10.0:
+            prev = _cycle_t0
+            parts = []
+            for label, ts in _cycle_phases:
+                parts.append(f"{label}={ts - prev:.1f}s")
+                prev = ts
+            logger.warning(
+                "[cycle] slow cycle: %.1fs — %s", cycle_total, ", ".join(parts),
+            )
         Trade.commit()
         self.rpc.process_msg_queue(self.dataprovider._msg_queue)
         self.last_process = datetime.now(UTC)

@@ -143,7 +143,7 @@ class Binance(Exchange):
                     )
                 if msg:
                     raise OperationalException(msg)
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -286,7 +286,7 @@ class Binance(Exchange):
                 rates = self._api.fetch_funding_rates(symbols)
                 return rates
             return {}
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
@@ -507,7 +507,7 @@ class Binance(Exchange):
         try:
             delist_schedule = self._api.sapi_get_spot_delist_schedule()
             return delist_schedule
-        except ccxt.DDoSProtection as e:
+        except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
         except (ccxt.NetworkError, ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
