@@ -807,7 +807,11 @@ class CachedExchangeMixin:
                         if pair in all_tickers and self._ticker_has_pricing(all_tickers[pair]):
                             self._ftcache_record_cached("fetch_ticker", pair=pair)
                             return all_tickers[pair]
-                except (CacheRateLimited, CacheTimedOut, CacheUnavailable):
+                except (CacheRateLimited, CacheTimedOut) as exc:
+                    if isinstance(exc, CacheRateLimited):
+                        self._ftcache_last_backoff_active = True
+                        self._ftcache_last_backoff_ts = time.monotonic()
+                except CacheUnavailable:
                     pass
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             if self._ftcache_should_block_ccxt():
