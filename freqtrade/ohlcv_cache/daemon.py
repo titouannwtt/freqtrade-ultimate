@@ -271,21 +271,23 @@ class TokenBucket:
                                 "back-off relaxed to %.1fx", self._backoff_factor,
                             )
                     if self.weight_mode and self.weight_budget_per_min > 0:
-                        used = self.weight_used_last_min
-                        headroom = self.weight_budget_per_min * 0.50
-                        if used > headroom:
-                            wait_for_decay = max(1.0, (used - headroom) / max(self._effective_rate(), 0.1))
-                            wait_for_decay = min(wait_for_decay, 15.0)
-                            if served_since_backoff == 0:
-                                logger.info(
-                                    "post-backoff weight gate: %.0f/%.0f used "
-                                    "(headroom=%.0f%%), waiting %.1fs for decay",
-                                    used, self.weight_budget_per_min,
-                                    headroom / self.weight_budget_per_min * 100,
-                                    wait_for_decay,
-                                )
-                            await asyncio.sleep(wait_for_decay)
-                            continue
+                        next_priority = self._waiters[0][0] if self._waiters else 99
+                        if next_priority > 0:
+                            used = self.weight_used_last_min
+                            headroom = self.weight_budget_per_min * 0.80
+                            if used > headroom:
+                                wait_for_decay = max(1.0, (used - headroom) / max(self._effective_rate(), 0.1))
+                                wait_for_decay = min(wait_for_decay, 15.0)
+                                if served_since_backoff == 0:
+                                    logger.info(
+                                        "post-backoff weight gate: %.0f/%.0f used "
+                                        "(headroom=%.0f%%), waiting %.1fs for decay",
+                                        used, self.weight_budget_per_min,
+                                        headroom / self.weight_budget_per_min * 100,
+                                        wait_for_decay,
+                                    )
+                                await asyncio.sleep(wait_for_decay)
+                                continue
 
                 self._refill()
                 if self._waiters:
@@ -1286,6 +1288,9 @@ class Daemon:
         If cache is stale and another bot is already fetching, wait for
         its push instead of returning a miss (which would cause a second
         redundant API call).
+
+        On cache miss, auto-grants a rate token at CRITICAL priority so
+        the bot can skip the separate acquire() round-trip.
         """
         exchange = req.get("exchange", "hyperliquid")
         cache_key = exchange
@@ -1315,9 +1320,21 @@ class Daemon:
                 self._positions_inflight.pop(cache_key, None)
 
         self._positions_inflight[cache_key] = asyncio.Event()
+
+        budget = self._get_budget(exchange)
+        cost = self._get_weight(exchange, "positions_get")
+        async with budget._lock:
+            budget._refill()
+            budget.tokens = max(0.0, budget.tokens - cost)
+        budget._record_weight(cost)
+        logger.debug(
+            "positions_get cache miss for %s — auto-granted %.1f weight", exchange, cost,
+        )
+
         return {
             "req_id": req.get("req_id", ""), "ok": True,
             "hit": False, "data": [],
+            "auto_grant": True, "granted_cost": cost,
         }
 
     # --------- centralized rate limiter: shared balances cache
@@ -1357,9 +1374,21 @@ class Daemon:
                 self._balances_inflight.pop(exchange, None)
 
         self._balances_inflight[exchange] = asyncio.Event()
+
+        budget = self._get_budget(exchange)
+        cost = self._get_weight(exchange, "balances")
+        async with budget._lock:
+            budget._refill()
+            budget.tokens = max(0.0, budget.tokens - cost)
+        budget._record_weight(cost)
+        logger.debug(
+            "balances_get cache miss for %s — auto-granted %.1f weight", exchange, cost,
+        )
+
         return {
             "req_id": req.get("req_id", ""), "ok": True,
             "hit": False, "data": {},
+            "auto_grant": True, "granted_cost": cost,
         }
 
     # --------- centralized: shared markets cache

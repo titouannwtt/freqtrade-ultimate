@@ -525,10 +525,12 @@ class CachedExchangeMixin:
             return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
 
         # Try shared cache first (thread-safe via _loop_lock)
+        auto_granted = False
+        _t_cache = time.monotonic()
         try:
             ok, result = self._ftcache_run_on_loop(client.get_positions())
             if ok:
-                hit, positions = result
+                hit, positions, auto_granted = result
                 if hit:
                     if not isinstance(positions, list) or (
                         positions and not isinstance(positions[0], dict)
@@ -558,19 +560,23 @@ class CachedExchangeMixin:
             )
         except CacheUnavailable:
             pass
+        _t_after_cache = time.monotonic()
 
-        # Cache miss — do the actual fetch (with rate token) and push result
-        prio_pos = self._ftcache_init_priority(OhlcvCacheClient.HIGH)
-        if not self._ftcache_acquire_sync(priority=prio_pos, cost=2.0):
-            stale = self._ftcache_get_stale_positions()
-            if stale is not None:
-                return stale
-            if not self._ftcache_init_complete:
-                logger.warning("positions shed during init — retrying CRITICAL")
-                self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
-            else:
-                logger.warning("positions acquire shed + no stale data — returning empty")
-                return []
+        # Cache miss — do the actual fetch and push result
+        # If daemon auto-granted a rate token, skip the separate acquire call
+        if not auto_granted:
+            prio_pos = self._ftcache_init_priority(OhlcvCacheClient.HIGH)
+            if not self._ftcache_acquire_sync(priority=prio_pos, cost=2.0):
+                stale = self._ftcache_get_stale_positions()
+                if stale is not None:
+                    return stale
+                if not self._ftcache_init_complete:
+                    logger.warning("positions shed during init — retrying CRITICAL")
+                    self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+                else:
+                    logger.warning("positions acquire shed + no stale data — returning empty")
+                    return []
+        _t_after_acquire = time.monotonic()
         try:
             positions = super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
         except DDosProtection:
@@ -580,12 +586,25 @@ class CachedExchangeMixin:
             if stale is not None:
                 return stale
             raise
+        _t_after_fetch = time.monotonic()
         self._ftcache_save_positions(positions)
 
         try:
             self._ftcache_run_on_loop(client.push_positions(positions))
         except CacheUnavailable:
             pass
+
+        _total = _t_after_fetch - _t_cache
+        if _total > 2.0:
+            logger.info(
+                "[fetch_positions] breakdown: cache_check=%.1fs, acquire=%.1fs, "
+                "exchange_fetch=%.1fs, total=%.1fs auto_grant=%s",
+                _t_after_cache - _t_cache,
+                _t_after_acquire - _t_after_cache,
+                _t_after_fetch - _t_after_acquire,
+                _total,
+                auto_granted,
+            )
 
         return positions
 
@@ -618,28 +637,30 @@ class CachedExchangeMixin:
             return super().get_balances(params)  # type: ignore[misc]
 
         client = self._ftcache_get_client()
+        auto_granted = False
         if client is not None:
             try:
                 ok, result = self._ftcache_run_on_loop(client.get_balances())
                 if ok:
-                    hit, balances = result
+                    hit, balances, auto_granted = result
                     if hit:
                         self._ftcache_record_cached("get_balances")
                         return balances
             except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
                 pass
 
-        prio = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
-        if not self._ftcache_acquire_sync(priority=prio, cost=2.0):
-            if hasattr(self, "_ftcache_last_balances") and self._ftcache_last_balances:
-                logger.info("get_balances shed — using last known balances")
-                return self._ftcache_last_balances
-            logger.warning(
-                "get_balances shed with no stale data (init?) "
-                "— retrying with CRITICAL priority to unblock startup",
-            )
-            if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0):
-                raise DDosProtection("get_balances shed even at CRITICAL priority")
+        if not auto_granted:
+            prio = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            if not self._ftcache_acquire_sync(priority=prio, cost=2.0):
+                if hasattr(self, "_ftcache_last_balances") and self._ftcache_last_balances:
+                    logger.info("get_balances shed — using last known balances")
+                    return self._ftcache_last_balances
+                logger.warning(
+                    "get_balances shed with no stale data (init?) "
+                    "— retrying with CRITICAL priority to unblock startup",
+                )
+                if not self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0):
+                    raise DDosProtection("get_balances shed even at CRITICAL priority")
         try:
             balances = super().get_balances(params)  # type: ignore[misc]
         except DDosProtection:
@@ -683,6 +704,19 @@ class CachedExchangeMixin:
                             )
                             raise CacheUnavailable("markets data is not a dict")
                         self._markets = markets  # type: ignore[attr-defined]
+                        api_sync = getattr(self, "_api", None)
+                        api_async = getattr(self, "_api_async", None)
+                        ws_async = getattr(self, "_ws_async", None)
+                        if api_async and hasattr(api_async, "markets"):
+                            api_async.markets = markets
+                            api_async.markets_by_id = None
+                            api_async.set_markets(markets)
+                        if api_sync and api_async:
+                            api_sync.set_markets_from_exchange(api_async)
+                            api_sync.options = api_async.options
+                        if ws_async and api_async:
+                            ws_async.set_markets_from_exchange(api_async)
+                            ws_async.options = api_async.options
                         self._last_markets_refresh = dt_ts()
                         self._ftcache_record_cached("reload_markets")
                         logger.debug(
@@ -705,17 +739,22 @@ class CachedExchangeMixin:
         self._ftcache_acquire_sync(priority=prio_mkts, cost=20.0)
         return super().reload_markets(force, load_leverage_tiers=load_leverage_tiers)  # type: ignore[misc]
 
+    @staticmethod
+    def _ticker_has_pricing(ticker: dict) -> bool:
+        return ticker.get("bid") is not None or ticker.get("ask") is not None
+
     def fetch_ticker(self, pair: str) -> Ticker:
         """Extract ticker from shared tickers cache when possible.
 
         Avoids per-pair API calls — all bots share one bulk fetch.
+        Falls through to ccxt when cached ticker lacks bid/ask.
         """
         client = self._ftcache_get_client()
         if client is not None and not self._config.get("dry_run"):  # type: ignore[attr-defined]
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 tickers = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-            if tickers and pair in tickers:
+            if tickers and pair in tickers and self._ticker_has_pricing(tickers[pair]):
                 self._ftcache_record_cached("fetch_ticker", pair=pair)
                 return tickers[pair]
             fresh_ts = getattr(self, "_ftcache_tickers_fresh_ts", 0) or 0
@@ -731,7 +770,7 @@ class CachedExchangeMixin:
                         with self._cache_lock:  # type: ignore[attr-defined]
                             self._fetch_tickers_cache[cache_key] = all_tickers  # type: ignore[attr-defined]
                         self._ftcache_tickers_fresh_ts = time.monotonic()
-                        if pair in all_tickers:
+                        if pair in all_tickers and self._ticker_has_pricing(all_tickers[pair]):
                             self._ftcache_record_cached("fetch_ticker", pair=pair)
                             return all_tickers[pair]
                 except (CacheRateLimited, CacheTimedOut, CacheUnavailable):
@@ -742,7 +781,7 @@ class CachedExchangeMixin:
                 cache_key = "fetch_tickers"
                 with self._cache_lock:  # type: ignore[attr-defined]
                     stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-                if stale and pair in stale:
+                if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
                     logger.debug("fetch_ticker shed — using stale cache for %s", pair)
                     return stale[pair]
                 raise DDosProtection(f"fetch_ticker shed for {pair} during 429 backoff")

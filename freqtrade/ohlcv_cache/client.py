@@ -402,8 +402,8 @@ class OhlcvCacheClient:
                 f"{resp.get('error_message')}"
             )
 
-    async def get_positions(self) -> tuple[bool, list]:
-        """Get cached positions from the daemon. Returns (hit, data)."""
+    async def get_positions(self) -> tuple[bool, list, bool]:
+        """Get cached positions from the daemon. Returns (hit, data, auto_grant)."""
         req = {
             "op": "positions_get",
             "req_id": uuid.uuid4().hex,
@@ -415,7 +415,7 @@ class OhlcvCacheClient:
                 f"positions_get failed: {resp.get('error_type')} "
                 f"{resp.get('error_message')}"
             )
-        return resp.get("hit", False), resp.get("data", [])
+        return resp.get("hit", False), resp.get("data", []), resp.get("auto_grant", False)
 
     async def push_balances(self, balances: dict) -> None:
         """Push get_balances() result into the daemon's shared cache."""
@@ -449,8 +449,8 @@ class OhlcvCacheClient:
             raise CacheUnavailable(f"markets failed: {err_type} {err_msg}")
         return True, resp.get("data", {})
 
-    async def get_balances(self) -> tuple[bool, dict]:
-        """Get cached balances from the daemon. Returns (hit, data)."""
+    async def get_balances(self) -> tuple[bool, dict, bool]:
+        """Get cached balances from the daemon. Returns (hit, data, auto_grant)."""
         req = {
             "op": "balances_get",
             "req_id": uuid.uuid4().hex,
@@ -462,7 +462,7 @@ class OhlcvCacheClient:
                 f"balances_get failed: {resp.get('error_type')} "
                 f"{resp.get('error_message')}"
             )
-        return resp.get("hit", False), resp.get("data", {})
+        return resp.get("hit", False), resp.get("data", {}), resp.get("auto_grant", False)
 
     async def get_funding_rates(self) -> tuple[bool, dict]:
         """Get cached funding rates from daemon (bulk fetch, all pairs)."""
@@ -559,8 +559,7 @@ class OhlcvCacheClient:
         logger.info("client configured for %s/%s via %s",
                     exchange_id, trading_mode, socket_path)
 
-        stagger_max = float(global_cfg.get("client_stagger_s", 30))
-        stagger_s = random.uniform(0, stagger_max)  # noqa: S311
+        stagger_s = cls._compute_smart_stagger(client, global_cfg)
         if stagger_s > 0.5:
             logger.info(
                 "startup stagger: waiting %.1fs before first request", stagger_s,
@@ -569,8 +568,56 @@ class OhlcvCacheClient:
 
         return client
 
+    @classmethod
+    def _compute_smart_stagger(
+        cls, client: OhlcvCacheClient, global_cfg: dict,
+    ) -> float:
+        stagger_max = float(global_cfg.get("client_stagger_s", 30))
+        try:
+            uptime = _sync_ping_daemon(client._socket_path)
+            if uptime is not None and uptime > 60:
+                logger.info(
+                    "daemon warm (uptime=%.0fs) — skipping client stagger", uptime,
+                )
+                return 0.0
+            if uptime is not None:
+                logger.info(
+                    "daemon cold (uptime=%.0fs) — applying stagger", uptime,
+                )
+        except Exception:
+            pass
+        return random.uniform(0, stagger_max)  # noqa: S311
+
 
 # ---------------- spawn helpers (module-level, sync)
+
+
+def _sync_ping_daemon(socket_path: str, timeout_s: float = 3.0) -> float | None:
+    """Synchronous ping via raw Unix socket — returns uptime_s or None."""
+    import socket as _socket
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.settimeout(timeout_s)
+    try:
+        s.connect(socket_path)
+        req = json.dumps({"op": "ping", "req_id": "stagger-check"}) + "\n"
+        s.sendall(req.encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        resp = json.loads(buf.split(b"\n", 1)[0])
+        if resp.get("ok"):
+            return float(resp.get("uptime_s", 0))
+    except Exception:
+        pass
+    finally:
+        try:
+            s.close()
+        except Exception:  # noqa: S110
+            pass
+    return None
 
 
 def _is_socket_live(socket_path: str, timeout_s: float = 1.0) -> bool:
