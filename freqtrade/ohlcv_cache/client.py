@@ -667,6 +667,34 @@ def _ensure_daemon_running(
         if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
             return
 
+        # Guard: if a daemon PID is still alive, don't spawn a second one.
+        # This prevents the unlink-recreate flock race (two daemons on
+        # different inodes of the same PID-file path).
+        pid_path = socket_path + ".pid"
+        if os.path.exists(pid_path):
+            try:
+                with open(pid_path) as f:
+                    old_pid = int(f.read().strip())
+                os.kill(old_pid, 0)
+                logger.warning(
+                    "daemon PID %d alive but unresponsive — waiting "
+                    "instead of spawning a duplicate", old_pid,
+                )
+                deadline = time.monotonic() + spawn_timeout_s
+                while time.monotonic() < deadline:
+                    if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
+                        return
+                    time.sleep(0.5)
+                raise CacheUnavailable(
+                    f"daemon PID {old_pid} alive but never became responsive"
+                )
+            except (ProcessLookupError, PermissionError, ValueError):
+                logger.info("stale PID file (PID gone) — will respawn")
+                try:
+                    os.unlink(pid_path)
+                except FileNotFoundError:
+                    pass
+
         logger.info("spawning ftcache daemon (socket=%s)", socket_path)
         log_f = Path(log_path).open("ab", buffering=0)
         try:
