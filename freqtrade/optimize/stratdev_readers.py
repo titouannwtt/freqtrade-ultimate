@@ -50,7 +50,8 @@ def _entry_from_meta(fthypt: Path, meta_path: Path) -> dict[str, Any]:
             meta = rapidjson.load(f)
     except Exception:
         return _entry_from_filename(fthypt)
-    return {
+
+    entry: dict[str, Any] = {
         "run_type": "hyperopt",
         "filename": fthypt.stem,
         "strategy": meta.get("strategy", ""),
@@ -66,6 +67,27 @@ def _entry_from_meta(fthypt: Path, meta_path: Path) -> dict[str, Any]:
         "total_trades": meta.get("best_trades"),
         "best_sharpe": meta.get("best_sharpe"),
     }
+
+    # Override with actual best epoch data from the .fthypt file (metadata can be stale)
+    best = _read_best_epoch(fthypt)
+    if best:
+        rm = best.get("results_metrics", {})
+        entry["total_trades"] = rm.get("total_trades", entry.get("total_trades"))
+        entry["total_profit_pct"] = round(rm.get("profit_total", 0) * 100, 2)
+        entry["best_loss"] = best.get("loss", entry.get("best_loss"))
+        if rm.get("sharpe") is not None:
+            entry["best_sharpe"] = rm["sharpe"]
+        if rm.get("max_drawdown_account") is not None:
+            entry["best_max_dd"] = round(rm["max_drawdown_account"] * 100, 2)
+        if rm.get("profit_factor") is not None:
+            entry["best_profit_factor"] = round(rm["profit_factor"], 4)
+        winrate = rm.get("winrate") or rm.get("win_rate")
+        if winrate is not None:
+            entry["best_winrate"] = round(winrate * 100, 1)
+        if rm.get("sqn") is not None:
+            entry["best_sqn"] = round(rm["sqn"], 2)
+
+    return entry
 
 
 def _entry_from_filename(fthypt: Path) -> dict[str, Any]:
@@ -742,7 +764,6 @@ def _compute_weekday_pattern(trades: list) -> dict:
         except Exception:
             continue
 
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     result = []
     for i in range(7):
         profits = by_day.get(i, [])
@@ -751,7 +772,6 @@ def _compute_weekday_pattern(trades: list) -> dict:
         total = round(sum(profits), 4)
         wins = sum(1 for p in profits if p > 0)
         result.append({
-            "day": days[i],
             "day_index": i,
             "trades": count,
             "avg_profit": avg,
@@ -797,7 +817,9 @@ def _compute_rolling_winrate(trades: list, window: int = 50) -> list[dict]:
     for t in trades:
         if not isinstance(t, dict):
             continue
-        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        pnl = t.get("profit_pct")
+        if pnl is None:
+            pnl = t.get("profit_ratio", 0)
         close_date = t.get("close_date", "")
         if not isinstance(pnl, (int, float)):
             continue
@@ -1137,7 +1159,8 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
     rm = best.get("results_metrics", {})
     best_trades = rm.get("trades", [])
 
-    all_losses = [e.get("loss", 1e6) for e in all_epochs]
+    all_losses_raw = [e.get("loss", 1e6) for e in all_epochs]
+    all_losses = [l for l in all_losses_raw if l < 1e6]
     all_dd = [
         e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100
         for e in all_epochs
@@ -1210,7 +1233,7 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
             for i, e in enumerate(top_10)
         ],
         "total_epochs": total_epochs,
-        "convergence": _subsample(all_losses, 500),
+        "convergence": _build_convergence(all_losses, 500),
         "epoch_dd_data": _subsample(all_dd, 500),
         "return_vs_dd": _compute_return_vs_dd(all_epochs),
         "loss_histogram": loss_histogram,
@@ -1266,6 +1289,22 @@ def _subsample(data: list, max_points: int) -> list:
         return data
     step = len(data) / max_points
     return [data[int(i * step)] for i in range(max_points)]
+
+
+def _build_convergence(losses: list[float], max_points: int) -> list[dict[str, float]]:
+    """Build convergence data with raw loss and rolling minimum (best so far)."""
+    if not losses:
+        return []
+    result: list[dict[str, float]] = []
+    best_so_far = float("inf")
+    for loss in losses:
+        if loss < best_so_far:
+            best_so_far = loss
+        result.append({"loss": loss, "best": best_so_far})
+    if len(result) <= max_points:
+        return result
+    step = len(result) / max_points
+    return [result[int(i * step)] for i in range(max_points)]
 
 
 def _skew_kurtosis(values: list[float]) -> tuple[float, float]:
@@ -1693,9 +1732,13 @@ def _compute_regime_analysis(best_trades: list[dict]) -> dict | None:
         pr = [t.get("profit_ratio", 0) for t in tl]
         pa = [t.get("profit_abs", 0) for t in tl]
         wins = sum(1 for p in pr if p > 0)
+        # Compound return: multiply (1 + r) for each trade
+        compound = 1.0
+        for r in pr:
+            compound *= (1 + r)
         return {
             "trades": len(tl),
-            "profit_pct": round(sum(pr) * 100, 2),
+            "profit_pct": round((compound - 1) * 100, 2),
             "profit_abs": round(sum(pa), 2),
             "win_rate": round(wins / len(tl) * 100, 1) if tl else 0,
             "avg_profit": round(sum(pr) / len(pr) * 100, 2) if pr else 0,
