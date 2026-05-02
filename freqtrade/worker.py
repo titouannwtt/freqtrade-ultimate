@@ -248,7 +248,8 @@ class Worker:
                     attempt + 1, max_retries, e, wait,
                 )
                 time.sleep(wait)
-        logger.warning("startup() failed after %d attempts — proceeding anyway", max_retries)
+        logger.error("startup() failed after %d attempts — stopping bot", max_retries)
+        self.freqtrade.state = State.STOPPED
 
     def _notify_fleet_state(self, state: State) -> None:
         state_map = {
@@ -291,6 +292,18 @@ class Worker:
 
             logger.exception("OperationalException. Stopping trader ...")
             self.freqtrade.state = State.STOPPED
+        except Exception:
+            logger.exception("Unexpected error in trading cycle, retrying in %s seconds...",
+                             RETRY_TIMEOUT)
+            try:
+                self.freqtrade.notify_status(
+                    f"*Unexpected error:*\n```\n{traceback.format_exc()}```\n"
+                    "Bot will retry next cycle.",
+                    msg_type=RPCMessageType.EXCEPTION,
+                )
+            except Exception:
+                pass
+            time.sleep(RETRY_TIMEOUT)
 
     def _reconfigure(self) -> None:
         """

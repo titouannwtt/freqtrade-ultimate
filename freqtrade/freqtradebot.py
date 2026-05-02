@@ -10,7 +10,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from time import sleep
 from typing import Any
 
@@ -223,7 +223,7 @@ class FreqtradeBot(LoggingMixin):
             self._position_guard_last_warn: dict[str, float] = {}
 
             # Protect exit-logic from forcesell and vice versa
-            self._exit_lock = Lock()
+            self._exit_lock = RLock()
             timeframe_secs = timeframe_to_seconds(self.strategy.timeframe)
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
             LoggingMixin.__init__(self, logger, timeframe_secs)
@@ -403,7 +403,8 @@ class FreqtradeBot(LoggingMixin):
         if self.state == State.RUNNING and self.get_free_open_trades():
             self.enter_positions()
         _cp("entries")
-        self._schedule.run_pending()
+        with self._exit_lock:
+            self._schedule.run_pending()
 
         cycle_total = time_module.monotonic() - _cycle_t0
         if cycle_total > 10.0:
@@ -664,7 +665,7 @@ class FreqtradeBot(LoggingMixin):
 
             except InvalidOrderException as e:
                 logger.warning(f"Error updating Order {order.order_id} due to {e}.")
-                if order.order_date_utc - timedelta(days=5) < datetime.now(UTC):
+                if order.order_date_utc + timedelta(days=5) < datetime.now(UTC):
                     logger.warning(
                         "Order is older than 5 days. Assuming order was fully cancelled."
                     )
@@ -834,10 +835,15 @@ class FreqtradeBot(LoggingMixin):
                     # check if it was liquidated on the exchange.
                     if self.trading_mode == TradingMode.FUTURES and total == 0:
                         with self._exit_lock:
-                            if self._handle_liquidation(trade):
+                            try:
+                                if self._handle_liquidation(trade):
+                                    return False
+                            except Exception:
+                                logger.warning(
+                                    f"Liquidation check failed for {trade.pair}, "
+                                    "skipping external_close fallback to avoid misclassification."
+                                )
                                 return False
-                            # Position is gone but not a liquidation
-                            # (e.g. Auto-Deleveraging, manual close on exchange)
                             if self._handle_external_close(trade):
                                 return False
 
@@ -849,6 +855,7 @@ class FreqtradeBot(LoggingMixin):
                             "This may however lead to further issues."
                         )
                         trade.amount = total
+                        trade.recalc_trade_from_orders()
                     else:
                         logger.warning(
                             f"{trade} has a total of {trade.amount} {trade.base_currency}, "
@@ -920,10 +927,9 @@ class FreqtradeBot(LoggingMixin):
             logger.warning(
                 f"Error checking for liquidation of {trade.pair}.", exc_info=True
             )
-            # Rollback any partial DB changes to prevent inconsistent state
             Trade.session.rollback()
             Trade.session.refresh(trade)
-            return False
+            raise
 
     def _handle_external_close(self, trade: Trade) -> bool:
         """
@@ -935,12 +941,31 @@ class FreqtradeBot(LoggingMixin):
         :return: True if handled, False otherwise
         """
         try:
-            # Use the current market price as close price
-            close_price = self.exchange.get_rate(
-                trade.pair, refresh=True, side="exit", is_short=trade.is_short
-            )
+            # Try to find the actual close price from recent trades on exchange
+            close_price = None
+            try:
+                recent_trades = self.exchange.get_trades_for_order(
+                    "external", trade.pair, since=trade.open_date_utc
+                )
+                if recent_trades:
+                    last_trade = recent_trades[-1]
+                    close_price = last_trade.get("price")
+                    logger.info(
+                        f"Found actual fill price {close_price} for "
+                        f"external close of {trade.pair}."
+                    )
+            except Exception:
+                logger.debug(
+                    f"Could not fetch fill price for external close of {trade.pair}, "
+                    "falling back to market price.",
+                    exc_info=True,
+                )
 
-            # Validate close price is reasonable
+            if not close_price or close_price <= 0:
+                close_price = self.exchange.get_rate(
+                    trade.pair, refresh=True, side="exit", is_short=trade.is_short
+                )
+
             import math
             if (
                 not close_price or close_price <= 0
@@ -954,7 +979,7 @@ class FreqtradeBot(LoggingMixin):
             logger.warning(
                 f"Position for {trade.pair} was CLOSED EXTERNALLY on exchange "
                 f"(Auto-Deleveraging, manual close, or other external event). "
-                f"Closing trade at current price {close_price}. "
+                f"Closing trade at price {close_price}. "
                 f"Trade: {trade}"
             )
 
@@ -967,6 +992,8 @@ class FreqtradeBot(LoggingMixin):
                             order.order_id, trade.pair, trade.amount
                         )
                         order.ft_cancel_reason = "external_close"
+                        order.ft_is_open = False
+                        order.status = "canceled"
                     except Exception:
                         logger.warning(
                             f"Could not cancel pending order {order.order_id} for "

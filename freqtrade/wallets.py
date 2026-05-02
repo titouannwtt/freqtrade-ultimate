@@ -193,7 +193,11 @@ class Wallets:
     def _update_live(self) -> None:
         import time as _time
         _t0 = _time.monotonic()
-        balances = self._exchange.get_balances()
+        try:
+            balances = self._exchange.get_balances()
+        except Exception:
+            logger.warning("Failed to fetch balances, keeping stale wallet data.", exc_info=True)
+            return
         _t1 = _time.monotonic()
         _wallets = {}
 
@@ -206,7 +210,13 @@ class Wallets:
                     balances[currency].get("total", 0),
                 )
 
-        positions = self._exchange.fetch_positions()
+        try:
+            positions = self._exchange.fetch_positions()
+        except Exception:
+            logger.warning(
+                "Failed to fetch positions, keeping stale wallet data.", exc_info=True
+            )
+            return
         _t2 = _time.monotonic()
         if (_t2 - _t0) > 2.0:
             logger.info(
@@ -218,23 +228,26 @@ class Wallets:
             if not isinstance(position, dict):
                 logger.warning("position entry is %s, not dict — skipping", type(position).__name__)
                 continue
-            symbol = position["symbol"]
-            if position["side"] is None or position["collateral"] == 0.0:
-                # Position is not open ...
+            try:
+                symbol = position["symbol"]
+                if position["side"] is None or position["collateral"] == 0.0:
+                    continue
+                size = self._exchange._contracts_to_amount(symbol, position["contracts"])
+                collateral = safe_value_fallback(position, "initialMargin", "collateral", 0.0)
+                leverage: float | None = position.get("leverage")
+                if not leverage:
+                    trade = Trade.get_trades_proxy(is_open=True, pair=symbol)
+                    leverage = trade[0].leverage if trade else None
+                _parsed_positions[symbol] = PositionWallet(
+                    symbol,
+                    position=size,
+                    leverage=leverage,
+                    collateral=collateral,
+                    side=position["side"],
+                )
+            except (KeyError, TypeError) as e:
+                logger.warning("Skipping malformed position entry: %s", e)
                 continue
-            size = self._exchange._contracts_to_amount(symbol, position["contracts"])
-            collateral = safe_value_fallback(position, "initialMargin", "collateral", 0.0)
-            leverage: float | None = position.get("leverage")
-            if not leverage:
-                trade = Trade.get_trades_proxy(is_open=True, pair=symbol)
-                leverage = trade[0].leverage if trade else None
-            _parsed_positions[symbol] = PositionWallet(
-                symbol,
-                position=size,
-                leverage=leverage,
-                collateral=collateral,
-                side=position["side"],
-            )
         self._positions = _parsed_positions
         self._wallets = _wallets
 

@@ -6,6 +6,7 @@ Common Interface for bot and strategy to access data.
 """
 
 import logging
+import threading
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
@@ -49,6 +50,7 @@ class DataProvider:
         self._pairlists = pairlists
         self.__rpc = rpc
         self.__cached_pairs: dict[PairWithTimeframe, tuple[DataFrame, datetime]] = {}
+        self.__cached_pairs_lock = threading.Lock()
         self.__slice_index: dict[str, int] = {}
         self.__slice_date: datetime | None = None
 
@@ -98,7 +100,18 @@ class DataProvider:
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         """
         pair_key = (pair, timeframe, candle_type)
-        self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
+        if len(dataframe) > 0 and "date" in dataframe.columns:
+            last_candle_ts = dataframe.iloc[-1]["date"]
+            if hasattr(last_candle_ts, "timestamp"):
+                age_seconds = (datetime.now(UTC) - last_candle_ts.to_pydatetime()).total_seconds()
+                tf_seconds = timeframe_to_seconds(timeframe)
+                if age_seconds > tf_seconds * 2:
+                    logger.warning(
+                        "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
+                        pair, timeframe, age_seconds, age_seconds / tf_seconds,
+                    )
+        with self.__cached_pairs_lock:
+            self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
 
     # For multiple producers we will want to merge the pairlists instead of overwriting
     def _set_producer_pairs(self, pairlist: list[str], producer_name: str = "default"):
@@ -405,18 +418,19 @@ class DataProvider:
             Returns empty dataframe and Epoch 0 (1970-01-01) if no dataframe was cached.
         """
         pair_key = (pair, timeframe, self._config.get("candle_type_def", CandleType.SPOT))
-        if pair_key in self.__cached_pairs:
-            if self.runmode in (RunMode.DRY_RUN, RunMode.LIVE):
-                df, date = self.__cached_pairs[pair_key]
-            else:
-                df, date = self.__cached_pairs[pair_key]
-                if (max_index := self.__slice_index.get(pair)) is not None:
-                    df = df.iloc[max(0, max_index - MAX_DATAFRAME_CANDLES) : max_index]
+        with self.__cached_pairs_lock:
+            if pair_key in self.__cached_pairs:
+                if self.runmode in (RunMode.DRY_RUN, RunMode.LIVE):
+                    df, date = self.__cached_pairs[pair_key]
                 else:
-                    return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
-            return df, date
-        else:
-            return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
+                    df, date = self.__cached_pairs[pair_key]
+                    if (max_index := self.__slice_index.get(pair)) is not None:
+                        df = df.iloc[max(0, max_index - MAX_DATAFRAME_CANDLES) : max_index]
+                    else:
+                        return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
+                return df, date
+            else:
+                return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
 
     @property
     def runmode(self) -> RunMode:
@@ -444,7 +458,8 @@ class DataProvider:
         """
         Clear pair dataframe cache.
         """
-        self.__cached_pairs = {}
+        with self.__cached_pairs_lock:
+            self.__cached_pairs = {}
         # Don't reset backtesting pairs -
         # otherwise they're reloaded each time during hyperopt due to with analyze_per_epoch
         # self.__cached_pairs_backtesting = {}

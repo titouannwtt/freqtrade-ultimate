@@ -573,13 +573,13 @@ class RPC:
             merged = pd.DataFrame(columns=["date", "exchange_volume"])
 
         if not trade_buckets.empty:
-            merged = merged.merge(trade_buckets, on="date", how="outer")
+            merged = merged.merge(trade_buckets, on="date", how="left")
         else:
             merged["trade_count"] = 0
             merged["abs_profit"] = 0.0
 
         if not vol_buckets.empty:
-            merged = merged.merge(vol_buckets, on="date", how="outer")
+            merged = merged.merge(vol_buckets, on="date", how="left")
         else:
             merged["bot_volume"] = 0.0
 

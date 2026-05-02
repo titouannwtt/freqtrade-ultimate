@@ -409,7 +409,7 @@ class Hyperliquid(Exchange):
         if (
             order["average"] is None
             and order["status"] in ("canceled", "closed")
-            and order["filled"] > 0
+            and (order["filled"] or 0) > 0
         ):
             # Hyperliquid does not fill the average price in the order response
             # Fetch trades to calculate the average price to have the actual price
