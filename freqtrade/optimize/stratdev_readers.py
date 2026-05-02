@@ -223,13 +223,17 @@ def _compute_analytics_for_epoch(
         result["starting_balance"] = starting_balance
         result["top_drawdowns"] = _compute_top_drawdowns(equity, drawdown_series)
 
+    trades = rm.get("trades", [])
+    if not trades:
+        trades = epoch.get("trades", [])
+
     periodic = rm.get("periodic_breakdown", {})
     monthly_data = periodic.get("month", [])
     if monthly_data:
         result["monthly_returns"] = _build_monthly_heatmap(monthly_data)
     elif daily_profit:
         result["monthly_returns"] = _build_monthly_heatmap_from_daily(
-            daily_profit, starting_balance
+            daily_profit, starting_balance, trades
         )
 
     if daily_profit and len(daily_profit) >= 30:
@@ -238,10 +242,6 @@ def _compute_analytics_for_epoch(
     if daily_profit:
         result["risk_metrics"] = _compute_risk_metrics(daily_profit, starting_balance)
         result["drawdown_calendar"] = _compute_drawdown_calendar(daily_profit, starting_balance)
-
-    trades = rm.get("trades", [])
-    if not trades:
-        trades = epoch.get("trades", [])
     if trades:
         result["trade_pnl_distribution"] = _compute_trade_pnl_distribution(trades)
         result["trade_durations"] = _compute_trade_durations(trades)
@@ -424,7 +424,7 @@ def _build_monthly_heatmap(monthly_data: list[dict]) -> list[dict]:
 
 
 def _build_monthly_heatmap_from_daily(
-    daily_profit: list, starting_balance: float,
+    daily_profit: list, starting_balance: float, trades: list | None = None,
 ) -> list[dict]:
     from collections import defaultdict
     monthly: dict[tuple[int, int], dict] = defaultdict(
@@ -435,8 +435,23 @@ def _build_monthly_heatmap_from_daily(
         if len(parts) >= 2:
             key = (int(parts[0]), int(parts[1]))
             monthly[key]["profit_abs"] += pnl
+    if trades:
+        for t in trades:
+            cd = t.get("close_date") or t.get("close_timestamp")
+            if not cd:
+                continue
+            if isinstance(cd, str):
+                parts = cd.split("-")
+                if len(parts) >= 2:
+                    key = (int(parts[0]), int(parts[1]))
+                    monthly[key]["trades"] += 1
+            elif isinstance(cd, (int, float)):
+                from datetime import datetime
+                dt = datetime.fromtimestamp(cd / 1000 if cd > 1e12 else cd)
+                monthly[(dt.year, dt.month)]["trades"] += 1
     return [
-        {"year": k[0], "month": k[1], "profit_abs": round(v["profit_abs"], 2), "trades": 0}
+        {"year": k[0], "month": k[1], "profit_abs": round(v["profit_abs"], 2),
+         "trades": v["trades"]}
         for k, v in sorted(monthly.items())
     ]
 
@@ -2441,3 +2456,225 @@ def convert_backtest_entries(
             pass
         results.append(result)
     return results
+
+
+def compute_plot_profit_data(
+    dirname: Path, filename: str, strategy: str,
+) -> dict[str, Any]:
+    zip_path = dirname / f"{filename}.zip"
+    json_path = dirname / f"{filename}.json"
+    load_path = zip_path if zip_path.exists() else json_path
+    if not load_path.exists():
+        return {"error": "file_not_found"}
+
+    try:
+        stats = load_backtest_stats(load_path)
+    except Exception as e:
+        logger.warning("Failed to load backtest stats for plot-profit: %s", e)
+        return {"error": "load_failed"}
+
+    strat_data = stats.get("strategy", {}).get(strategy, {})
+    if not strat_data:
+        all_strats = list(stats.get("strategy", {}).keys())
+        if all_strats:
+            strat_data = stats["strategy"][all_strats[0]]
+        else:
+            return {"error": "strategy_not_found"}
+
+    trades = strat_data.get("trades", [])
+    if not trades:
+        return {"error": "no_trades"}
+
+    starting_balance = strat_data.get("starting_balance", 1000)
+    timeframe = strat_data.get("timeframe", "5m")
+
+    combined_profit = _compute_combined_profit(trades, starting_balance)
+    drawdown_markers = _compute_drawdown_markers(trades, starting_balance)
+    profit_per_pair = _compute_profit_per_pair(trades, starting_balance)
+    parallelism = _compute_parallelism(trades, timeframe)
+    underwater_abs, underwater_pct = _compute_underwater_series(trades, starting_balance)
+
+    return {
+        "combined_profit": combined_profit,
+        "drawdown_markers": drawdown_markers,
+        "profit_per_pair": profit_per_pair,
+        "parallelism": parallelism,
+        "underwater_abs": underwater_abs,
+        "underwater_pct": underwater_pct,
+        "starting_balance": starting_balance,
+        "timeframe": timeframe,
+    }
+
+
+def _compute_combined_profit(trades: list, starting_balance: float) -> list[dict]:
+    sorted_trades = sorted(trades, key=lambda t: t.get("close_date", "") or "")
+    cumulative = 0.0
+    result = []
+    for t in sorted_trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_abs", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        cumulative += pnl
+        close_date = t.get("close_date", "")
+        if close_date:
+            result.append({
+                "date": str(close_date),
+                "value": round(cumulative, 4),
+                "balance": round(starting_balance + cumulative, 2),
+            })
+
+    if len(result) > 2000:
+        step = len(result) / 2000
+        result = [result[int(i * step)] for i in range(2000)]
+    return result
+
+
+def _compute_drawdown_markers(trades: list, starting_balance: float) -> dict:
+    sorted_trades = sorted(trades, key=lambda t: t.get("close_date", "") or "")
+    if not sorted_trades:
+        return {}
+
+    cumulative = 0.0
+    high_value = 0.0
+    high_date = ""
+    max_dd = 0.0
+    max_dd_high_date = ""
+    max_dd_low_date = ""
+    max_dd_high_val = 0.0
+    max_dd_low_val = 0.0
+
+    for t in sorted_trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_abs", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        cumulative += pnl
+        close_date = str(t.get("close_date", ""))
+        if cumulative > high_value:
+            high_value = cumulative
+            high_date = close_date
+        dd = high_value - cumulative
+        if dd > max_dd:
+            max_dd = dd
+            max_dd_high_date = high_date
+            max_dd_low_date = close_date
+            max_dd_high_val = starting_balance + high_value
+            max_dd_low_val = starting_balance + cumulative
+
+    max_dd_pct = round(max_dd / max_dd_high_val * 100, 2) if max_dd_high_val > 0 else 0
+
+    return {
+        "max_dd_start": max_dd_high_date,
+        "max_dd_end": max_dd_low_date,
+        "max_dd_abs": round(max_dd, 2),
+        "max_dd_pct": max_dd_pct,
+        "high_value": round(max_dd_high_val, 2),
+        "low_value": round(max_dd_low_val, 2),
+    }
+
+
+def _compute_profit_per_pair(trades: list, starting_balance: float) -> dict[str, list[dict]]:
+    from collections import defaultdict
+
+    by_pair: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pair = t.get("pair", "unknown")
+        by_pair[pair].append(t)
+
+    result: dict[str, list[dict]] = {}
+    for pair, pair_trades in by_pair.items():
+        sorted_t = sorted(pair_trades, key=lambda x: x.get("close_date", "") or "")
+        cumulative = 0.0
+        series = []
+        for t in sorted_t:
+            pnl = t.get("profit_abs", 0)
+            if isinstance(pnl, (int, float)):
+                cumulative += pnl
+            close_date = t.get("close_date", "")
+            if close_date:
+                series.append({"date": str(close_date), "value": round(cumulative, 4)})
+        if len(series) > 500:
+            step = len(series) / 500
+            series = [series[int(i * step)] for i in range(500)]
+        result[pair] = series
+
+    return result
+
+
+def _compute_parallelism(trades: list, timeframe: str) -> list[dict]:
+    import pandas as pd
+
+    from freqtrade.data.btanalysis.trade_parallelism import analyze_trade_parallelism
+
+    trade_dicts = [t for t in trades if isinstance(t, dict)]
+    if not trade_dicts:
+        return []
+
+    df = pd.DataFrame(trade_dicts)
+    for col in ("open_date", "close_date"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], utc=True)
+
+    if "open_date" not in df.columns or "close_date" not in df.columns:
+        return []
+
+    try:
+        result_df = analyze_trade_parallelism(df, timeframe)
+    except Exception as e:
+        logger.warning("Failed to compute parallelism: %s", e)
+        return []
+
+    result = []
+    for idx, row in result_df.iterrows():
+        result.append({
+            "date": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
+            "count": int(row["open_trades"]),
+        })
+
+    if len(result) > 2000:
+        step = len(result) / 2000
+        result = [result[int(i * step)] for i in range(2000)]
+    return result
+
+
+def _compute_underwater_series(
+    trades: list, starting_balance: float,
+) -> tuple[list[dict], list[dict]]:
+    sorted_trades = sorted(trades, key=lambda t: t.get("close_date", "") or "")
+    if not sorted_trades:
+        return [], []
+
+    cumulative = 0.0
+    high_value = 0.0
+    underwater_abs: list[dict] = []
+    underwater_pct: list[dict] = []
+
+    for t in sorted_trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_abs", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        cumulative += pnl
+        if cumulative > high_value:
+            high_value = cumulative
+        dd_abs = cumulative - high_value
+        balance_at_high = starting_balance + high_value
+        dd_pct = dd_abs / balance_at_high if balance_at_high > 0 else 0
+
+        close_date = t.get("close_date", "")
+        if close_date:
+            underwater_abs.append({"date": str(close_date), "value": round(dd_abs, 4)})
+            underwater_pct.append({"date": str(close_date), "value": round(dd_pct, 6)})
+
+    if len(underwater_abs) > 2000:
+        step = len(underwater_abs) / 2000
+        underwater_abs = [underwater_abs[int(i * step)] for i in range(2000)]
+        underwater_pct = [underwater_pct[int(i * step)] for i in range(2000)]
+
+    return underwater_abs, underwater_pct
