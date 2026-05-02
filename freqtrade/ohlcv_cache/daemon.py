@@ -2011,6 +2011,7 @@ class Daemon:
             limit=16 * 1024 * 1024,
         )
         os.chmod(self.socket_path, 0o600)
+        self._socket_ino = os.stat(self.socket_path).st_ino
         logger.info(
             "daemon listening on %s (pid=%d, proto=%d)",
             self.socket_path, os.getpid(), PROTOCOL_VERSION,
@@ -2050,8 +2051,10 @@ class Daemon:
                                 uptime_s=round(self.stats.uptime_s(), 1))
             self.event_log.flush()
             try:
-                os.unlink(self.socket_path)
-            except OSError:
+                disk_ino = os.stat(self.socket_path).st_ino
+                if disk_ino == getattr(self, "_socket_ino", None):
+                    os.unlink(self.socket_path)
+            except (FileNotFoundError, OSError):
                 pass
             logger.info("daemon stopped cleanly")
 
@@ -2150,9 +2153,16 @@ def main() -> int:
         return 1
     finally:
         try:
+            pid_path = global_cfg["socket_path"] + ".pid"
+            try:
+                fd_ino = os.fstat(pid_lock_fd).st_ino
+                disk_ino = os.stat(pid_path).st_ino
+                if fd_ino == disk_ino:
+                    os.unlink(pid_path)
+            except (FileNotFoundError, OSError):
+                pass
             fcntl.flock(pid_lock_fd, fcntl.LOCK_UN)
             os.close(pid_lock_fd)
-            os.unlink(global_cfg["socket_path"] + ".pid")
         except Exception:
             pass
     return 0
