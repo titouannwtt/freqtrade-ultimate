@@ -623,21 +623,13 @@ def _sync_ping_daemon(socket_path: str, timeout_s: float = 3.0) -> float | None:
     return None
 
 
-def _is_socket_live(socket_path: str, timeout_s: float = 1.0) -> bool:
-    import socket
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout_s)
-    try:
-        s.connect(socket_path)
-    except (TimeoutError, FileNotFoundError, ConnectionRefusedError, OSError):
-        return False
-    else:
-        return True
-    finally:
-        try:
-            s.close()
-        except Exception:  # noqa: S110
-            pass
+def _socket_file_exists(socket_path: str) -> bool:
+    return os.path.exists(socket_path)
+
+
+def _daemon_responsive(socket_path: str) -> bool:
+    """Check that the daemon is actually listening — one ping round-trip."""
+    return _sync_ping_daemon(socket_path, timeout_s=2.0) is not None
 
 
 def _ensure_daemon_running(
@@ -651,7 +643,7 @@ def _ensure_daemon_running(
 
     Raises CacheUnavailable if the daemon cannot be started in time.
     """
-    if _is_socket_live(socket_path):
+    if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
         return
 
     Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
@@ -666,13 +658,13 @@ def _ensure_daemon_running(
             # Another bot is spawning — wait for socket to appear
             deadline = time.monotonic() + spawn_timeout_s
             while time.monotonic() < deadline:
-                if _is_socket_live(socket_path):
+                if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
                     return
-                time.sleep(0.2)
+                time.sleep(0.5)
             raise CacheUnavailable("timed out waiting for concurrent daemon spawn")
 
         # We hold the lock. Re-check in case a recent spawn completed.
-        if _is_socket_live(socket_path):
+        if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
             return
 
         logger.info("spawning ftcache daemon (socket=%s)", socket_path)
@@ -694,13 +686,13 @@ def _ensure_daemon_running(
         finally:
             log_f.close()
 
-        # Poll for readiness
+        # Poll for readiness: cheap file check, then one real ping
         deadline = time.monotonic() + spawn_timeout_s
         while time.monotonic() < deadline:
-            if _is_socket_live(socket_path):
+            if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
                 logger.info("daemon is up on %s", socket_path)
                 return
-            time.sleep(0.2)
+            time.sleep(0.5)
         raise CacheUnavailable(
             f"daemon did not become ready within {spawn_timeout_s}s (see {log_path})"
         )
