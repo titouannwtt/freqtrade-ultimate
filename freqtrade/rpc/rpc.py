@@ -3,6 +3,7 @@ This module contains class to define a RPC communications
 """
 
 import logging
+import time
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -1970,19 +1971,26 @@ class RPC:
             if pl_stats.get("ok"):
                 pl_gets = pl_stats.get("gets", 0)
                 pl_hits = pl_stats.get("hits", 0)
+                started = pl_stats.get("started", 0)
+                uptime_s = time.monotonic() - started if started else 0
+                ratio = min(1.0, window / uptime_s) if uptime_s > 0 else 1.0
+                w_gets = round(pl_gets * ratio)
+                w_hits = round(pl_hits * ratio)
                 result["ftpairlist"] = {
                     "clients": pl_stats.get("clients", 0),
-                    "gets": pl_gets,
-                    "hits": pl_hits,
-                    "puts": pl_stats.get("puts", 0),
+                    "gets": w_gets,
+                    "hits": w_hits,
+                    "puts": round(pl_stats.get("puts", 0) * ratio),
                     "entries": pl_stats.get("entries", 0),
-                    "hit_rate_pct": round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0,
+                    "hit_rate_pct": (
+                        round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0
+                    ),
                 }
                 pl_by_method = pl_stats.get("by_method", {})
                 if pl_by_method and "summary" in result and "by_method" in result["summary"]:
                     for method_name, mstats in pl_by_method.items():
-                        m_gets = mstats.get("gets", 0)
-                        m_hits = mstats.get("hits", 0)
+                        m_gets = round(mstats.get("gets", 0) * ratio)
+                        m_hits = round(mstats.get("hits", 0) * ratio)
                         m_misses = m_gets - m_hits
                         result["summary"]["by_method"][f"pl:{method_name}"] = {
                             "count": m_gets,
