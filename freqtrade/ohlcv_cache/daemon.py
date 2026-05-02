@@ -2064,18 +2064,37 @@ class Daemon:
 
 def _acquire_pid_lock(socket_path: str) -> int | None:
     """Acquire an exclusive PID lock. Returns the fd if acquired, None if another
-    daemon is already running (in which case this process should exit silently)."""
+    daemon is already running (in which case this process should exit silently).
+
+    Guards against the unlink-recreate race: if the PID file was deleted while a
+    previous daemon still held a flock on the old inode, a new open() creates a
+    different inode and flock() succeeds on both.  We detect this by comparing
+    the fd's inode with the on-disk inode after acquiring the lock.
+    """
     pid_path = socket_path + ".pid"
-    fd = os.open(pid_path, os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        return None
-    os.ftruncate(fd, 0)
-    os.write(fd, f"{os.getpid()}\n".encode())
-    os.fsync(fd)
-    return fd
+    for _attempt in range(5):
+        fd = os.open(pid_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+
+        try:
+            fd_ino = os.fstat(fd).st_ino
+            disk_ino = os.stat(pid_path).st_ino
+        except FileNotFoundError:
+            os.close(fd)
+            continue
+        if fd_ino != disk_ino:
+            os.close(fd)
+            continue
+
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.fsync(fd)
+        return fd
+    return None
 
 
 def main() -> int:
