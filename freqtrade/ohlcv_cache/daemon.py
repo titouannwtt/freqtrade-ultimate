@@ -612,7 +612,7 @@ class BotRegistry:
             pid=info.get("pid", 0),
             connected_at=now,
             last_heartbeat=now,
-            state="initializing",
+            state=info.get("state", "initializing"),
             connection_id=conn_id,
         )
         old = self._bots.get(bot_id)
@@ -648,6 +648,10 @@ class BotRegistry:
         now = time.monotonic()
         result = []
         for entry in self._bots.values():
+            state = entry.state
+            uptime = now - entry.connected_at
+            if state == "initializing" and uptime > 120:
+                state = "running"
             result.append({
                 "bot_id": entry.bot_id,
                 "config_file": entry.config_file,
@@ -659,8 +663,8 @@ class BotRegistry:
                 "dry_run": entry.dry_run,
                 "api_port": entry.api_port,
                 "pid": entry.pid,
-                "state": entry.state,
-                "uptime_s": round(now - entry.connected_at, 1),
+                "state": state,
+                "uptime_s": round(uptime, 1),
                 "last_heartbeat_ago_s": round(now - entry.last_heartbeat, 1),
             })
         return result

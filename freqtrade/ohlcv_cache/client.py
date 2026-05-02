@@ -90,6 +90,8 @@ class OhlcvCacheClient:
         self._respawn_cfg: dict | None = respawn_cfg
         self._bot_identity: dict | None = None
         self._registered = False
+        self._last_state: str = ""
+        self._last_pairs_count: int = 0
         self.hold_off_s: float = 0.0
         self.hold_off_reason: str = ""
 
@@ -183,16 +185,30 @@ class OhlcvCacheClient:
                         self.hold_off_s,
                         self.hold_off_reason or "none",
                     )
+                    if self._last_state:
+                        self._writer.write(dumps({
+                            "op": "state_update",
+                            "req_id": uuid.uuid4().hex,
+                            "state": self._last_state,
+                            "pairs_count": self._last_pairs_count,
+                        }))
+                        await self._writer.drain()
+                        await asyncio.wait_for(
+                            self._reader.readline(), timeout=10.0,
+                        )
         except Exception as e:
             logger.debug("fleet register failed (non-fatal): %s", e)
 
     async def update_state(self, state: str, pairs_count: int = 0) -> None:
+        self._last_state = state
+        if pairs_count > 0:
+            self._last_pairs_count = pairs_count
         try:
             await self._send_and_receive({
                 "op": "state_update",
                 "req_id": uuid.uuid4().hex,
                 "state": state,
-                "pairs_count": pairs_count,
+                "pairs_count": pairs_count or self._last_pairs_count,
             })
         except Exception as e:
             logger.debug("fleet state_update failed (non-fatal): %s", e)
