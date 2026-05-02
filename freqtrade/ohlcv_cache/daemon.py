@@ -1179,13 +1179,13 @@ class Daemon:
             "bot reported 429 on direct ccxt call: %s %s — triggering backoff",
             method, pair or "(no pair)",
         )
-        if self._event_log:
-            self._event_log.emit(
+        if self.event_log:
+            self.event_log.emit(
                 "rate_limit_429", exchange=exchange,
                 method=method, pair=pair, source="bot_report",
             )
         budget.trigger_backoff(
-            2.0, event_log=self._event_log, exchange=exchange,
+            2.0, event_log=self.event_log, exchange=exchange,
         )
         return {
             "req_id": req.get("req_id", ""), "ok": True,

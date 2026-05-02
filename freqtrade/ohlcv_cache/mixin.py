@@ -68,6 +68,21 @@ class CachedExchangeMixin:
     _ftcache_last_balances: dict | None = None
     _ftcache_last_backoff_active: bool = False
     _ftcache_last_backoff_ts: float = 0.0
+    _BACKOFF_CCXT_BLOCK_S: float = 30.0
+
+    def _ftcache_should_block_ccxt(self) -> bool:
+        """Return True when daemon backoff is active — direct ccxt calls must be blocked.
+
+        During backoff, falling through to ccxt causes uncontrolled API pressure
+        (retrier does 4 retries per call × N bots = 429 snowball).
+        """
+        if not self._ftcache_last_backoff_active:
+            return False
+        age = time.monotonic() - self._ftcache_last_backoff_ts
+        if age > self._BACKOFF_CCXT_BLOCK_S:
+            self._ftcache_last_backoff_active = False
+            return False
+        return True
 
     def ftcache_set_open_pairs(self, pairs: set[str] | frozenset[str]) -> None:
         """Inform the cache layer which pairs currently have open positions.
@@ -287,6 +302,8 @@ class CachedExchangeMixin:
         The daemon triggers backoff so ALL bots' subsequent requests are
         queued by priority (CRITICAL first) at a reduced rate.
         """
+        self._ftcache_last_backoff_active = True
+        self._ftcache_last_backoff_ts = time.monotonic()
         client = self._ftcache_get_client()
         if client is None:
             return
@@ -297,8 +314,8 @@ class CachedExchangeMixin:
             if ok:
                 logger.info(
                     "reported 429 to daemon (method=%s pair=%s)"
-                    " — all bots will queue by priority",
-                    method, pair,
+                    " — all bots will queue by priority, blocking ccxt fallback for %.0fs",
+                    method, pair, self._BACKOFF_CCXT_BLOCK_S,
                 )
         except Exception as e:
             logger.debug("report_429 to daemon failed (non-fatal): %s", e)
@@ -332,7 +349,6 @@ class CachedExchangeMixin:
                         timeout=self._ACQUIRE_TIMEOUT_S,
                     ),
                 )
-                self._ftcache_last_backoff_active = False
                 return True
             finally:
                 lock.release()
@@ -438,6 +454,14 @@ class CachedExchangeMixin:
                 symbols=symbols, cached=cached, market_type=market_type,
             )
         if symbols is not None:
+            if self._ftcache_should_block_ccxt():
+                cache_key = f"fetch_tickers_{market_type}" if market_type else "fetch_tickers"
+                with self._cache_lock:  # type: ignore[attr-defined]
+                    stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+                if stale:
+                    filtered = {s: stale[s] for s in symbols if s in stale}
+                    if filtered:
+                        return filtered
             prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
             self._ftcache_acquire_sync(priority=prio_gt)
             return super().get_tickers(  # type: ignore[misc]
@@ -459,6 +483,13 @@ class CachedExchangeMixin:
                 client.get_tickers(market_type=mt_str),
             )
             if not ok:
+                if self._ftcache_should_block_ccxt():
+                    cache_key = f"fetch_tickers_{market_type}" if market_type else "fetch_tickers"
+                    with self._cache_lock:  # type: ignore[attr-defined]
+                        stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+                    if stale:
+                        return stale
+                    return {}
                 prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
                 self._ftcache_acquire_sync(priority=prio_gt)
                 return super().get_tickers(  # type: ignore[misc]
@@ -497,6 +528,15 @@ class CachedExchangeMixin:
             logger.info("shared tickers rate-limited, no local cache — returning empty")
             return {}
         except CacheUnavailable as e:
+            if self._ftcache_should_block_ccxt():
+                cache_key = f"fetch_tickers_{market_type}" if market_type else "fetch_tickers"
+                with self._cache_lock:  # type: ignore[attr-defined]
+                    stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+                if stale:
+                    logger.info("tickers unavailable during backoff — using stale cache")
+                    return stale
+                logger.info("tickers unavailable during backoff, no stale — returning empty")
+                return {}
             self._ftcache_bump("fallback_ccxt")
             logger.warning("shared tickers failed (%s) — falling back to ccxt", e)
             return super().get_tickers(  # type: ignore[misc]
@@ -770,6 +810,16 @@ class CachedExchangeMixin:
                 except (CacheRateLimited, CacheTimedOut, CacheUnavailable):
                     pass
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
+            if self._ftcache_should_block_ccxt():
+                cache_key = "fetch_tickers"
+                with self._cache_lock:  # type: ignore[attr-defined]
+                    stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+                if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
+                    logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
+                    return stale[pair]
+                raise DDosProtection(
+                    f"fetch_ticker blocked for {pair} during backoff (no stale data)"
+                )
             prio_tick = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
             if not self._ftcache_acquire_sync(priority=prio_tick):
                 cache_key = "fetch_tickers"
