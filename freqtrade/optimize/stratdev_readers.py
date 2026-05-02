@@ -1180,7 +1180,8 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
     best_trades = rm.get("trades", [])
 
     all_losses_raw = [e.get("loss", 1e6) for e in all_epochs]
-    all_losses = [l for l in all_losses_raw if l < 1e6]
+    # Filter out penalty losses (hyperopt assigns 100000 to invalid epochs)
+    all_losses = [l for l in all_losses_raw if l < 100000]
     all_dd = [
         e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100
         for e in all_epochs
@@ -1752,13 +1753,11 @@ def _compute_regime_analysis(best_trades: list[dict]) -> dict | None:
         pr = [t.get("profit_ratio", 0) for t in tl]
         pa = [t.get("profit_abs", 0) for t in tl]
         wins = sum(1 for p in pr if p > 0)
-        # Compound return: multiply (1 + r) for each trade
-        compound = 1.0
-        for r in pr:
-            compound *= (1 + r)
+        # Sum of individual profit ratios (not compounded) — avoids inflated %
+        total_pct = sum(pr) * 100
         return {
             "trades": len(tl),
-            "profit_pct": round((compound - 1) * 100, 2),
+            "profit_pct": round(total_pct, 2),
             "profit_abs": round(sum(pa), 2),
             "win_rate": round(wins / len(tl) * 100, 1) if tl else 0,
             "avg_profit": round(sum(pr) / len(pr) * 100, 2) if pr else 0,
@@ -1767,7 +1766,7 @@ def _compute_regime_analysis(best_trades: list[dict]) -> dict | None:
     s1, s2 = _stats(first), _stats(second)
     return {
         "first_half": s1, "second_half": s2,
-        "first_label": "First half", "second_label": "Second half",
+        "first_label": "first_half", "second_label": "second_half",
         "consistent": abs(s1["profit_pct"] - s2["profit_pct"])
         < max(abs(s1["profit_pct"]), abs(s2["profit_pct"]), 1) * 0.5,
     }
