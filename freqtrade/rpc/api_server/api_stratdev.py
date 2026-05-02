@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from freqtrade.rpc.api_server.api_stratdev_schemas import (
     AllRunsResponse,
@@ -19,6 +19,16 @@ from freqtrade.rpc.api_server.deps import get_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _safe_to_thread(func, *args):
+    try:
+        return await asyncio.to_thread(func, *args)
+    except RuntimeError as e:
+        if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
+            logger.debug("Ignoring thread pool submission during shutdown")
+            raise HTTPException(status_code=503, detail="Server shutting down")
+        raise
 
 _runs_cache: AllRunsResponse | None = None
 _runs_cache_ts: float = 0.0
@@ -109,7 +119,7 @@ async def api_list_all_runs(
     ):
         return _runs_cache
 
-    result = await asyncio.to_thread(_build_all_runs, config, strategy, run_type)
+    result = await _safe_to_thread(_build_all_runs, config, strategy, run_type)
     if not strategy and not run_type:
         _runs_cache = result
         _runs_cache_ts = now
@@ -123,7 +133,7 @@ async def api_hyperopt_detail(
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import get_hyperopt_run_detail
 
-    return await asyncio.to_thread(get_hyperopt_run_detail, _ho_dir(config), filename)
+    return await _safe_to_thread(get_hyperopt_run_detail, _ho_dir(config), filename)
 
 
 @router.get("/stratdev/hyperopt/{filename}/analysis")
@@ -133,7 +143,7 @@ async def api_hyperopt_analysis(
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import compute_hyperopt_analysis
 
-    return await asyncio.to_thread(compute_hyperopt_analysis, _ho_dir(config), filename)
+    return await _safe_to_thread(compute_hyperopt_analysis, _ho_dir(config), filename)
 
 
 @router.get("/stratdev/hyperopt/{filename}/advanced")
@@ -143,7 +153,20 @@ async def api_hyperopt_advanced(
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import compute_advanced_analytics
 
-    return await asyncio.to_thread(compute_advanced_analytics, _ho_dir(config), filename)
+    return await _safe_to_thread(compute_advanced_analytics, _ho_dir(config), filename)
+
+
+@router.get("/stratdev/hyperopt/{filename}/epoch/{rank}/advanced")
+async def api_hyperopt_epoch_advanced(
+    filename: str,
+    rank: int,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_readers import compute_epoch_advanced_analytics
+
+    return await _safe_to_thread(
+        compute_epoch_advanced_analytics, _ho_dir(config), filename, rank,
+    )
 
 
 @router.get("/stratdev/hyperopt/{filename}/epoch/{rank}")
@@ -154,7 +177,7 @@ async def api_hyperopt_epoch_detail(
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import get_epoch_detail
 
-    return await asyncio.to_thread(get_epoch_detail, _ho_dir(config), filename, rank)
+    return await _safe_to_thread(get_epoch_detail, _ho_dir(config), filename, rank)
 
 
 @router.delete("/stratdev/hyperopt/{filename}")
@@ -168,10 +191,10 @@ async def api_delete_hyperopt(
     )
 
     global _runs_cache, _runs_cache_ts
-    await asyncio.to_thread(delete_hyperopt_result, _ho_dir(config), filename)
+    await _safe_to_thread(delete_hyperopt_result, _ho_dir(config), filename)
     _runs_cache = None
     _runs_cache_ts = 0.0
-    remaining = await asyncio.to_thread(get_hyperopt_resultlist, _ho_dir(config))
+    remaining = await _safe_to_thread(get_hyperopt_resultlist, _ho_dir(config))
     return AllRunsResponse(
         backtests=[],
         hyperopts=[RunListEntry(**e) for e in remaining],
@@ -185,7 +208,7 @@ async def api_update_hyperopt_meta(
     body: MetadataUpdateRequest,
     config: dict = Depends(get_config),
 ) -> dict[str, str]:
-    return await asyncio.to_thread(
+    return await _safe_to_thread(
         _update_meta, _ho_dir(config) / f"{filename}.meta.json", body,
     )
 
@@ -197,7 +220,7 @@ async def api_wfa_detail(
 ) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import get_wfa_run_detail
 
-    return await asyncio.to_thread(get_wfa_run_detail, _wfa_dir(config), filename)
+    return await _safe_to_thread(get_wfa_run_detail, _wfa_dir(config), filename)
 
 
 @router.delete("/stratdev/wfa/{filename}")
@@ -211,10 +234,10 @@ async def api_delete_wfa(
     )
 
     global _runs_cache, _runs_cache_ts
-    await asyncio.to_thread(delete_wfa_result, _wfa_dir(config), filename)
+    await _safe_to_thread(delete_wfa_result, _wfa_dir(config), filename)
     _runs_cache = None
     _runs_cache_ts = 0.0
-    remaining = await asyncio.to_thread(get_wfa_resultlist, _wfa_dir(config))
+    remaining = await _safe_to_thread(get_wfa_resultlist, _wfa_dir(config))
     return AllRunsResponse(
         backtests=[],
         hyperopts=[],
@@ -247,7 +270,20 @@ async def api_update_wfa_meta(
         file_dump_json(wfa_file, data)
         return {"status": "ok"}
 
-    return await asyncio.to_thread(_do_update)
+    return await _safe_to_thread(_do_update)
+
+
+@router.get("/stratdev/backtest/{filename}/analysis")
+async def api_backtest_analysis(
+    filename: str,
+    strategy: str,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_readers import compute_backtest_analytics
+
+    return await _safe_to_thread(
+        compute_backtest_analytics, _bt_dir(config), filename, strategy,
+    )
 
 
 @router.get(
@@ -261,7 +297,7 @@ async def api_backtest_snapshot(
 ) -> BacktestSnapshotResponse:
     from freqtrade.optimize.stratdev_readers import get_backtest_snapshot
 
-    result = await asyncio.to_thread(
+    result = await _safe_to_thread(
         get_backtest_snapshot, _bt_dir(config), filename, strategy,
     )
     return BacktestSnapshotResponse(**result)
@@ -293,7 +329,7 @@ async def api_snapshot_diff(
 
         return compute_snapshot_diff(saved, current_path)
 
-    result = await asyncio.to_thread(_do_diff)
+    result = await _safe_to_thread(_do_diff)
     return SnapshotDiffResponse(**result)
 
 

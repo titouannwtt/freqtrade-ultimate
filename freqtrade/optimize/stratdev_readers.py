@@ -1,5 +1,6 @@
 import logging
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -7,12 +8,23 @@ import rapidjson
 
 from freqtrade.data.btanalysis.bt_fileutils import (
     get_backtest_resultlist,
+    load_backtest_stats,
     load_file_from_zip,
 )
 from freqtrade.optimize.hyperopt_tools import HyperoptTools
 
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=32)
+def _get_sorted_epochs(fthypt_path: str, mtime: float) -> list[dict[str, Any]]:
+    fthypt = Path(fthypt_path)
+    all_epochs: list[dict[str, Any]] = []
+    for batch in HyperoptTools._read_results(fthypt):
+        all_epochs.extend(batch)
+    all_epochs.sort(key=lambda e: e.get("loss", 1e6))
+    return all_epochs
 
 HYPER_PARAMS_FILE_FORMAT = rapidjson.NM_NATIVE | rapidjson.NM_NAN
 
@@ -127,11 +139,8 @@ def get_epoch_detail(dirname: Path, filename: str, rank: int) -> dict[str, Any]:
     if not fthypt.exists():
         return {"error": "file_not_found"}
 
-    all_epochs: list[dict[str, Any]] = []
-    for batch in HyperoptTools._read_results(fthypt):
-        all_epochs.extend(batch)
-
-    all_epochs.sort(key=lambda e: e.get("loss", 1e6))
+    mtime = fthypt.stat().st_mtime
+    all_epochs = _get_sorted_epochs(str(fthypt), mtime)
     idx = rank - 1
     if idx < 0 or idx >= len(all_epochs):
         return {"error": "rank_out_of_range", "total": len(all_epochs)}
@@ -147,20 +156,15 @@ def get_epoch_detail(dirname: Path, filename: str, rank: int) -> dict[str, Any]:
     }
 
 
-def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
-    fthypt = dirname / f"{filename}.fthypt"
-    if not fthypt.exists():
-        return {"error": "file_not_found"}
-
-    best = _read_best_epoch(fthypt)
-    if not best:
-        return {"error": "no_epochs"}
-
-    rm = best.get("results_metrics", {})
+def _compute_analytics_for_epoch(
+    epoch: dict[str, Any], rank: int = 1,
+) -> dict[str, Any]:
+    rm = epoch.get("results_metrics", {})
     result: dict[str, Any] = {
         "epoch_info": {
-            "loss": best.get("loss"),
-            "current_epoch": best.get("current_epoch"),
+            "rank": rank,
+            "loss": epoch.get("loss"),
+            "current_epoch": epoch.get("current_epoch"),
             "total_profit": rm.get("profit_total", 0),
             "total_profit_abs": rm.get("profit_total_abs", 0),
             "total_trades": rm.get("total_trades", 0),
@@ -174,9 +178,10 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
             "trade_count_long": rm.get("trade_count_long", 0),
             "trade_count_short": rm.get("trade_count_short", 0),
         },
+        "params_dict": epoch.get("params_dict", {}),
+        "params_details": epoch.get("params_details", {}),
     }
 
-    # 1. Equity curve + underwater plot from daily_profit
     daily_profit = rm.get("daily_profit", [])
     starting_balance = rm.get("starting_balance") or rm.get("dry_run_wallet", 1000)
     if daily_profit:
@@ -194,11 +199,8 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
         result["equity_curve"] = equity
         result["drawdown_series"] = drawdown_series
         result["starting_balance"] = starting_balance
-
-        # Top 5 drawdowns with duration and recovery
         result["top_drawdowns"] = _compute_top_drawdowns(equity, drawdown_series)
 
-    # 2. Monthly returns heatmap from periodic_breakdown or daily_profit
     periodic = rm.get("periodic_breakdown", {})
     monthly_data = periodic.get("month", [])
     if monthly_data:
@@ -208,23 +210,22 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
             daily_profit, starting_balance
         )
 
-    # 3. Rolling metrics from daily_profit
     if daily_profit and len(daily_profit) >= 30:
         result["rolling_metrics"] = _compute_rolling_metrics(daily_profit, starting_balance)
 
-    # 4. Advanced risk metrics from daily returns
     if daily_profit:
         result["risk_metrics"] = _compute_risk_metrics(daily_profit, starting_balance)
+        result["drawdown_calendar"] = _compute_drawdown_calendar(daily_profit, starting_balance)
 
-    # 5. Trade PnL distribution
     trades = rm.get("trades", [])
     if not trades:
-        trades = best.get("trades", [])
+        trades = epoch.get("trades", [])
     if trades:
         result["trade_pnl_distribution"] = _compute_trade_pnl_distribution(trades)
         result["trade_durations"] = _compute_trade_durations(trades)
+        result["return_distribution_fit"] = _compute_return_distribution_fit(trades)
+        result["mae_mfe"] = _compute_mae_mfe(trades)
 
-    # 6. Win/Loss streaks
     result["streaks"] = {
         "max_consecutive_wins": rm.get("max_consecutive_wins", 0),
         "max_consecutive_losses": rm.get("max_consecutive_losses", 0),
@@ -235,7 +236,6 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
     if trades:
         result["streaks"]["distribution"] = _compute_streak_distribution(trades)
 
-    # 7. Yearly returns
     yearly_data = periodic.get("year", [])
     if yearly_data:
         result["yearly_returns"] = [
@@ -248,57 +248,59 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
             for y in yearly_data
         ]
 
-    # 8. Exit reason breakdown
     exit_reasons = rm.get("exit_reason_summary", [])
     if exit_reasons:
         result["exit_reasons"] = exit_reasons
 
-    # 9. Per-pair breakdown (already exists but include for completeness)
     results_per_pair = rm.get("results_per_pair", [])
     if results_per_pair:
         result["results_per_pair"] = results_per_pair
 
-    # ── TIER 2 ──
-
-    # 10. Trade duration scatter (duration vs profit)
     if trades:
         result["duration_scatter"] = _compute_duration_scatter(trades)
-
-    # 11. Exit reason breakdown (count + avg profit per reason)
-    if trades:
         result["exit_reason_detail"] = _compute_exit_reason_detail(trades)
-
-    # 12. Day-of-week returns pattern
-    if trades:
         result["weekday_pattern"] = _compute_weekday_pattern(trades)
-
-    # 13. Cumulative trade returns (trade-by-trade cumulative)
-    if trades:
         result["cumulative_trades"] = _compute_cumulative_trades(trades, starting_balance)
 
-    # ── TIER 3 ──
-
-    # 14. Rolling win rate (50-trade window)
     if trades and len(trades) >= 20:
         result["rolling_winrate"] = _compute_rolling_winrate(trades, window=50)
-
-    # 15. Rolling profit factor (50-trade window)
-    if trades and len(trades) >= 20:
         result["rolling_profit_factor"] = _compute_rolling_profit_factor(trades, window=50)
 
-    # 16. Long vs Short breakdown
     if trades:
         result["long_short_split"] = _compute_long_short_split(trades)
-
-    # 17. Exposure timeline (open positions over time)
-    if trades:
         result["exposure_timeline"] = _compute_exposure_timeline(trades)
-
-    # 18. Trade expectancy with confidence
-    if trades:
         result["trade_expectancy"] = _compute_trade_expectancy(trades)
 
     return result
+
+
+def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
+    fthypt = dirname / f"{filename}.fthypt"
+    if not fthypt.exists():
+        return {"error": "file_not_found"}
+
+    best = _read_best_epoch(fthypt)
+    if not best:
+        return {"error": "no_epochs"}
+
+    return _compute_analytics_for_epoch(best, rank=1)
+
+
+def compute_epoch_advanced_analytics(
+    dirname: Path, filename: str, rank: int,
+) -> dict[str, Any]:
+    fthypt = dirname / f"{filename}.fthypt"
+    if not fthypt.exists():
+        return {"error": "file_not_found"}
+
+    mtime = fthypt.stat().st_mtime
+    all_epochs = _get_sorted_epochs(str(fthypt), mtime)
+
+    idx = rank - 1
+    if idx < 0 or idx >= len(all_epochs):
+        return {"error": "rank_out_of_range", "total": len(all_epochs)}
+
+    return _compute_analytics_for_epoch(all_epochs[idx], rank=rank)
 
 
 def _compute_top_drawdowns(
@@ -993,6 +995,118 @@ def _compute_trade_expectancy(trades: list) -> dict:
         "ci_95_high": round(expectancy + ci_95, 4),
         "total_trades": n,
     }
+
+
+def _compute_return_distribution_fit(trades: list) -> dict[str, Any]:
+    import math
+
+    profits = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if isinstance(pnl, (int, float)):
+            profits.append(float(pnl))
+
+    if len(profits) < 10:
+        return {}
+
+    n = len(profits)
+    mean = sum(profits) / n
+    variance = sum((p - mean) ** 2 for p in profits) / n
+    std = math.sqrt(variance) if variance > 0 else 1e-10
+    skew, kurt = _skew_kurtosis(profits)
+
+    mn, mx = min(profits), max(profits)
+    n_bins = min(30, max(10, int(math.sqrt(n))))
+    bin_width = (mx - mn) / n_bins if mx > mn else 1.0
+    bins = []
+    for i in range(n_bins):
+        edge_lo = mn + i * bin_width
+        edge_hi = mn + (i + 1) * bin_width
+        mid = (edge_lo + edge_hi) / 2
+        if i == n_bins - 1:
+            count = sum(1 for v in profits if edge_lo <= v <= edge_hi)
+        else:
+            count = sum(1 for v in profits if edge_lo <= v < edge_hi)
+        normal_density = (
+            math.exp(-0.5 * ((mid - mean) / std) ** 2) / (std * math.sqrt(2 * math.pi))
+        )
+        expected = normal_density * bin_width * n
+        bins.append({
+            "lo": round(edge_lo, 4),
+            "hi": round(edge_hi, 4),
+            "mid": round(mid, 4),
+            "count": count,
+            "normal_expected": round(expected, 2),
+        })
+
+    return {
+        "bins": bins,
+        "mean": round(mean, 4),
+        "std": round(std, 4),
+        "skewness": skew,
+        "kurtosis": kurt,
+        "total": n,
+        "is_normal": abs(skew) < 0.5 and abs(kurt) < 1.0,
+    }
+
+
+def _compute_drawdown_calendar(
+    daily_profit: list, starting_balance: float,
+) -> list[dict]:
+    balance = starting_balance
+    peak = balance
+    result = []
+    for date_str, pnl in daily_profit:
+        balance += pnl
+        if balance > peak:
+            peak = balance
+        dd_pct = ((peak - balance) / peak * 100) if peak > 0 else 0
+        parts = date_str.split("-")
+        if len(parts) >= 3:
+            result.append({
+                "date": date_str,
+                "year": int(parts[0]),
+                "month": int(parts[1]),
+                "day": int(parts[2]),
+                "dd_pct": round(dd_pct, 2),
+                "pnl": round(pnl, 2),
+            })
+    return result
+
+
+def _compute_mae_mfe(trades: list) -> list[dict]:
+    points = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        open_rate = t.get("open_rate", 0)
+        min_rate = t.get("min_rate")
+        max_rate = t.get("max_rate")
+        is_short = t.get("is_short", False)
+        if not open_rate or open_rate == 0:
+            continue
+        if min_rate is not None and max_rate is not None:
+            if is_short:
+                mae = (max_rate - open_rate) / open_rate * -100
+                mfe = (open_rate - min_rate) / open_rate * 100
+            else:
+                mae = (min_rate - open_rate) / open_rate * 100
+                mfe = (max_rate - open_rate) / open_rate * 100
+            points.append({
+                "mae": round(float(mae), 4),
+                "mfe": round(float(mfe), 4),
+                "profit": round(float(pnl), 4),
+                "pair": t.get("pair", ""),
+            })
+    if len(points) > 1000:
+        step = len(points) / 1000
+        points = [points[int(i * step)] for i in range(1000)]
+    return points
 
 
 def _count_epochs(fthypt: Path) -> int:
@@ -1956,6 +2070,280 @@ def delete_wfa_result(dirname: Path, filename: str) -> None:
         if consensus.exists():
             logger.info(f"Deleting {consensus.name}")
             consensus.unlink()
+
+
+def compute_backtest_analytics(
+    dirname: Path, filename: str, strategy: str,
+) -> dict[str, Any]:
+    zip_path = dirname / f"{filename}.zip"
+    json_path = dirname / f"{filename}.json"
+    load_path = zip_path if zip_path.exists() else json_path
+    if not load_path.exists():
+        return {"error": "file_not_found"}
+
+    try:
+        stats = load_backtest_stats(load_path)
+    except Exception as e:
+        logger.warning("Failed to load backtest stats: %s", e)
+        return {"error": "load_failed"}
+
+    strat_data = stats.get("strategy", {}).get(strategy, {})
+    if not strat_data:
+        all_strats = list(stats.get("strategy", {}).keys())
+        if all_strats:
+            strat_data = stats["strategy"][all_strats[0]]
+        else:
+            return {"error": "strategy_not_found"}
+
+    trades = strat_data.get("trades", [])
+    wins_count = sum(1 for t in trades if isinstance(t, dict) and t.get("profit_ratio", 0) > 0)
+    losses_count = sum(
+        1 for t in trades if isinstance(t, dict) and t.get("profit_ratio", 0) < 0
+    )
+    draws_count = len(trades) - wins_count - losses_count
+
+    epoch: dict[str, Any] = {
+        "results_metrics": {
+            "daily_profit": strat_data.get("daily_profit", []),
+            "trades": trades,
+            "periodic_breakdown": strat_data.get("periodic_breakdown", {}),
+            "starting_balance": strat_data.get("starting_balance", 1000),
+            "dry_run_wallet": strat_data.get("starting_balance", 1000),
+            "total_trades": strat_data.get("total_trades", 0),
+            "profit_total": strat_data.get("profit_total", 0),
+            "profit_total_abs": strat_data.get("profit_total_abs", 0),
+            "max_drawdown": strat_data.get("max_drawdown", 0),
+            "max_drawdown_account": strat_data.get("max_drawdown_account", 0),
+            "sharpe": strat_data.get("sharpe", 0),
+            "sortino": strat_data.get("sortino", 0),
+            "calmar": strat_data.get("calmar", 0),
+            "profit_factor": strat_data.get("profit_factor", 0),
+            "winrate": strat_data.get("winrate", 0),
+            "duration_avg": strat_data.get("duration_avg"),
+            "trade_count_long": strat_data.get("trade_count_long", 0),
+            "trade_count_short": strat_data.get("trade_count_short", 0),
+            "max_consecutive_wins": strat_data.get("max_consecutive_wins", 0),
+            "max_consecutive_losses": strat_data.get("max_consecutive_losses", 0),
+            "wins": wins_count,
+            "losses": losses_count,
+            "draws": draws_count,
+            "results_per_pair": strat_data.get("results_per_pair", []),
+            "exit_reason_summary": strat_data.get("exit_reason_summary", []),
+        },
+    }
+
+    result = _compute_analytics_for_epoch(epoch, rank=1)
+
+    starting_balance = strat_data.get("starting_balance", 1000)
+    daily_profit = strat_data.get("daily_profit", [])
+    max_open_trades = strat_data.get("max_open_trades", 1)
+    market_change = strat_data.get("market_change", 0)
+
+    if trades:
+        result["hourly_pattern"] = _compute_hourly_pattern(trades)
+    if trades:
+        result["capital_utilization"] = _compute_capital_utilization(
+            trades, starting_balance, max_open_trades,
+        )
+    rpp = strat_data.get("results_per_pair", [])
+    if rpp:
+        result["pair_heatmap"] = _compute_pair_heatmap(rpp)
+    if daily_profit:
+        result["benchmark"] = _compute_benchmark_comparison(
+            daily_profit, starting_balance, market_change,
+        )
+    result["order_stats"] = _compute_order_stats(strat_data)
+
+    result["backtest_summary"] = {
+        "best_pair": strat_data.get("best_pair"),
+        "worst_pair": strat_data.get("worst_pair"),
+        "final_balance": strat_data.get("final_balance"),
+        "market_change": market_change,
+        "backtest_days": strat_data.get("backtest_days"),
+        "backtest_start": strat_data.get("backtest_start"),
+        "backtest_end": strat_data.get("backtest_end"),
+        "timeframe": strat_data.get("timeframe"),
+        "timerange": strat_data.get("timerange"),
+        "trades_per_day": strat_data.get("trades_per_day"),
+        "winning_days": strat_data.get("winning_days"),
+        "losing_days": strat_data.get("losing_days"),
+        "draw_days": strat_data.get("draw_days"),
+        "stoploss": strat_data.get("stoploss"),
+        "trailing_stop": strat_data.get("trailing_stop"),
+        "trailing_stop_positive": strat_data.get("trailing_stop_positive"),
+        "trailing_stop_positive_offset": strat_data.get("trailing_stop_positive_offset"),
+        "trailing_only_offset_is_reached": strat_data.get("trailing_only_offset_is_reached"),
+        "minimal_roi": strat_data.get("minimal_roi"),
+        "max_open_trades": max_open_trades,
+        "holding_avg": strat_data.get("holding_avg"),
+        "winner_holding_avg": strat_data.get("winner_holding_avg"),
+        "loser_holding_avg": strat_data.get("loser_holding_avg"),
+        "sqn": strat_data.get("sqn"),
+        "cagr": strat_data.get("cagr"),
+        "expectancy": strat_data.get("expectancy"),
+        "expectancy_ratio": strat_data.get("expectancy_ratio"),
+        "rejected_signals": strat_data.get("rejected_signals", 0),
+        "timedout_entry_orders": strat_data.get("timedout_entry_orders", 0),
+        "timedout_exit_orders": strat_data.get("timedout_exit_orders", 0),
+        "canceled_trade_entries": strat_data.get("canceled_trade_entries", 0),
+    }
+
+    return result
+
+
+def _compute_hourly_pattern(trades: list) -> dict:
+    from collections import defaultdict
+    from datetime import datetime
+
+    by_hour: dict[int, list[float]] = defaultdict(list)
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        pnl = t.get("profit_pct") or t.get("profit_ratio", 0)
+        if not isinstance(pnl, (int, float)):
+            continue
+        close_date = t.get("close_date") or t.get("close_timestamp")
+        if not close_date:
+            continue
+        try:
+            if isinstance(close_date, str):
+                dt = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
+            elif isinstance(close_date, (int, float)):
+                dt = datetime.fromtimestamp(close_date / 1000)
+            else:
+                continue
+            by_hour[dt.hour].append(float(pnl))
+        except Exception:
+            continue
+
+    hours = []
+    for h in range(24):
+        profits = by_hour.get(h, [])
+        count = len(profits)
+        avg = round(sum(profits) / count, 4) if count else 0
+        total = round(sum(profits), 4)
+        wins = sum(1 for p in profits if p > 0)
+        hours.append({
+            "hour": h,
+            "trades": count,
+            "avg_profit": avg,
+            "total_profit": total,
+            "winrate": round(wins / count, 4) if count else 0,
+        })
+    return {"hours": hours}
+
+
+def _compute_capital_utilization(
+    trades: list, starting_balance: float, max_open_trades: int,
+) -> list[dict]:
+    from collections import defaultdict
+    from datetime import datetime
+
+    daily_stake: dict[str, float] = defaultdict(float)
+    daily_count: dict[str, int] = defaultdict(int)
+
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        open_date = t.get("open_date", "")
+        stake = t.get("stake_amount", 0)
+        if not isinstance(open_date, str) or len(open_date) < 10:
+            continue
+        day = open_date[:10]
+        daily_stake[day] += float(stake) if isinstance(stake, (int, float)) else 0
+        daily_count[day] += 1
+
+    if not daily_stake:
+        return []
+
+    max_possible = starting_balance * max(max_open_trades, 1)
+    result = []
+    for day in sorted(daily_stake.keys()):
+        util = min(daily_stake[day] / max_possible * 100, 100) if max_possible > 0 else 0
+        result.append({
+            "date": day,
+            "utilization_pct": round(util, 2),
+            "deployed_capital": round(daily_stake[day], 2),
+            "trades": daily_count[day],
+        })
+
+    if len(result) > 1000:
+        step = len(result) / 1000
+        result = [result[int(i * step)] for i in range(1000)]
+    return result
+
+
+def _compute_pair_heatmap(results_per_pair: list) -> list[dict]:
+    result = []
+    for p in results_per_pair:
+        if not isinstance(p, dict):
+            continue
+        key = p.get("key", "")
+        if key == "TOTAL":
+            continue
+        result.append({
+            "pair": key,
+            "trades": p.get("trades", 0),
+            "winrate": round(p.get("winrate", 0) * 100, 1)
+            if isinstance(p.get("winrate"), (int, float)) and p.get("winrate", 0) <= 1
+            else round(p.get("winrate", 0), 1),
+            "avg_profit": round(p.get("profit_mean_pct", 0), 2),
+            "total_profit": round(p.get("profit_total_abs", 0), 2),
+            "profit_factor": round(p.get("profit_factor", 0), 2),
+            "sqn": round(p.get("sqn", 0), 2),
+            "sharpe": round(p.get("sharpe", 0), 2),
+            "max_drawdown": round(p.get("max_drawdown_account", 0) * 100, 2)
+            if isinstance(p.get("max_drawdown_account"), (int, float))
+            else 0,
+            "duration_avg": p.get("duration_avg"),
+        })
+    result.sort(key=lambda x: abs(x["total_profit"]), reverse=True)
+    return result
+
+
+def _compute_benchmark_comparison(
+    daily_profit: list, starting_balance: float, market_change: float,
+) -> dict:
+    if not daily_profit:
+        return {}
+
+    strat_equity = []
+    balance = starting_balance
+    for date_str, pnl in daily_profit:
+        balance += pnl
+        strat_equity.append({"date": date_str, "balance": round(balance, 2)})
+
+    n_days = len(daily_profit)
+    bh_equity = []
+    if n_days > 0 and market_change != 0:
+        daily_bh_return = (1 + market_change) ** (1 / n_days) - 1
+        bh_balance = starting_balance
+        for date_str, _ in daily_profit:
+            bh_balance *= 1 + daily_bh_return
+            bh_equity.append({"date": date_str, "balance": round(bh_balance, 2)})
+
+    strat_total = (balance / starting_balance - 1) if starting_balance > 0 else 0
+
+    return {
+        "strategy_equity": strat_equity if len(strat_equity) <= 500
+        else [strat_equity[int(i * len(strat_equity) / 500)] for i in range(500)],
+        "buyhold_equity": bh_equity if len(bh_equity) <= 500
+        else [bh_equity[int(i * len(bh_equity) / 500)] for i in range(500)],
+        "strategy_return": round(strat_total * 100, 2),
+        "buyhold_return": round(market_change * 100, 2),
+        "alpha": round((strat_total - market_change) * 100, 2),
+    }
+
+
+def _compute_order_stats(strat_data: dict) -> dict:
+    return {
+        "rejected_signals": strat_data.get("rejected_signals", 0),
+        "timedout_entry_orders": strat_data.get("timedout_entry_orders", 0),
+        "timedout_exit_orders": strat_data.get("timedout_exit_orders", 0),
+        "canceled_trade_entries": strat_data.get("canceled_trade_entries", 0),
+        "canceled_entry_orders": strat_data.get("canceled_entry_orders", 0),
+        "replaced_entry_orders": strat_data.get("replaced_entry_orders", 0),
+    }
 
 
 def convert_backtest_entries(
