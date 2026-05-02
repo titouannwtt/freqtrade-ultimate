@@ -293,6 +293,26 @@ def _compute_analytics_for_epoch(
         result["exposure_timeline"] = _compute_exposure_timeline(trades)
         result["trade_expectancy"] = _compute_trade_expectancy(trades)
 
+    if trades:
+        max_open = rm.get("max_open_trades", 0)
+        if not max_open:
+            max_open = rm.get("max_open_trades_setting", 0) or 5
+        result["capital_utilization"] = _compute_capital_utilization(
+            trades, starting_balance, int(max_open),
+        )
+
+    pair_data = rm.get("results_per_pair", [])
+    if pair_data:
+        result["pair_profit"] = [
+            {
+                "pair": p.get("key", ""),
+                "profit_abs": p.get("profit_total_abs", p.get("profit_abs", 0)),
+                "trade_count": p.get("trades", p.get("trade_count", 0)),
+            }
+            for p in pair_data
+            if isinstance(p, dict) and p.get("key") != "TOTAL"
+        ]
+
     return result
 
 
@@ -2306,7 +2326,7 @@ def _compute_capital_utilization(
         result.append({
             "date": day,
             "utilization_pct": round(util, 2),
-            "deployed_capital": round(daily_stake[day], 2),
+            "deployed": round(daily_stake[day], 2),
             "trades": daily_count[day],
         })
 
