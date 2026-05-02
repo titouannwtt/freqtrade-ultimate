@@ -8,6 +8,7 @@ import inspect
 import logging
 import pickle
 import signal
+import time as time_module
 from collections.abc import Coroutine, Generator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -308,15 +309,28 @@ class Exchange:
             exchange_conf.get("markets_refresh_interval", 60) * 60 * 1000
         )
 
+        _ex_t0 = time_module.monotonic()
         if validate:
             # Initial markets load
             self.reload_markets(True, load_leverage_tiers=False)
+            _dt = time_module.monotonic() - _ex_t0
+            logger.info("[exchange-init] markets loaded (%.1fs)", _dt)
             self.validate_config(self._config)
 
         if self.trading_mode != TradingMode.SPOT and load_leverage_tiers:
+            _lt_t0 = time_module.monotonic()
             self.fill_leverage_tiers()
+            logger.info(
+                "[exchange-init] leverage tiers loaded (%.1fs)",
+                time_module.monotonic() - _lt_t0,
+            )
         self.ft_additional_exchange_init()
+        _kl_t0 = time_module.monotonic()
         self._load_persisted_klines()
+        logger.info(
+            "[exchange-init] klines cache loaded (%.1fs, total exchange init: %.1fs)",
+            time_module.monotonic() - _kl_t0, time_module.monotonic() - _ex_t0,
+        )
 
     def __del__(self):
         """
@@ -2417,6 +2431,12 @@ class Exchange:
         Get rate from ticker.
         """
         ticker_rate = ticker.get(price_side)
+        if ticker_rate is None and ticker.get("last"):
+            logger.warning(
+                "Ticker %s is None for %s — falling back to 'last' price",
+                price_side, ticker.get("symbol", "?"),
+            )
+            ticker_rate = ticker["last"]
         if ticker.get("last") and ticker_rate:
             if side == "entry" and ticker_rate > ticker["last"]:
                 balance = conf_strategy.get("price_last_balance", 0.0)

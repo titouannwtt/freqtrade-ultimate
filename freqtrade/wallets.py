@@ -191,7 +191,10 @@ class Wallets:
         self._positions = _positions
 
     def _update_live(self) -> None:
+        import time as _time
+        _t0 = _time.monotonic()
         balances = self._exchange.get_balances()
+        _t1 = _time.monotonic()
         _wallets = {}
 
         for currency in balances:
@@ -204,6 +207,12 @@ class Wallets:
                 )
 
         positions = self._exchange.fetch_positions()
+        _t2 = _time.monotonic()
+        if (_t2 - _t0) > 2.0:
+            logger.info(
+                "[wallets] _update_live: get_balances=%.1fs, fetch_positions=%.1fs, total=%.1fs",
+                _t1 - _t0, _t2 - _t1, _t2 - _t0,
+            )
         _parsed_positions = {}
         for position in positions:
             if not isinstance(position, dict):
