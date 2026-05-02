@@ -454,6 +454,180 @@ class RPC:
             "data": data,
         }
 
+    _volume_cache: dict[tuple, tuple[dict, float]] = {}
+    _VOLUME_CACHE_TTL = 300.0
+
+    def _rpc_volume_history(self, days: int, bucket: str) -> dict[str, Any]:
+        import numpy as np
+        from freqtrade.enums import CandleType
+
+        cache_key = (days, bucket)
+        now = time.monotonic()
+        if cache_key in self._volume_cache:
+            cached, ts = self._volume_cache[cache_key]
+            if now - ts < self._VOLUME_CACHE_TTL:
+                return cached
+
+        config = self._config
+        exchange_name = config.get("exchange", {}).get("name", "unknown")
+        stake_currency = config.get("stake_currency", "USDT")
+        whitelist = self._freqtrade.pairlists.whitelist
+        datadir = config["user_data_dir"] / "data" / exchange_name
+
+        trading_mode = config.get("trading_mode", "spot")
+        candle_type = CandleType.FUTURES if trading_mode != "spot" else CandleType.SPOT
+
+        bucket_freq_map = {"1d": "1D", "3d": "3D", "7d": "7D", "1M": "MS", "1Q": "QS"}
+        freq = bucket_freq_map.get(bucket, "1D")
+
+        start_date = datetime.now(UTC) - timedelta(days=days)
+        tr = TimeRange.parse_timerange(
+            f"{start_date.strftime('%Y%m%d')}-"
+        )
+
+        pair_data = load_data(
+            datadir=datadir, timeframe="1d", pairs=list(whitelist),
+            timerange=tr, fill_up_missing=False, candle_type=candle_type,
+        )
+
+        pairs_with_data = sum(1 for df in pair_data.values() if len(df) > 0)
+        coverage = (pairs_with_data / len(whitelist) * 100) if whitelist else 0.0
+
+        all_volumes = []
+        for pair, df in pair_data.items():
+            if df.empty:
+                continue
+            vol_df = df[["date"]].copy()
+            vol_df["quote_vol"] = df["volume"] * df["close"]
+            all_volumes.append(vol_df)
+
+        if all_volumes:
+            import pandas as pd
+            combined = pd.concat(all_volumes, ignore_index=True)
+            exchange_buckets = (
+                combined.groupby(pd.Grouper(key="date", freq=freq))["quote_vol"]
+                .sum()
+                .reset_index()
+            )
+            exchange_buckets.columns = ["date", "exchange_volume"]
+        else:
+            import pandas as pd
+            exchange_buckets = pd.DataFrame(columns=["date", "exchange_volume"])
+
+        trades_query = Trade.session.execute(
+            select(
+                Trade.close_date,
+                Trade.close_profit_abs,
+            ).filter(
+                Trade.is_open.is_(False),
+                Trade.close_date >= start_date,
+            ).order_by(Trade.close_date)
+        ).all()
+
+        orders_query = Trade.session.execute(
+            select(
+                Trade.close_date,
+                func.sum(Order.cost).label("cost"),
+            ).join(Order._trade_live)
+            .filter(
+                Trade.is_open.is_(False),
+                Trade.close_date >= start_date,
+                Order.status == "closed",
+            ).group_by(Trade.id, Trade.close_date)
+        ).all()
+
+        import pandas as pd
+        if trades_query:
+            trades_df = pd.DataFrame(
+                [(t.close_date, t.close_profit_abs or 0.0) for t in trades_query],
+                columns=["date", "abs_profit"],
+            )
+            trades_df["date"] = pd.to_datetime(trades_df["date"], utc=True)
+            trade_buckets = (
+                trades_df.groupby(pd.Grouper(key="date", freq=freq))
+                .agg(trade_count=("abs_profit", "count"), abs_profit=("abs_profit", "sum"))
+                .reset_index()
+            )
+        else:
+            trade_buckets = pd.DataFrame(
+                columns=["date", "trade_count", "abs_profit"]
+            )
+
+        if orders_query:
+            orders_df = pd.DataFrame(
+                [(o.close_date, float(o.cost or 0)) for o in orders_query],
+                columns=["date", "bot_volume"],
+            )
+            orders_df["date"] = pd.to_datetime(orders_df["date"], utc=True)
+            vol_buckets = (
+                orders_df.groupby(pd.Grouper(key="date", freq=freq))["bot_volume"]
+                .sum()
+                .reset_index()
+            )
+        else:
+            vol_buckets = pd.DataFrame(columns=["date", "bot_volume"])
+
+        if not exchange_buckets.empty:
+            merged = exchange_buckets.copy()
+        else:
+            merged = pd.DataFrame(columns=["date", "exchange_volume"])
+
+        if not trade_buckets.empty:
+            merged = merged.merge(trade_buckets, on="date", how="outer")
+        else:
+            merged["trade_count"] = 0
+            merged["abs_profit"] = 0.0
+
+        if not vol_buckets.empty:
+            merged = merged.merge(vol_buckets, on="date", how="outer")
+        else:
+            merged["bot_volume"] = 0.0
+
+        for col in ["exchange_volume", "bot_volume", "trade_count", "abs_profit"]:
+            if col not in merged.columns:
+                merged[col] = 0.0
+            merged[col] = merged[col].fillna(0)
+
+        merged["trade_count"] = merged["trade_count"].astype(int)
+        merged = merged.sort_values("date").reset_index(drop=True)
+
+        ev = merged["exchange_volume"].values
+        if len(ev) >= 5:
+            window = min(20, len(ev))
+            rolling_mean = pd.Series(ev).rolling(window, min_periods=3).mean()
+            rolling_std = pd.Series(ev).rolling(window, min_periods=3).std()
+            last_mean = float(rolling_mean.iloc[-1]) if not np.isnan(rolling_mean.iloc[-1]) else 0
+            last_std = float(rolling_std.iloc[-1]) if not np.isnan(rolling_std.iloc[-1]) else 0
+            threshold_high = last_mean + 2 * last_std
+            threshold_low = max(0, last_mean - 2 * last_std)
+        else:
+            threshold_high = 0.0
+            threshold_low = 0.0
+
+        buckets = []
+        for _, row in merged.iterrows():
+            buckets.append({
+                "date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime")
+                else str(row["date"]),
+                "exchange_volume": round(float(row["exchange_volume"]), 2),
+                "bot_volume": round(float(row["bot_volume"]), 2),
+                "trade_count": int(row["trade_count"]),
+                "abs_profit": round(float(row["abs_profit"]), 4),
+            })
+
+        result = {
+            "buckets": buckets,
+            "exchange_name": exchange_name,
+            "stake_currency": stake_currency,
+            "whitelist_count": len(whitelist),
+            "data_coverage_pct": round(coverage, 1),
+            "anomaly_threshold_high": round(threshold_high, 2),
+            "anomaly_threshold_low": round(threshold_low, 2),
+        }
+
+        self._volume_cache[cache_key] = (result, now)
+        return result
+
     def _rpc_trade_history(self, limit: int, offset: int = 0, order_by_id: bool = False) -> dict:
         """Returns the X last trades"""
         order_by: Any = Trade.id if order_by_id else Trade.close_date.desc()

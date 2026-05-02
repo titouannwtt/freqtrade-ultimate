@@ -212,6 +212,24 @@ class DailyWeeklyMonthly(BaseModel):
     stake_currency: str
 
 
+class VolumeBucket(BaseModel):
+    date: str
+    exchange_volume: float
+    bot_volume: float
+    trade_count: int
+    abs_profit: float
+
+
+class VolumeHistoryResponse(BaseModel):
+    buckets: list[VolumeBucket]
+    exchange_name: str
+    stake_currency: str
+    whitelist_count: int
+    data_coverage_pct: float
+    anomaly_threshold_high: float
+    anomaly_threshold_low: float
+
+
 class UnfilledTimeout(BaseModel):
     entry: int | None = None
     exit: int | None = None

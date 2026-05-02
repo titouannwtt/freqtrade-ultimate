@@ -31,6 +31,7 @@ from freqtrade.rpc.api_server.api_schemas import (
     ResultMsg,
     Stats,
     StatusMsg,
+    VolumeHistoryResponse,
     WalletHistoryResponse,
     WhitelistResponse,
 )
@@ -152,6 +153,17 @@ def monthly(
     return rpc._rpc_timeunit_profit(
         timescale, config["stake_currency"], config.get("fiat_display_currency", ""), "months"
     )
+
+
+@router.get("/volume_history", response_model=VolumeHistoryResponse, tags=["Trading-info"])
+def volume_history(
+    days: int = Query(90, ge=7, le=365),
+    bucket: str = Query("1d"),
+    rpc: RPC = Depends(get_rpc),
+):
+    if bucket not in ("1d", "3d", "7d", "1M", "1Q"):
+        raise HTTPException(status_code=400, detail="Invalid bucket. Use: 1d, 3d, 7d, 1M, 1Q")
+    return rpc._rpc_volume_history(days, bucket)
 
 
 @router.get("/status", response_model=list[OpenTradeSchema], tags=["Trading-info"])
