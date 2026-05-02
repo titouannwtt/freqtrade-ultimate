@@ -32,7 +32,7 @@ async def _safe_to_thread(func, *args):
 
 _runs_cache: AllRunsResponse | None = None
 _runs_cache_ts: float = 0.0
-_RUNS_CACHE_TTL_S = 60.0
+_RUNS_CACHE_TTL_S = 300.0
 
 
 def _bt_dir(config: dict) -> Path:
@@ -331,6 +331,57 @@ async def api_snapshot_diff(
 
     result = await _safe_to_thread(_do_diff)
     return SnapshotDiffResponse(**result)
+
+
+@router.get("/stratdev/backtest/{filename}/plot-profit")
+async def api_backtest_plot_profit(
+    filename: str,
+    strategy: str,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_readers import compute_plot_profit_data
+
+    return await _safe_to_thread(
+        compute_plot_profit_data,
+        _bt_dir(config),
+        filename,
+        strategy,
+    )
+
+
+@router.get("/stratdev/backtest/{filename}/plot-dataframe")
+async def api_backtest_plot_dataframe(
+    filename: str,
+    strategy: str,
+    pair: str,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_dataframe import compute_plot_dataframe
+
+    return await _safe_to_thread(
+        compute_plot_dataframe,
+        config,
+        _bt_dir(config),
+        filename,
+        strategy,
+        pair,
+    )
+
+
+@router.get("/stratdev/backtest/{filename}/pairs")
+async def api_backtest_pairs(
+    filename: str,
+    strategy: str,
+    config: dict = Depends(get_config),
+) -> dict[str, Any]:
+    from freqtrade.optimize.stratdev_dataframe import get_backtest_pairs
+
+    return await _safe_to_thread(
+        get_backtest_pairs,
+        _bt_dir(config),
+        filename,
+        strategy,
+    )
 
 
 @router.get("/stratdev/glossary")
