@@ -31,9 +31,17 @@ HYPER_PARAMS_FILE_FORMAT = rapidjson.NM_NATIVE | rapidjson.NM_NAN
 _FTHYPT_NAME_RE = re.compile(r"^strategy_(.+?)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.fthypt$")
 
 
-def get_hyperopt_resultlist(dirname: Path) -> list[dict[str, Any]]:
+def get_hyperopt_resultlist(
+    dirname: Path,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    all_files = sorted(dirname.glob("*.fthypt"), reverse=True)
+    total = len(all_files)
+    sliced = all_files[offset:offset + limit] if limit else all_files[offset:]
+
     results: list[dict[str, Any]] = []
-    for fthypt in sorted(dirname.glob("*.fthypt"), reverse=True):
+    for fthypt in sliced:
         meta_path = fthypt.with_suffix(".meta.json")
         if meta_path.exists():
             entry = _entry_from_meta(fthypt, meta_path)
@@ -41,7 +49,7 @@ def get_hyperopt_resultlist(dirname: Path) -> list[dict[str, Any]]:
             entry = _entry_from_filename(fthypt)
         if entry:
             results.append(entry)
-    return results
+    return {"items": results, "total": total}
 
 
 def _entry_from_meta(fthypt: Path, meta_path: Path) -> dict[str, Any]:
@@ -2105,6 +2113,12 @@ def get_backtest_snapshot(dirname: Path, filename: str, strategy: str) -> dict[s
         result["strategy_params"] = rapidjson.loads(raw)
     except Exception:
         result["strategy_params"] = None
+    try:
+        raw = load_file_from_zip(zip_path, strategy)
+        strat_data = rapidjson.loads(raw)
+        result["strategy_summary"] = strat_data
+    except Exception:
+        result["strategy_summary"] = None
     return result
 
 

@@ -56,7 +56,9 @@ def _build_all_runs(
     config: dict,
     strategy: str | None = None,
     run_type: str | None = None,
-) -> AllRunsResponse:
+    ho_offset: int = 0,
+    ho_limit: int | None = None,
+) -> dict[str, Any]:
     from freqtrade.optimize.stratdev_readers import (
         convert_backtest_entries,
         get_hyperopt_resultlist,
@@ -66,6 +68,7 @@ def _build_all_runs(
     backtests: list[dict[str, Any]] = []
     hyperopts: list[dict[str, Any]] = []
     wfa_runs: list[dict[str, Any]] = []
+    ho_total: int = 0
 
     if run_type is None or run_type == "backtest":
         bd = _bt_dir(config)
@@ -79,7 +82,9 @@ def _build_all_runs(
         hd = _ho_dir(config)
         if hd.exists():
             try:
-                hyperopts = get_hyperopt_resultlist(hd)
+                ho_result = get_hyperopt_resultlist(hd, ho_offset, ho_limit)
+                hyperopts = ho_result["items"]
+                ho_total = ho_result["total"]
             except Exception as e:
                 logger.error(f"Failed to read hyperopts: {e}")
 
@@ -96,34 +101,41 @@ def _build_all_runs(
         hyperopts = [e for e in hyperopts if e.get("strategy") == strategy]
         wfa_runs = [e for e in wfa_runs if e.get("strategy") == strategy]
 
-    return AllRunsResponse(
-        backtests=[RunListEntry(**e) for e in backtests],
-        hyperopts=[RunListEntry(**e) for e in hyperopts],
-        wfa_runs=[RunListEntry(**e) for e in wfa_runs],
-    )
+    return {
+        "backtests": [RunListEntry(**e) for e in backtests],
+        "hyperopts": [RunListEntry(**e) for e in hyperopts],
+        "wfa_runs": [RunListEntry(**e) for e in wfa_runs],
+        "hyperopts_total": ho_total,
+    }
 
 
 @router.get("/stratdev/runs", response_model=AllRunsResponse)
 async def api_list_all_runs(
     strategy: str | None = None,
     run_type: str | None = None,
+    ho_offset: int = 0,
+    ho_limit: int | None = None,
     config: dict = Depends(get_config),
 ) -> AllRunsResponse:
     global _runs_cache, _runs_cache_ts
     now = time.monotonic()
+    is_paginated = ho_offset > 0 or ho_limit is not None
     if (
         _runs_cache is not None
         and not strategy
         and not run_type
+        and not is_paginated
         and (now - _runs_cache_ts) < _RUNS_CACHE_TTL_S
     ):
         return _runs_cache
 
-    result = await _safe_to_thread(_build_all_runs, config, strategy, run_type)
-    if not strategy and not run_type:
-        _runs_cache = result
+    result = await _safe_to_thread(
+        _build_all_runs, config, strategy, run_type, ho_offset, ho_limit,
+    )
+    if not strategy and not run_type and not is_paginated:
+        _runs_cache = AllRunsResponse(**result)
         _runs_cache_ts = now
-    return result
+    return AllRunsResponse(**result)
 
 
 @router.get("/stratdev/hyperopt/{filename}")
@@ -194,11 +206,12 @@ async def api_delete_hyperopt(
     await _safe_to_thread(delete_hyperopt_result, _ho_dir(config), filename)
     _runs_cache = None
     _runs_cache_ts = 0.0
-    remaining = await _safe_to_thread(get_hyperopt_resultlist, _ho_dir(config))
+    ho_result = await _safe_to_thread(get_hyperopt_resultlist, _ho_dir(config))
     return AllRunsResponse(
         backtests=[],
-        hyperopts=[RunListEntry(**e) for e in remaining],
+        hyperopts=[RunListEntry(**e) for e in ho_result["items"]],
         wfa_runs=[],
+        hyperopts_total=ho_result["total"],
     )
 
 

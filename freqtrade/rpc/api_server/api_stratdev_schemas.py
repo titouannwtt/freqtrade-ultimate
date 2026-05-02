@@ -35,6 +35,7 @@ class AllRunsResponse(BaseModel):
     backtests: list[RunListEntry]
     hyperopts: list[RunListEntry]
     wfa_runs: list[RunListEntry]
+    hyperopts_total: int = 0
 
 
 class SnapshotDiffRequest(BaseModel):
@@ -53,6 +54,7 @@ class BacktestSnapshotResponse(BaseModel):
     strategy_source: str | None = None
     config: dict[str, Any] | None = None
     strategy_params: dict[str, Any] | None = None
+    strategy_summary: dict[str, Any] | None = None
 
 
 class MetadataUpdateRequest(BaseModel):
