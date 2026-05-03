@@ -135,6 +135,8 @@ class CachedExchangeMixin:
 
     _ftcache_last_wait_log_ts: float = 0.0
     _WAIT_LOG_INTERVAL_S: float = 10.0  # don't spam, log every 10s
+    _OFFLINE_ACQUIRE_MAX_S: float = 600.0  # 10 min max wait for offline modes
+    _OFFLINE_RETRY_INTERVAL_S: float = 5.0  # retry every 5s
 
     def _ftcache_enabled(self) -> bool:
         from freqtrade.enums import RunMode
@@ -373,75 +375,142 @@ class CachedExchangeMixin:
         Called before any non-OHLCV REST call so that ALL API traffic
         from all bots shares the daemon's centralized rate limit.
 
-        During a 429 backoff, the daemon queues this request and serves it
-        by priority (CRITICAL first). This call blocks until the token is
-        granted or times out.
+        For offline/utility modes (backtest, hyperopt, utility commands):
+        - Priority is floored to LOW
+        - On shed or timeout, retries in a loop (up to 10 min) instead of
+          falling through to unmetered ccxt calls
+        - Logs informative messages every 10s while waiting
+        - After 10 min, raises TemporaryError (clean crash, no silent bypass)
 
-        For backtest/hyperopt/utility modes, priority is floored to LOW
-        and informative logs are emitted while waiting.
+        For live modes: existing behavior (timeout → allow through).
 
-        Returns True when the token was granted (or daemon unavailable).
+        Returns True when the token was granted (or daemon unavailable in live mode).
         Returns False only when the _loop_lock is unavailable and local
         backoff check rejects the request.
         """
         # Apply priority floor for non-live modes
         priority = self._ftcache_apply_priority_floor(priority)
-
-        # Log when offline/utility mode starts waiting
-        if self._ftcache_is_offline_mode or self._ftcache_is_utility_mode:
-            now = time.monotonic()
-            if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
-                mode = "backtest/hyperopt" if self._ftcache_is_offline_mode else "utility"
-                logger.info(
-                    "[%s] waiting for rate token (priority=LOW) — "
-                    "live bots have priority, this may take a moment",
-                    mode,
-                )
-                self._ftcache_last_wait_log_ts = now
+        is_offline = self._ftcache_is_offline_mode or self._ftcache_is_utility_mode
 
         client = self._ftcache_get_client()
         if client is None:
             return True
-        try:
-            lock = getattr(self, "_loop_lock", None)
-            if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
-                self._ftcache_bump("acquire_skip_loop")
-                return self._ftcache_local_backoff_check(priority)
+
+        deadline = time.monotonic() + self._OFFLINE_ACQUIRE_MAX_S if is_offline else 0.0
+        attempt = 0
+
+        while True:
+            attempt += 1
+
+            # Log when offline mode is waiting
+            if is_offline:
+                now = time.monotonic()
+                if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
+                    mode = "backtest/hyperopt" if self._ftcache_is_offline_mode else "utility"
+                    elapsed = self._OFFLINE_ACQUIRE_MAX_S - (deadline - now)
+                    logger.info(
+                        "[%s] waiting for rate token (priority=LOW, attempt=%d, "
+                        "elapsed=%.0fs/%.0fs) — live bots have priority, please wait",
+                        mode,
+                        attempt,
+                        elapsed,
+                        self._OFFLINE_ACQUIRE_MAX_S,
+                    )
+                    self._ftcache_last_wait_log_ts = now
+
             try:
-                self.loop.run_until_complete(  # type: ignore[attr-defined]
-                    asyncio.wait_for(
-                        client.acquire_rate_token(priority=priority, cost=cost),
-                        timeout=self._ACQUIRE_TIMEOUT_S,
-                    ),
+                lock = getattr(self, "_loop_lock", None)
+                if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
+                    self._ftcache_bump("acquire_skip_loop")
+                    if is_offline:
+                        # Don't fall through — wait and retry
+                        if time.monotonic() > deadline:
+                            raise TemporaryError(
+                                "rate token acquire failed after "
+                                f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
+                                " — live bots saturated the rate limit."
+                                " Try again later or reduce parallel backtests."
+                            )
+                        time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
+                        continue
+                    return self._ftcache_local_backoff_check(priority)
+                try:
+                    self.loop.run_until_complete(  # type: ignore[attr-defined]
+                        asyncio.wait_for(
+                            client.acquire_rate_token(priority=priority, cost=cost),
+                            timeout=min(self._ACQUIRE_TIMEOUT_S, 30.0)
+                            if is_offline
+                            else self._ACQUIRE_TIMEOUT_S,
+                        ),
+                    )
+                    return True
+                finally:
+                    lock.release()
+
+            except CacheRateLimited:
+                self._ftcache_bump("rate_limited")
+                if is_offline:
+                    if time.monotonic() > deadline:
+                        raise TemporaryError(
+                            f"rate token shed after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s of retries"
+                            " — live bots saturated the rate limit. "
+                            "Try again later or reduce parallel backtests."
+                        )
+                    time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
+                    continue
+                # Live mode: shed = return False (caller decides)
+                return False
+
+            except (CacheTimedOut, TimeoutError):
+                self._ftcache_bump("acquire_timeout")
+                if is_offline:
+                    if time.monotonic() > deadline:
+                        raise TemporaryError(
+                            f"rate token acquire timed out after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
+                            " of retries — daemon may be overloaded. "
+                            "Try again later or reduce parallel backtests."
+                        )
+                    logger.info(
+                        "rate token acquire timed out — retrying (offline mode, %.0fs remaining)",
+                        deadline - time.monotonic(),
+                    )
+                    continue
+                # Live mode: timeout → allow through (legacy behavior)
+                logger.info(
+                    "rate token acquire timed out after %.0fs — allowing (priority=%s, cost=%.0f)",
+                    self._ACQUIRE_TIMEOUT_S,
+                    priority,
+                    cost,
                 )
                 return True
-            finally:
-                lock.release()
-        except CacheTimedOut:
-            self._ftcache_bump("acquire_timeout")
-            logger.info(
-                "rate token acquire timed out after %.0fs — allowing but not rate-limited "
-                "(priority=%s, cost=%.0f)",
-                self._ACQUIRE_TIMEOUT_S,
-                priority,
-                cost,
-            )
-            return True
-        except CacheUnavailable:
-            self._ftcache_bump("acquire_timeout")
-            return True
-        except TimeoutError:
-            self._ftcache_bump("acquire_timeout")
-            logger.info(
-                "rate token acquire timed out after %.0fs — allowing (priority=%s, cost=%.0f)",
-                self._ACQUIRE_TIMEOUT_S,
-                priority,
-                cost,
-            )
-            return True
-        except Exception as e:
-            logger.debug("rate token acquire failed (%s), proceeding without", e)
-            return True
+
+            except CacheUnavailable:
+                self._ftcache_bump("acquire_timeout")
+                if is_offline:
+                    if time.monotonic() > deadline:
+                        raise TemporaryError(
+                            f"daemon unavailable after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
+                            " of retries — is the daemon running?"
+                        )
+                    time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
+                    continue
+                return True
+
+            except TemporaryError:
+                raise  # don't catch our own TemporaryError
+
+            except Exception as e:
+                if is_offline:
+                    logger.warning("unexpected error acquiring rate token: %s — retrying", e)
+                    if time.monotonic() > deadline:
+                        raise TemporaryError(
+                            f"rate token acquire failed after "
+                            f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s: {e}"
+                        )
+                    time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
+                    continue
+                logger.debug("rate token acquire failed (%s), proceeding without", e)
+                return True
 
     # -------------------------------------------------------------------- OHLCV
 
@@ -469,13 +538,38 @@ class CachedExchangeMixin:
         if self._ftcache_rate_limit_only:
             client = self._ftcache_get_client()
             if client is not None:
-                try:
-                    await client.acquire_rate_token(
-                        priority=OhlcvCacheClient.LOW,
-                        cost=4.0,
-                    )
-                except (CacheUnavailable, CacheTimedOut):
-                    pass
+                deadline = time.monotonic() + self._OFFLINE_ACQUIRE_MAX_S
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        await asyncio.wait_for(
+                            client.acquire_rate_token(
+                                priority=OhlcvCacheClient.LOW,
+                                cost=4.0,
+                            ),
+                            timeout=30.0,
+                        )
+                        break  # token granted
+                    except (CacheUnavailable, CacheTimedOut, CacheRateLimited, TimeoutError):
+                        if time.monotonic() > deadline:
+                            raise TemporaryError(
+                                f"OHLCV rate token for {pair} failed after "
+                                f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s of retries — "
+                                "live bots saturated the rate limit. "
+                                "Try again later or reduce parallel backtests."
+                            )
+                        now = time.monotonic()
+                        if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
+                            logger.info(
+                                "[backtest/hyperopt] OHLCV rate token for %s: "
+                                "attempt %d, %.0fs remaining — live bots have priority",
+                                pair,
+                                attempt,
+                                deadline - now,
+                            )
+                            self._ftcache_last_wait_log_ts = now
+                        await asyncio.sleep(self._OFFLINE_RETRY_INTERVAL_S)
             return await super()._async_get_candle_history(  # type: ignore[misc]
                 pair,
                 timeframe,
