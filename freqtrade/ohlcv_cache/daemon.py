@@ -249,10 +249,23 @@ class TokenBucket:
 
         async with self._lock:
             self._refill()
+            # Fast path: grant immediately if tokens available AND weight
+            # budget not exceeded.  Without the weight check, a fresh daemon
+            # (full bucket, empty weight window) hands out all tokens at once
+            # and causes a 429 burst.
             if not self._waiters and self.tokens >= cost:
-                self.tokens -= cost
-                self._record_weight(cost)
-                return
+                if self.weight_mode and self.weight_budget_per_min > 0:
+                    if self.weight_used_last_min + cost > self.weight_budget_per_min:
+                        # Budget exhausted — fall through to queue/drain
+                        pass
+                    else:
+                        self.tokens -= cost
+                        self._record_weight(cost)
+                        return
+                else:
+                    self.tokens -= cost
+                    self._record_weight(cost)
+                    return
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         entry = (priority, -capital, self._counter, cost, future)
