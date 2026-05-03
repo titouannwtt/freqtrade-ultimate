@@ -487,6 +487,33 @@ class CachedExchangeMixin:
         except Exception as e:
             logger.debug("report_429 to daemon failed (non-fatal): %s", e)
 
+    def _ftcache_report_order(
+        self,
+        pair: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        action: str = "create",
+        order_id: str = "",
+    ) -> None:
+        """Fire-and-forget: notify daemon about an order create/cancel."""
+        client = self._ftcache_get_client()
+        if client is None:
+            return
+        try:
+            self._ftcache_run_on_loop(
+                client.report_order(
+                    pair=pair,
+                    side=side,
+                    order_type=order_type,
+                    amount=amount,
+                    action=action,
+                    order_id=order_id,
+                ),
+            )
+        except Exception as e:
+            logger.debug("report_order to daemon failed (non-fatal): %s", e)
+
     def _ftcache_acquire_sync(self, priority: int | None = None, cost: float = 1.0) -> bool:
         """Acquire a rate token synchronously (blocks until granted).
 
@@ -1022,7 +1049,17 @@ class CachedExchangeMixin:
     def create_order(self, **kwargs) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
-        return super().create_order(**kwargs)  # type: ignore[misc]
+        result = super().create_order(**kwargs)  # type: ignore[misc]
+        if not self._config.get("dry_run"):  # type: ignore[attr-defined]
+            self._ftcache_report_order(
+                pair=kwargs.get("pair", ""),
+                side=kwargs.get("side", ""),
+                order_type=kwargs.get("ordertype", kwargs.get("order_type", "")),
+                amount=float(kwargs.get("amount", 0)),
+                action="create",
+                order_id=result.get("id", "") if isinstance(result, dict) else "",
+            )
+        return result
 
     def cancel_order(
         self,
@@ -1032,7 +1069,17 @@ class CachedExchangeMixin:
     ) -> dict[str, Any]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
-        return super().cancel_order(order_id, pair, params)  # type: ignore[misc]
+        result = super().cancel_order(order_id, pair, params)  # type: ignore[misc]
+        if not self._config.get("dry_run"):  # type: ignore[attr-defined]
+            self._ftcache_report_order(
+                pair=pair,
+                side="",
+                order_type="",
+                amount=0,
+                action="cancel",
+                order_id=order_id,
+            )
+        return result
 
     def fetch_order(
         self,

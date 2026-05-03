@@ -147,3 +147,4 @@ These `.claude-tips/` files contain in-depth reference for specific topics. **Do
 | `data_quality.md` | Feature selection, causal inference |
 | `machine_learning.md` | ML reference (not used on 15m, kept for future) |
 | `trend_following.md` | Momentum/trend reference (not our default) |
+| `strategy_bugs_reference.md` | Known strategy bugs: generated_strategy* template issues, trailing stop, future-looking, startup_candle_count |

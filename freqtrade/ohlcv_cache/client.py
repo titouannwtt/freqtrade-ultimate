@@ -457,6 +457,33 @@ class OhlcvCacheClient:
             )
         return resp.get("hit", False), resp.get("data", []), resp.get("auto_grant", False)
 
+    async def report_order(
+        self,
+        pair: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        action: str = "create",
+        order_id: str = "",
+    ) -> None:
+        """Fire-and-forget notification: tell daemon an order was placed/cancelled."""
+        try:
+            await self._send_and_receive(
+                {
+                    "op": "report_order",
+                    "req_id": uuid.uuid4().hex,
+                    "exchange": self.exchange_id,
+                    "pair": pair,
+                    "side": side,
+                    "order_type": order_type,
+                    "amount": amount,
+                    "action": action,
+                    "order_id": order_id,
+                }
+            )
+        except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
+            pass
+
     async def push_balances(self, balances: dict) -> None:
         """Push get_balances() result into the daemon's shared cache."""
         req = {

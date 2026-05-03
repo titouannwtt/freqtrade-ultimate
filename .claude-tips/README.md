@@ -14,7 +14,7 @@ Ce répertoire contient les règles de trading algorithmique distillées dans `t
 
 | Demande utilisateur | Fichiers à consulter |
 |---|---|
-| Analyse/review une stratégie | `strategy_evaluation.md`, `risk_management.md` + fichier type (mean_reversion / trend_following / machine_learning) |
+| Analyse/review une stratégie | `strategy_evaluation.md`, `risk_management.md`, `strategy_bugs_reference.md` + fichier type (mean_reversion / trend_following / machine_learning) |
 | Crée/code une stratégie | `strategy_development.md`, `data_quality.md`, `risk_management.md` + fichier type |
 | Lance/analyse un backtest | `backtesting.md`, `data_quality.md`, `strategy_evaluation.md` |
 | Lance un hyperopt / loss function | `hyperopt.md`, `backtesting.md` |

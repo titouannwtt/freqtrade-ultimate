@@ -2916,3 +2916,160 @@ class TestStaleDataMaxAge:
         result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
         assert result is True
         assert mixin._ftcache_local_limiter is not None
+
+
+# ────────────────────────────────────────────────────────────────────
+# Order reporting
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestOrderReporting:
+    """Tests for order report flow: mixin → client → daemon."""
+
+    def test_create_order_reports_to_daemon(self):
+        """create_order should fire report_order after successful order."""
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+        mixin._ftcache_acquire_sync = MagicMock()
+        mixin._ftcache_report_order = MagicMock()
+        fake_order = {"id": "ord123", "status": "open"}
+
+        # Create a temporary subclass so super() resolves create_order
+        class _FakeExchange:
+            def create_order(self, **kwargs):
+                return fake_order
+
+        class _TestMixin(CachedExchangeMixin, _FakeExchange):
+            pass
+
+        mixin.__class__ = _TestMixin
+        result = mixin.create_order(
+            pair="BTC/USDC", side="sell", ordertype="limit", amount=0.1, rate=50000
+        )
+        assert result["id"] == "ord123"
+        mixin._ftcache_acquire_sync.assert_called_once()
+        mixin._ftcache_report_order.assert_called_once_with(
+            pair="BTC/USDC",
+            side="sell",
+            order_type="limit",
+            amount=0.1,
+            action="create",
+            order_id="ord123",
+        )
+
+    def test_cancel_order_reports_to_daemon(self):
+        """cancel_order should fire report_order after successful cancel."""
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+        mixin._ftcache_acquire_sync = MagicMock()
+        mixin._ftcache_report_order = MagicMock()
+
+        class _FakeExchange:
+            def cancel_order(self, order_id, pair, params=None):
+                return {"id": order_id, "status": "canceled"}
+
+        class _TestMixin(CachedExchangeMixin, _FakeExchange):
+            pass
+
+        mixin.__class__ = _TestMixin
+        result = mixin.cancel_order("ord456", "ETH/USDC")
+        assert result["status"] == "canceled"
+        mixin._ftcache_report_order.assert_called_once_with(
+            pair="ETH/USDC",
+            side="",
+            order_type="",
+            amount=0,
+            action="cancel",
+            order_id="ord456",
+        )
+
+    def test_create_order_no_report_in_dry_run(self):
+        """Dry-run mode should skip both acquire and report."""
+        mixin, client, _ = _make_mixin_exchange(dry_run=True)
+        mixin.id = "hyperliquid"
+        mixin._ftcache_acquire_sync = MagicMock()
+        mixin._ftcache_report_order = MagicMock()
+
+        class _FakeExchange:
+            def create_order(self, **kwargs):
+                return {"id": "dry1", "status": "open"}
+
+        class _TestMixin(CachedExchangeMixin, _FakeExchange):
+            pass
+
+        mixin.__class__ = _TestMixin
+        mixin.create_order(pair="BTC/USDC", side="buy", ordertype="market", amount=1.0)
+        mixin._ftcache_acquire_sync.assert_not_called()
+        mixin._ftcache_report_order.assert_not_called()
+
+    def test_report_order_tolerates_no_client(self):
+        """_ftcache_report_order should not raise when client is None."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_client = None
+        # Should not raise
+        mixin._ftcache_report_order(
+            pair="BTC/USDC",
+            side="sell",
+            order_type="limit",
+            amount=0.5,
+            action="create",
+            order_id="x",
+        )
+
+    @pytest.mark.asyncio
+    async def test_daemon_handle_order_report(self):
+        """Daemon should handle report_order op and return ok."""
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        daemon = Daemon.__new__(Daemon)
+        daemon.event_log = None
+        resp = await daemon._handle_order_report(
+            {
+                "req_id": "test1",
+                "exchange": "hyperliquid",
+                "action": "create",
+                "pair": "BTC/USDC",
+                "side": "sell",
+                "order_type": "limit",
+                "amount": 0.5,
+                "order_id": "ord789",
+            }
+        )
+        assert resp["ok"] is True
+        assert resp["req_id"] == "test1"
+
+    @pytest.mark.asyncio
+    async def test_client_report_order(self):
+        """Client.report_order should send the right op."""
+        client = OhlcvCacheClient.__new__(OhlcvCacheClient)
+        client.exchange_id = "hyperliquid"
+        client._send_and_receive = AsyncMock(return_value={"ok": True})
+        await client.report_order(
+            pair="ETH/USDC",
+            side="buy",
+            order_type="market",
+            amount=10.0,
+            action="create",
+            order_id="o1",
+        )
+        call_args = client._send_and_receive.call_args[0][0]
+        assert call_args["op"] == "report_order"
+        assert call_args["pair"] == "ETH/USDC"
+        assert call_args["action"] == "create"
+        assert call_args["order_id"] == "o1"
+
+    @pytest.mark.asyncio
+    async def test_client_report_order_swallows_errors(self):
+        """Client.report_order should swallow CacheUnavailable."""
+        client = OhlcvCacheClient.__new__(OhlcvCacheClient)
+        client.exchange_id = "hyperliquid"
+        client._send_and_receive = AsyncMock(side_effect=CacheUnavailable("gone"))
+        # Should not raise
+        await client.report_order(
+            pair="X/Y",
+            side="sell",
+            order_type="limit",
+            amount=1.0,
+            action="cancel",
+            order_id="c1",
+        )

@@ -12,11 +12,13 @@ from pathlib import Path
 
 def default_socket_path() -> str:
     import os
+
     return f"/tmp/ftcache-{os.getuid()}.sock"
 
 
 def default_lock_path() -> str:
     import os
+
     return f"/tmp/ftcache-{os.getuid()}.lock"
 
 
@@ -64,22 +66,22 @@ GLOBAL_DEFAULTS: dict = {
 #
 # Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits
 HL_WEIGHT_MAP: dict[str, float] = {
-    "fetch":           4.0,   # candleSnapshot
-    "tickers":        20.0,   # info (allMids + meta)
-    "positions_get":   2.0,   # clearinghouseState
-    "positions_put":   0.0,   # local cache write, no API call
-    "balances_get":    2.0,   # clearinghouseState
-    "balances_put":    0.0,   # local cache write, no API call
-    "markets":        20.0,   # meta (load_markets)
-    "funding_rates":  20.0,   # info
-    "leverage_tiers": 20.0,   # meta
-    "acquire":         1.0,   # default for bot-side REST (orders)
+    "fetch": 4.0,  # candleSnapshot
+    "tickers": 20.0,  # info (allMids + meta)
+    "positions_get": 2.0,  # clearinghouseState
+    "positions_put": 0.0,  # local cache write, no API call
+    "balances_get": 2.0,  # clearinghouseState
+    "balances_put": 0.0,  # local cache write, no API call
+    "markets": 20.0,  # meta (load_markets)
+    "funding_rates": 20.0,  # info
+    "leverage_tiers": 20.0,  # meta
+    "acquire": 1.0,  # default for bot-side REST (orders)
 }
 
 HL_WEIGHT_BUDGET_PER_MIN = 1200
-# Conservative: use 85% of the real budget to leave headroom for
-# order placement traffic that bypasses the daemon.
-HL_EFFECTIVE_BUDGET_PER_MIN = int(HL_WEIGHT_BUDGET_PER_MIN * 0.85)
+# All order traffic now goes through the daemon (acquire tokens),
+# so we can use 95% of the real budget.
+HL_EFFECTIVE_BUDGET_PER_MIN = int(HL_WEIGHT_BUDGET_PER_MIN * 0.95)
 
 
 # Per-exchange defaults. Rate limits are "per second" budgets.

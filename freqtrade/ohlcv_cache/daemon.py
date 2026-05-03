@@ -1457,6 +1457,37 @@ class Daemon:
             "backoff_remaining_s": budget.backoff_remaining_s,
         }
 
+    async def _handle_order_report(self, req: dict) -> dict:
+        """A bot reports an order create/cancel for fleet observability."""
+        exchange = req.get("exchange", "hyperliquid")
+        action = req.get("action", "create")
+        pair = req.get("pair", "")
+        side = req.get("side", "")
+        order_type = req.get("order_type", "")
+        amount = req.get("amount", 0.0)
+        order_id = req.get("order_id", "")
+        logger.info(
+            "order report: %s %s %s %s amount=%.6g id=%s",
+            action,
+            side,
+            order_type,
+            pair,
+            amount,
+            order_id or "(none)",
+        )
+        if self.event_log:
+            self.event_log.emit(
+                "order_report",
+                exchange=exchange,
+                action=action,
+                pair=pair,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                order_id=order_id,
+            )
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
     # --------- centralized rate limiter: shared tickers
 
     async def _handle_tickers(self, req: dict) -> dict:
@@ -2145,6 +2176,8 @@ class Daemon:
             return await self._handle_acquire(req)
         if op == "report_429":
             return await self._handle_report_429(req)
+        if op == "report_order":
+            return await self._handle_order_report(req)
         if op == "tickers":
             return await self._handle_tickers(req)
         if op == "positions_put":
