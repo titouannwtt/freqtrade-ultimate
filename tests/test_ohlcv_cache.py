@@ -1175,7 +1175,7 @@ class TestPositionsStaleCache:
         assert mixin._ftcache_stats["stale_positions"] == 1
 
     def test_positions_rate_limited_no_stale_falls_through(self):
-        """First call ever with rate-limit: no stale data, must fall to direct fetch."""
+        """First call ever with rate-limit: no stale data, must force CRITICAL fetch."""
         mixin, client, _ = _make_mixin_exchange()
         mixin.id = "hyperliquid"
         mixin._ftcache_acquire_sync = MagicMock()
@@ -1187,7 +1187,7 @@ class TestPositionsStaleCache:
         except (AttributeError, TypeError):
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(
-            priority=OhlcvCacheClient.HIGH, cost=2.0
+            priority=OhlcvCacheClient.CRITICAL, cost=2.0
         )
 
     def test_positions_cache_hit_updates_local(self):
@@ -2832,6 +2832,56 @@ class TestDaemonRateLimitPersistence:
         d2._load_rate_limit_state()
         # Should NOT have loaded the stale state
         assert "hyperliquid" not in d2.budgets
+
+
+# -------------------------------------------------------- Stale data max age tests
+
+
+class TestStaleDataMaxAge:
+    """Tests for stale data rejection when data is too old."""
+
+    def test_stale_positions_rejected_when_too_old_with_open_pairs(self):
+        """Positions older than max age are rejected when open pairs exist."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_open_pairs = frozenset({"BTC/USDT:USDT"})
+        mixin._ftcache_last_positions = [{"symbol": "BTC/USDT:USDT"}]
+        # Set timestamp to be older than max age
+        mixin._ftcache_last_positions_ts = time.monotonic() - mixin._STALE_POSITIONS_MAX_AGE_S - 1.0
+
+        result = mixin._ftcache_get_stale_positions()
+        assert result is None  # rejected
+
+    def test_stale_positions_accepted_when_young(self):
+        """Positions younger than max age are accepted."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_open_pairs = frozenset({"BTC/USDT:USDT"})
+        mixin._ftcache_last_positions = [{"symbol": "BTC/USDT:USDT"}]
+        mixin._ftcache_last_positions_ts = time.monotonic() - 10.0  # 10s old
+
+        result = mixin._ftcache_get_stale_positions()
+        assert result is not None
+
+    def test_stale_positions_accepted_when_no_open_pairs(self):
+        """Stale positions are accepted when there are no open pairs."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_open_pairs = frozenset()  # no open pairs
+        mixin._ftcache_last_positions = [{"symbol": "BTC/USDT:USDT"}]
+        mixin._ftcache_last_positions_ts = (
+            time.monotonic() - mixin._STALE_POSITIONS_MAX_AGE_S - 100.0
+        )
+
+        result = mixin._ftcache_get_stale_positions()
+        assert result is not None  # accepted despite age
+
+    def test_stale_positions_reject_bypassed_when_flag_false(self):
+        """reject_if_too_old=False bypasses the age check."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_open_pairs = frozenset({"BTC/USDT:USDT"})
+        mixin._ftcache_last_positions = [{"symbol": "BTC/USDT:USDT"}]
+        mixin._ftcache_last_positions_ts = time.monotonic() - mixin._STALE_POSITIONS_MAX_AGE_S - 1.0
+
+        result = mixin._ftcache_get_stale_positions(reject_if_too_old=False)
+        assert result is not None  # accepted despite age
 
     def test_timeout_uses_local_limiter(self):
         """When acquire times out in live mode, local limiter should be used."""

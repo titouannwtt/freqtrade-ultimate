@@ -131,6 +131,8 @@ class CachedExchangeMixin:
 
     _ACQUIRE_TIMEOUT_S: float = 120.0
     _STALE_POSITIONS_WARN_AGE_S: float = 120.0
+    _STALE_POSITIONS_MAX_AGE_S: float = 45.0  # force CRITICAL fetch if older
+    _STALE_TICKERS_MAX_AGE_S: float = 60.0  # force CRITICAL fetch if older
 
     # Local fallback caches for rate-limited scenarios
     _ftcache_last_positions: list | None = None
@@ -398,10 +400,21 @@ class CachedExchangeMixin:
         self._ftcache_last_positions = positions
         self._ftcache_last_positions_ts = time.monotonic()
 
-    def _ftcache_get_stale_positions(self) -> list | None:
+    def _ftcache_get_stale_positions(self, *, reject_if_too_old: bool = True) -> list | None:
         if self._ftcache_last_positions is None:
             return None
         age = time.monotonic() - self._ftcache_last_positions_ts
+        # If we have open positions and data is too old, reject it
+        # so the caller can force a CRITICAL fetch
+        if reject_if_too_old and self._ftcache_open_pairs and age > self._STALE_POSITIONS_MAX_AGE_S:
+            logger.warning(
+                "positions stale (%.0fs > %.0fs max) with %d open pairs "
+                "— rejecting stale data, forcing fresh fetch",
+                age,
+                self._STALE_POSITIONS_MAX_AGE_S,
+                len(self._ftcache_open_pairs),
+            )
+            return None
         if age > self._STALE_POSITIONS_WARN_AGE_S:
             logger.warning(
                 "positions rate-limited — using %.0fs-old local cache"
@@ -847,6 +860,20 @@ class CachedExchangeMixin:
                 age = time.monotonic() - self._ftcache_tickers_fresh_ts
             else:
                 age = float("inf")
+            # If data is too old and we have open positions, force a fresh fetch
+            if self._ftcache_open_pairs and age > self._STALE_TICKERS_MAX_AGE_S:
+                logger.warning(
+                    "tickers stale (%.0fs > %.0fs max) with %d open pairs — forcing CRITICAL fetch",
+                    age,
+                    self._STALE_TICKERS_MAX_AGE_S,
+                    len(self._ftcache_open_pairs),
+                )
+                self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
+                return super().get_tickers(  # type: ignore[misc]
+                    symbols=symbols,
+                    cached=cached,
+                    market_type=market_type,
+                )
             cache_key = f"fetch_tickers_{market_type}" if market_type else "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
@@ -929,10 +956,15 @@ class CachedExchangeMixin:
             if stale is not None:
                 self._ftcache_bump("stale_positions")
                 return stale
+            # Stale data rejected (too old or missing) — force CRITICAL fetch
             logger.warning(
-                "positions rate-limited, no local fallback"
-                " — forced HIGH-priority fetch (first call, cost=2)",
+                "positions rate-limited, stale data rejected"
+                " — forcing CRITICAL-priority fetch (cost=2)",
             )
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+            positions = super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
+            self._ftcache_save_positions(positions)
+            return positions
         except CacheUnavailable:
             pass
         _t_after_cache = time.monotonic()
