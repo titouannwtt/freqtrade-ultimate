@@ -192,6 +192,80 @@ class TokenBucket:
             self._weight_used_last_min -= old_cost
         self._weight_used_last_min = max(0.0, self._weight_used_last_min)
 
+    def save_state(self) -> dict:
+        """Serialize rate-limit state for persistence across restarts.
+
+        Monotonic timestamps are converted to "seconds ago" so they can be
+        restored relative to the new process's clock.
+        """
+        now = time.monotonic()
+        # Weight window: convert to relative offsets
+        weight_entries = []
+        for ts, cost in self._weight_window:
+            age = now - ts
+            if age < 60.0:  # only save entries still in the 60s window
+                weight_entries.append({"age_s": round(age, 2), "cost": cost})
+
+        backoff_remaining = max(0.0, self._backoff_until - now)
+        return {
+            "tokens": round(self.tokens, 2),
+            "weight_entries": weight_entries,
+            "weight_used_last_min": round(self._weight_used_last_min, 1),
+            "backoff_remaining_s": round(backoff_remaining, 1),
+            "backoff_factor": self._backoff_factor,
+            "consecutive_backoffs": self._consecutive_backoffs,
+            "shed_threshold": self._current_shed_threshold,
+            "backoff_label": self._current_backoff_label,
+            "saved_at": time.time(),  # wall clock for debugging
+        }
+
+    def load_state(self, state: dict) -> None:
+        """Restore rate-limit state from a previous daemon's save.
+
+        Converts relative "seconds ago" offsets back to monotonic timestamps.
+        Discards entries older than 60s.
+        """
+        now = time.monotonic()
+
+        # Restore weight window
+        self._weight_window.clear()
+        self._weight_used_last_min = 0.0
+        for entry in state.get("weight_entries", []):
+            age = entry["age_s"]
+            cost = entry["cost"]
+            if age < 60.0:
+                ts = now - age
+                self._weight_window.append((ts, cost))
+                self._weight_used_last_min += cost
+
+        # Restore token level (cap at burst to be safe)
+        self.tokens = min(self.burst, state.get("tokens", self.burst))
+
+        # Restore backoff state
+        backoff_remaining = state.get("backoff_remaining_s", 0.0)
+        if backoff_remaining > 0:
+            self._backoff_until = now + backoff_remaining
+            self._backoff_factor = state.get("backoff_factor", 1.0)
+            self._consecutive_backoffs = state.get("consecutive_backoffs", 0)
+            self._current_shed_threshold = state.get("shed_threshold", self.LOW + 1)
+            self._current_backoff_label = state.get("backoff_label", "")
+            logger.info(
+                "TokenBucket[%s] restored backoff: %s %.0fs remaining, weight_used=%.0f/%d",
+                self.exchange,
+                self._current_backoff_label,
+                backoff_remaining,
+                self._weight_used_last_min,
+                self.weight_budget_per_min,
+            )
+        else:
+            logger.info(
+                "TokenBucket[%s] restored: tokens=%.0f, weight_used=%.0f/%d, no active backoff",
+                self.exchange,
+                self.tokens,
+                self._weight_used_last_min,
+                self.weight_budget_per_min,
+            )
+
     @property
     def weight_used_last_min(self) -> float:
         now = time.monotonic()
@@ -919,6 +993,49 @@ class Daemon:
             )
             self.budgets[exchange] = b
         return b
+
+    @property
+    def _ratelimit_state_path(self) -> str:
+        return self.socket_path + ".ratelimit.json"
+
+    def _save_rate_limit_state(self) -> None:
+        """Persist all TokenBucket states to disk."""
+        if not self.budgets:
+            return
+        state = {}
+        for exchange, bucket in self.budgets.items():
+            state[exchange] = bucket.save_state()
+        try:
+            tmp = self._ratelimit_state_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, self._ratelimit_state_path)
+        except Exception as e:
+            logger.warning("failed to save rate-limit state: %s", e)
+
+    def _load_rate_limit_state(self) -> None:
+        """Restore TokenBucket states from disk on startup."""
+        path = self._ratelimit_state_path
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                state = json.load(f)
+            # Check staleness: if saved > 120s ago, discard
+            for exchange, bucket_state in state.items():
+                saved_at = bucket_state.get("saved_at", 0)
+                age = time.time() - saved_at
+                if age > 120.0:
+                    logger.info(
+                        "discarding stale rate-limit state for %s (%.0fs old)",
+                        exchange,
+                        age,
+                    )
+                    continue
+                bucket = self._get_budget(exchange)
+                bucket.load_state(bucket_state)
+        except Exception as e:
+            logger.warning("failed to load rate-limit state: %s", e)
 
     def _get_weight(self, exchange: str, op: str) -> float:
         """Resolve the API weight for a given operation on an exchange."""
@@ -2249,6 +2366,7 @@ class Daemon:
                     if n:
                         logger.debug("flushed %d dirty series", n)
                 self.event_log.flush()
+                self._save_rate_limit_state()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2284,6 +2402,9 @@ class Daemon:
             except Exception as e:
                 logger.warning("persistence load failed: %s", e)
 
+        # Restore rate-limit state from previous daemon
+        self._load_rate_limit_state()
+
         watchdog_task = asyncio.create_task(self._idle_watchdog())
         flush_task = asyncio.create_task(self._periodic_flush())
         stats_task = asyncio.create_task(self._periodic_stats())
@@ -2304,6 +2425,7 @@ class Daemon:
                     logger.info("final flush: %d series written", n)
                 except Exception as e:
                     logger.warning("final flush failed: %s", e)
+            self._save_rate_limit_state()
             self.event_log.emit("daemon_stop", uptime_s=round(self.stats.uptime_s(), 1))
             self.event_log.flush()
             try:

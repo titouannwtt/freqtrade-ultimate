@@ -6,6 +6,8 @@ rate-limited fallback behaviour, and CachedHyperliquid overrides.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -2689,8 +2691,147 @@ class TestLocalLimiterFallback:
 
         result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
         assert result is True
-        # Local limiter should have been created
         assert mixin._ftcache_local_limiter is not None
+
+
+# -------------------------------------------------------- TokenBucket persistence tests
+
+
+class TestTokenBucketPersistence:
+    """Tests for TokenBucket save_state/load_state."""
+
+    def _make_bucket(self, **kwargs) -> "TokenBucket":
+        from freqtrade.ohlcv_cache.daemon import TokenBucket
+
+        defaults = dict(
+            rate_per_s=17.0,
+            burst=50.0,
+            weight_mode=True,
+            weight_budget_per_min=1020,
+            exchange="hyperliquid",
+        )
+        defaults.update(kwargs)
+        return TokenBucket(**defaults)
+
+    def test_save_load_roundtrip_weight_window(self):
+        """Weight window entries survive a save/load cycle."""
+        b1 = self._make_bucket()
+        b1._record_weight(100.0)
+        b1._record_weight(50.0)
+
+        state = b1.save_state()
+        assert len(state["weight_entries"]) == 2
+        assert state["weight_used_last_min"] == 150.0
+
+        b2 = self._make_bucket()
+        b2.load_state(state)
+        assert abs(b2._weight_used_last_min - 150.0) < 1.0
+        assert len(b2._weight_window) == 2
+
+    def test_save_load_backoff_state(self):
+        """Active backoff is preserved across restart."""
+        b1 = self._make_bucket()
+        # Simulate active backoff: 30s remaining
+        b1._backoff_until = time.monotonic() + 30.0
+        b1._backoff_factor = 4.0
+        b1._consecutive_backoffs = 2
+        b1._current_shed_threshold = 2  # NORMAL
+        b1._current_backoff_label = "MEDIUM"
+
+        state = b1.save_state()
+        assert state["backoff_remaining_s"] == pytest.approx(30.0, abs=1.0)
+
+        b2 = self._make_bucket()
+        b2.load_state(state)
+        assert b2.backoff_active is True
+        assert b2._backoff_factor == 4.0
+        assert b2._consecutive_backoffs == 2
+        assert b2._current_shed_threshold == 2
+        assert b2._current_backoff_label == "MEDIUM"
+        assert b2.backoff_remaining_s == pytest.approx(30.0, abs=2.0)
+
+    def test_expired_backoff_not_restored(self):
+        """If backoff was already expired at save time, don't restore it."""
+        b1 = self._make_bucket()
+        b1._backoff_until = time.monotonic() - 1.0  # already expired
+
+        state = b1.save_state()
+        assert state["backoff_remaining_s"] == 0.0
+
+        b2 = self._make_bucket()
+        b2.load_state(state)
+        assert b2.backoff_active is False
+
+    def test_stale_weight_entries_discarded(self):
+        """Weight entries older than 60s are not saved."""
+        b1 = self._make_bucket()
+        # Add an old entry manually
+        b1._weight_window.append((time.monotonic() - 61.0, 500.0))
+        b1._weight_used_last_min = 500.0
+        # Add a fresh entry
+        b1._record_weight(10.0)
+
+        state = b1.save_state()
+        # Only the fresh entry should be saved
+        assert len(state["weight_entries"]) == 1
+        assert state["weight_entries"][0]["cost"] == 10.0
+
+    def test_tokens_capped_at_burst(self):
+        """Restored tokens should not exceed burst."""
+        b1 = self._make_bucket(burst=50.0)
+        state = b1.save_state()
+        state["tokens"] = 999.0  # corrupt value
+
+        b2 = self._make_bucket(burst=50.0)
+        b2.load_state(state)
+        assert b2.tokens == 50.0
+
+
+class TestDaemonRateLimitPersistence:
+    """Tests for Daemon._save/_load_rate_limit_state."""
+
+    def test_save_and_load(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        socket_path = str(tmp_path / "test.sock")
+        d = Daemon(socket_path=socket_path, global_cfg={})
+
+        # Create a bucket and add weight
+        bucket = d._get_budget("hyperliquid")
+        bucket._record_weight(200.0)
+
+        d._save_rate_limit_state()
+        assert os.path.exists(socket_path + ".ratelimit.json")
+
+        # New daemon loads state
+        d2 = Daemon(socket_path=socket_path, global_cfg={})
+        d2._load_rate_limit_state()
+
+        b2 = d2.budgets.get("hyperliquid")
+        assert b2 is not None
+        assert abs(b2._weight_used_last_min - 200.0) < 1.0
+
+    def test_stale_state_discarded(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        socket_path = str(tmp_path / "test.sock")
+        d = Daemon(socket_path=socket_path, global_cfg={})
+        bucket = d._get_budget("hyperliquid")
+        bucket._record_weight(200.0)
+        d._save_rate_limit_state()
+
+        # Tamper saved_at to be > 120s ago
+        path = socket_path + ".ratelimit.json"
+        with open(path) as f:
+            state = json.load(f)
+        state["hyperliquid"]["saved_at"] = time.time() - 200.0
+        with open(path, "w") as f:
+            json.dump(state, f)
+
+        d2 = Daemon(socket_path=socket_path, global_cfg={})
+        d2._load_rate_limit_state()
+        # Should NOT have loaded the stale state
+        assert "hyperliquid" not in d2.budgets
 
     def test_timeout_uses_local_limiter(self):
         """When acquire times out in live mode, local limiter should be used."""
