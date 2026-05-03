@@ -20,7 +20,7 @@ from freqtrade.ohlcv_cache.client import (
     CacheUnavailable,
     OhlcvCacheClient,
 )
-from freqtrade.ohlcv_cache.mixin import CachedExchangeMixin
+from freqtrade.ohlcv_cache.mixin import CachedExchangeMixin, _LocalRateLimiter
 
 
 # -------------------------------------------------------------------- exceptions
@@ -289,6 +289,7 @@ def _make_mixin_exchange(dry_run=False, ftcache_enabled=True):
     mixin._ftcache_last_backoff_active = False
     mixin._ftcache_last_backoff_ts = 0.0
     mixin._ftcache_last_wait_log_ts = 0.0
+    mixin._ftcache_local_limiter = None
 
     return mixin, client, mock
 
@@ -2609,3 +2610,118 @@ class TestConcurrentBurstScenario:
             assert max(crit_indices) < min(low_indices), (
                 f"CRITICAL served after LOW: {served_order}"
             )
+
+
+# ------------------------------------------------------------------ LocalRateLimiter tests
+
+
+class TestLocalRateLimiter:
+    """Tests for the _LocalRateLimiter fallback used when daemon is unavailable."""
+
+    def test_basic_acquire_within_budget(self):
+        """Requests within budget should pass immediately."""
+        limiter = _LocalRateLimiter(exchange_budget_per_min=120.0, assumed_bots=1)
+        # Budget = 120/min, acquire 10 → should be instant
+        t0 = time.monotonic()
+        limiter.acquire(cost=10.0)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.1
+
+    def test_critical_always_passes(self):
+        """CRITICAL priority should never be blocked, even over budget."""
+        limiter = _LocalRateLimiter(exchange_budget_per_min=60.0, assumed_bots=1)
+        # Exhaust budget
+        limiter.acquire(cost=60.0, priority=OhlcvCacheClient.CRITICAL)
+        # Over budget — CRITICAL should still pass instantly
+        t0 = time.monotonic()
+        limiter.acquire(cost=100.0, priority=OhlcvCacheClient.CRITICAL)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.1
+
+    def test_blocks_when_over_budget(self):
+        """Non-CRITICAL requests should block when budget is exhausted."""
+        # 10 weight/min budget, fill it up
+        limiter = _LocalRateLimiter(exchange_budget_per_min=60.0, assumed_bots=6)
+        # Budget = 10/min
+        limiter.acquire(cost=10.0)  # fills budget
+        # Next acquire must block
+        t0 = time.monotonic()
+        # Run in thread with timeout to avoid hanging test
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            fut = pool.submit(limiter.acquire, 1.0, OhlcvCacheClient.LOW)
+            try:
+                fut.result(timeout=2.0)
+                # If it returned, it waited for budget to free up
+                elapsed = time.monotonic() - t0
+                assert elapsed >= 0.4  # should have waited
+            except concurrent.futures.TimeoutError:
+                # Expected — blocked waiting for budget
+                pass
+
+    def test_assumed_bots_divides_budget(self):
+        """Budget should be divided by assumed_bots."""
+        limiter = _LocalRateLimiter(exchange_budget_per_min=1200.0, assumed_bots=6)
+        assert limiter._budget == 200.0
+
+    def test_purge_removes_old_entries(self):
+        """Entries older than 60s should be purged."""
+        limiter = _LocalRateLimiter(exchange_budget_per_min=60.0, assumed_bots=1)
+        # Manually insert an old entry
+        old_ts = time.monotonic() - 61.0
+        limiter._window.append((old_ts, 50.0))
+        # Purge and check
+        used = limiter._purge(time.monotonic())
+        assert used == 0.0
+        assert len(limiter._window) == 0
+
+
+class TestLocalLimiterFallback:
+    """Verify that fallthrough points in _ftcache_acquire_sync use local limiter."""
+
+    def test_client_none_uses_local_limiter(self):
+        """When daemon client is None, local limiter should be used."""
+        mixin, _, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+        # Mock _ftcache_get_client to return None (daemon unavailable)
+        mixin._ftcache_get_client = MagicMock(return_value=None)
+
+        result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
+        assert result is True
+        # Local limiter should have been created
+        assert mixin._ftcache_local_limiter is not None
+
+    def test_timeout_uses_local_limiter(self):
+        """When acquire times out in live mode, local limiter should be used."""
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+        mixin._ACQUIRE_TIMEOUT_S = 0.1  # fast timeout for test
+
+        client.acquire_rate_token = AsyncMock(side_effect=asyncio.TimeoutError("test timeout"))
+
+        result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
+        assert result is True
+        assert mixin._ftcache_local_limiter is not None
+
+    def test_cache_unavailable_uses_local_limiter(self):
+        """When CacheUnavailable in live mode, local limiter should be used."""
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+
+        client.acquire_rate_token = AsyncMock(side_effect=CacheUnavailable("down"))
+
+        result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
+        assert result is True
+        assert mixin._ftcache_local_limiter is not None
+
+    def test_generic_exception_uses_local_limiter(self):
+        """When unexpected exception in live mode, local limiter should be used."""
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+
+        client.acquire_rate_token = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = mixin._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL, cost=1.0)
+        assert result is True
+        assert mixin._ftcache_local_limiter is not None

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,72 @@ if TYPE_CHECKING:
 logger = logging.getLogger("ftcache.client")
 
 
+class _LocalRateLimiter:
+    """Simple per-bot rate limiter used when the daemon is unavailable.
+
+    When the centralized daemon crashes, bots must not flood the exchange
+    with unmetered requests.  This provides a conservative local throttle
+    based on a sliding-window weight counter.
+
+    Design choices:
+    - Assumes ``assumed_bots`` processes share the exchange budget
+      → each bot gets ``exchange_budget / assumed_bots`` weight/min
+    - CRITICAL priority (orders) always passes immediately — we never
+      block order placement
+    - Non-CRITICAL requests sleep until budget is available
+    - Thread-safe via a simple lock (no asyncio needed)
+    """
+
+    def __init__(
+        self,
+        exchange_budget_per_min: float = 1200.0,
+        assumed_bots: int = 6,
+    ):
+        self._budget = exchange_budget_per_min / assumed_bots
+        self._window: list[tuple[float, float]] = []  # (timestamp, cost)
+        self._lock = threading.Lock()
+
+    def _purge(self, now: float) -> float:
+        """Remove entries older than 60s, return current weight used."""
+        cutoff = now - 60.0
+        self._window = [(ts, c) for ts, c in self._window if ts > cutoff]
+        return sum(c for _, c in self._window)
+
+    def acquire(self, cost: float = 1.0, priority: int | None = None) -> None:
+        """Block until weight budget allows ``cost``.
+
+        CRITICAL priority (0) is never blocked — orders must always go through.
+        """
+        if priority is not None and priority <= OhlcvCacheClient.CRITICAL:
+            with self._lock:
+                now = time.monotonic()
+                self._purge(now)
+                self._window.append((now, cost))
+            return
+
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                used = self._purge(now)
+                if used + cost <= self._budget:
+                    self._window.append((now, cost))
+                    return
+                # Calculate sleep time: wait for oldest entry to expire
+                if self._window:
+                    sleep_until = self._window[0][0] + 60.0
+                    wait = max(sleep_until - now, 0.5)
+                else:
+                    wait = 1.0
+            logger.debug(
+                "local rate limiter: budget %.0f/%.0f — sleeping %.1fs (cost=%.0f)",
+                used,
+                self._budget,
+                wait,
+                cost,
+            )
+            time.sleep(min(wait, 5.0))  # cap individual sleeps at 5s
+
+
 class CachedExchangeMixin:
     """Mixin intended to sit before Exchange in the MRO.
 
@@ -73,6 +140,32 @@ class CachedExchangeMixin:
     _ftcache_last_backoff_active: bool = False
     _ftcache_last_backoff_ts: float = 0.0
     _BACKOFF_CCXT_BLOCK_S: float = 30.0
+
+    # Local fallback rate limiter (when daemon is unavailable)
+    _ftcache_local_limiter: _LocalRateLimiter | None = None
+    _LOCAL_LIMITER_ASSUMED_BOTS: int = 6
+
+    def _ftcache_get_local_limiter(self) -> _LocalRateLimiter:
+        """Lazy-init the local fallback rate limiter."""
+        if self._ftcache_local_limiter is None:
+            from freqtrade.ohlcv_cache.defaults import EXCHANGE_DEFAULTS
+
+            exchange_id = getattr(self, "id", "unknown")
+            cfg = EXCHANGE_DEFAULTS.get(exchange_id, {})
+            budget = cfg.get("weight_budget_per_min", 1200.0)
+            # Use the real exchange budget (not the 85% daemon budget)
+            self._ftcache_local_limiter = _LocalRateLimiter(
+                exchange_budget_per_min=budget,
+                assumed_bots=self._LOCAL_LIMITER_ASSUMED_BOTS,
+            )
+            logger.warning(
+                "local fallback rate limiter activated: %.0f weight/min budget "
+                "(assuming %d concurrent bots, exchange=%s)",
+                budget / self._LOCAL_LIMITER_ASSUMED_BOTS,
+                self._LOCAL_LIMITER_ASSUMED_BOTS,
+                exchange_id,
+            )
+        return self._ftcache_local_limiter
 
     def _ftcache_should_block_ccxt(self) -> bool:
         """Return True when daemon backoff is active — direct ccxt calls must be blocked.
@@ -406,6 +499,7 @@ class CachedExchangeMixin:
 
         client = self._ftcache_get_client()
         if client is None:
+            self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
             return True
 
         deadline = time.monotonic() + self._OFFLINE_ACQUIRE_MAX_S if is_offline else 0.0
@@ -487,13 +581,15 @@ class CachedExchangeMixin:
                         deadline - time.monotonic(),
                     )
                     continue
-                # Live mode: timeout → allow through (legacy behavior)
+                # Live mode: timeout → local limiter fallback
                 logger.info(
-                    "rate token acquire timed out after %.0fs — allowing (priority=%s, cost=%.0f)",
+                    "rate token acquire timed out after %.0fs — using local limiter "
+                    "(priority=%s, cost=%.0f)",
                     self._ACQUIRE_TIMEOUT_S,
                     priority,
                     cost,
                 )
+                self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
                 return True
 
             except CacheUnavailable:
@@ -506,6 +602,7 @@ class CachedExchangeMixin:
                         )
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
+                self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
                 return True
 
             except TemporaryError:
@@ -521,7 +618,8 @@ class CachedExchangeMixin:
                         )
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
-                logger.debug("rate token acquire failed (%s), proceeding without", e)
+                logger.debug("rate token acquire failed (%s), using local limiter", e)
+                self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
                 return True
 
     # -------------------------------------------------------------------- OHLCV
@@ -582,6 +680,14 @@ class CachedExchangeMixin:
                             )
                             self._ftcache_last_wait_log_ts = now
                         await asyncio.sleep(self._OFFLINE_RETRY_INTERVAL_S)
+            else:
+                # Daemon unavailable in offline mode — use local limiter
+                limiter = self._ftcache_get_local_limiter()
+                await asyncio.to_thread(
+                    limiter.acquire,
+                    4.0,
+                    OhlcvCacheClient.LOW,
+                )
             return await super()._async_get_candle_history(  # type: ignore[misc]
                 pair,
                 timeframe,
@@ -590,6 +696,9 @@ class CachedExchangeMixin:
             )
 
         if not self._ftcache_client:
+            # Daemon unavailable in live mode — use local limiter
+            limiter = self._ftcache_get_local_limiter()
+            await asyncio.to_thread(limiter.acquire, 4.0, None)
             return await super()._async_get_candle_history(  # type: ignore[misc]
                 pair,
                 timeframe,
