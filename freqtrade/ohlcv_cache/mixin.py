@@ -59,6 +59,7 @@ class CachedExchangeMixin:
     _ftcache_pending_identity: dict | None = None
     _ftcache_is_offline_mode: bool = False  # True for BACKTEST/HYPEROPT/WALKFORWARD
     _ftcache_is_utility_mode: bool = False  # True for UTIL_EXCHANGE
+    _ftcache_is_dry_run_mode: bool = False  # True for DRY_RUN (floored to LOW)
     _ftcache_rate_limit_only: bool = False  # True when daemon is used only for rate limiting
 
     _ACQUIRE_TIMEOUT_S: float = 120.0
@@ -105,28 +106,37 @@ class CachedExchangeMixin:
             self._ftcache_init_complete = True
             logger.info("bot init complete — switching to normal rate-limit priorities")
 
+    @property
+    def _ftcache_is_deprioritized(self) -> bool:
+        """True for any mode that should yield to live bots."""
+        return (
+            self._ftcache_is_offline_mode
+            or self._ftcache_is_utility_mode
+            or self._ftcache_is_dry_run_mode
+        )
+
     def _ftcache_init_priority(self, requested: int | None) -> int | None:
         """During init phase, escalate essential calls to CRITICAL.
 
-        For offline/utility modes (backtest, hyperopt, utility commands),
-        init escalation is capped at LOW — these processes must never
-        starve live bots even during their own startup.
+        For offline/utility/dry-run modes, init escalation is capped at LOW
+        — these processes must never starve live bots even during their
+        own startup.
         """
         if self._ftcache_init_complete:
             return self._ftcache_apply_priority_floor(requested)
-        # Offline/utility: init is still LOW priority (no starving live bots)
-        if self._ftcache_is_offline_mode or self._ftcache_is_utility_mode:
+        # Deprioritized modes: init is still LOW priority (no starving live bots)
+        if self._ftcache_is_deprioritized:
             return OhlcvCacheClient.LOW
         return OhlcvCacheClient.CRITICAL
 
     def _ftcache_apply_priority_floor(self, requested: int | None) -> int | None:
-        """Downgrade priority for offline/utility modes.
+        """Downgrade priority for non-live modes.
 
-        Backtests, hyperopts, and utility commands (list-pairs, download-data,
-        test-pairlist) are never more urgent than live bots.  Their requests
-        are capped at LOW so they yield to all live trading traffic.
+        Backtests, hyperopts, utility commands, and dry-run bots are never
+        more urgent than live bots.  Their requests are capped at LOW so
+        they yield to all live trading traffic.
         """
-        if not (self._ftcache_is_offline_mode or self._ftcache_is_utility_mode):
+        if not self._ftcache_is_deprioritized:
             return requested
         floor = OhlcvCacheClient.LOW
         if requested is None:
@@ -150,6 +160,8 @@ class CachedExchangeMixin:
             self._ftcache_rate_limit_only = True
         elif runmode == RunMode.UTIL_EXCHANGE:
             self._ftcache_is_utility_mode = True
+        elif runmode == RunMode.DRY_RUN:
+            self._ftcache_is_dry_run_mode = True
         cfg = self._config.get("shared_ohlcv_cache")  # type: ignore[attr-defined]
         if cfg is None:
             return True  # default ON in this fork

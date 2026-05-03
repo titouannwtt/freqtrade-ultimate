@@ -284,6 +284,7 @@ def _make_mixin_exchange(dry_run=False, ftcache_enabled=True):
     mixin._ftcache_init_complete = True
     mixin._ftcache_is_offline_mode = False
     mixin._ftcache_is_utility_mode = False
+    mixin._ftcache_is_dry_run_mode = False
     mixin._ftcache_rate_limit_only = False
     mixin._ftcache_last_backoff_active = False
     mixin._ftcache_last_backoff_ts = 0.0
@@ -1998,6 +1999,24 @@ class TestPriorityFloor:
         mixin._ftcache_is_utility_mode = False
         result = CachedExchangeMixin._ftcache_apply_priority_floor(mixin, None)
         assert result is None
+
+    def test_dry_run_critical_capped_to_low(self):
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_is_dry_run_mode = True
+        result = CachedExchangeMixin._ftcache_apply_priority_floor(mixin, OhlcvCacheClient.CRITICAL)
+        assert result == OhlcvCacheClient.LOW
+
+    def test_dry_run_high_capped_to_low(self):
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_is_dry_run_mode = True
+        result = CachedExchangeMixin._ftcache_apply_priority_floor(mixin, OhlcvCacheClient.HIGH)
+        assert result == OhlcvCacheClient.LOW
+
+    def test_dry_run_low_stays_low(self):
+        mixin, _, _ = _make_mixin_exchange()
+        mixin._ftcache_is_dry_run_mode = True
+        result = CachedExchangeMixin._ftcache_apply_priority_floor(mixin, OhlcvCacheClient.LOW)
+        assert result == OhlcvCacheClient.LOW
 
 
 # -------------------------------------------------------------------- mixin: init priority
