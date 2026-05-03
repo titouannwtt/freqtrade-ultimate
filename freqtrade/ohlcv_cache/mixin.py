@@ -57,6 +57,9 @@ class CachedExchangeMixin:
     _ftcache_open_pairs: frozenset[str] = frozenset()
     _ftcache_init_complete: bool = False
     _ftcache_pending_identity: dict | None = None
+    _ftcache_is_offline_mode: bool = False  # True for BACKTEST/HYPEROPT/WALKFORWARD
+    _ftcache_is_utility_mode: bool = False  # True for UTIL_EXCHANGE
+    _ftcache_rate_limit_only: bool = False  # True when daemon is used only for rate limiting
 
     _ACQUIRE_TIMEOUT_S: float = 120.0
     _STALE_POSITIONS_WARN_AGE_S: float = 120.0
@@ -103,16 +106,48 @@ class CachedExchangeMixin:
             logger.info("bot init complete — switching to normal rate-limit priorities")
 
     def _ftcache_init_priority(self, requested: int | None) -> int | None:
-        """During init phase, escalate essential calls to CRITICAL."""
+        """During init phase, escalate essential calls to CRITICAL.
+
+        For offline/utility modes (backtest, hyperopt, utility commands),
+        init escalation is capped at LOW — these processes must never
+        starve live bots even during their own startup.
+        """
         if self._ftcache_init_complete:
-            return requested
+            return self._ftcache_apply_priority_floor(requested)
+        # Offline/utility: init is still LOW priority (no starving live bots)
+        if self._ftcache_is_offline_mode or self._ftcache_is_utility_mode:
+            return OhlcvCacheClient.LOW
         return OhlcvCacheClient.CRITICAL
+
+    def _ftcache_apply_priority_floor(self, requested: int | None) -> int | None:
+        """Downgrade priority for offline/utility modes.
+
+        Backtests, hyperopts, and utility commands (list-pairs, download-data,
+        test-pairlist) are never more urgent than live bots.  Their requests
+        are capped at LOW so they yield to all live trading traffic.
+        """
+        if not (self._ftcache_is_offline_mode or self._ftcache_is_utility_mode):
+            return requested
+        floor = OhlcvCacheClient.LOW
+        if requested is None:
+            return floor
+        return max(requested, floor)  # higher number = lower priority
+
+    _ftcache_last_wait_log_ts: float = 0.0
+    _WAIT_LOG_INTERVAL_S: float = 10.0  # don't spam, log every 10s
 
     def _ftcache_enabled(self) -> bool:
         from freqtrade.enums import RunMode
+
         runmode = self._config.get("runmode", RunMode.OTHER)  # type: ignore[attr-defined]
-        if runmode in (RunMode.BACKTEST, RunMode.HYPEROPT):
-            return False
+        # All modes that create an Exchange go through the daemon for
+        # centralized rate limiting.  Offline modes (backtest/hyperopt)
+        # only use the daemon for rate-token acquisition, not for caching.
+        if runmode in (RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.WALKFORWARD):
+            self._ftcache_is_offline_mode = True
+            self._ftcache_rate_limit_only = True
+        elif runmode == RunMode.UTIL_EXCHANGE:
+            self._ftcache_is_utility_mode = True
         cfg = self._config.get("shared_ohlcv_cache")  # type: ignore[attr-defined]
         if cfg is None:
             return True  # default ON in this fork
@@ -157,7 +192,8 @@ class CachedExchangeMixin:
             if not self._ftcache_warned:
                 logger.warning(
                     "could not initialise cache client (%s) — falling back to "
-                    "direct ccxt for this bot", e,
+                    "direct ccxt for this bot",
+                    e,
                 )
                 self._ftcache_warned = True
             self._ftcache_client = False
@@ -188,7 +224,9 @@ class CachedExchangeMixin:
                 logger.info(
                     "reduced ccxt rateLimit on %s from %dms to %dms"
                     " (daemon handles mixin calls, ccxt throttles the rest)",
-                    type(api).__name__, old_rate, target_rate_ms,
+                    type(api).__name__,
+                    old_rate,
+                    target_rate_ms,
                 )
 
     def _ftcache_warn_deprecated_config(self) -> None:
@@ -219,7 +257,10 @@ class CachedExchangeMixin:
             self._ftcache_stats[key] = self._ftcache_stats.get(key, 0) + 1
 
     def _ftcache_record_cached(
-        self, method: str, pair: str | None = None, latency_ms: float = 0.0,
+        self,
+        method: str,
+        pair: str | None = None,
+        latency_ms: float = 0.0,
     ) -> None:
         metrics = getattr(self, "_metrics", None)
         if metrics is None:
@@ -227,16 +268,18 @@ class CachedExchangeMixin:
         try:
             from freqtrade.exchange.exchange_metrics import ApiCall
 
-            metrics.record(ApiCall(
-                ts=time.time(),
-                method=method,
-                exchange=getattr(self, "name", "unknown"),
-                latency_ms=latency_ms,
-                cached=True,
-                success=True,
-                error_type=None,
-                pair=pair,
-            ))
+            metrics.record(
+                ApiCall(
+                    ts=time.time(),
+                    method=method,
+                    exchange=getattr(self, "name", "unknown"),
+                    latency_ms=latency_ms,
+                    cached=True,
+                    success=True,
+                    error_type=None,
+                    pair=pair,
+                )
+            )
         except Exception:  # noqa: S110
             pass
 
@@ -255,11 +298,13 @@ class CachedExchangeMixin:
         if age > self._STALE_POSITIONS_WARN_AGE_S:
             logger.warning(
                 "positions rate-limited — using %.0fs-old local cache"
-                " (data may be outdated, NOT falling back to ccxt)", age,
+                " (data may be outdated, NOT falling back to ccxt)",
+                age,
             )
         else:
             logger.info(
-                "positions rate-limited — using %.0fs-old local cache", age,
+                "positions rate-limited — using %.0fs-old local cache",
+                age,
             )
         return self._ftcache_last_positions
 
@@ -275,7 +320,7 @@ class CachedExchangeMixin:
         Returns (False, None) if the lock is held beyond timeout.
         Exceptions from the coroutine propagate normally.
         """
-        lock = getattr(self, '_loop_lock', None)
+        lock = getattr(self, "_loop_lock", None)
         if lock is None:
             return False, None
         if not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
@@ -315,7 +360,9 @@ class CachedExchangeMixin:
                 logger.info(
                     "reported 429 to daemon (method=%s pair=%s)"
                     " — all bots will queue by priority, blocking ccxt fallback for %.0fs",
-                    method, pair, self._BACKOFF_CCXT_BLOCK_S,
+                    method,
+                    pair,
+                    self._BACKOFF_CCXT_BLOCK_S,
                 )
         except Exception as e:
             logger.debug("report_429 to daemon failed (non-fatal): %s", e)
@@ -330,15 +377,33 @@ class CachedExchangeMixin:
         by priority (CRITICAL first). This call blocks until the token is
         granted or times out.
 
+        For backtest/hyperopt/utility modes, priority is floored to LOW
+        and informative logs are emitted while waiting.
+
         Returns True when the token was granted (or daemon unavailable).
         Returns False only when the _loop_lock is unavailable and local
         backoff check rejects the request.
         """
+        # Apply priority floor for non-live modes
+        priority = self._ftcache_apply_priority_floor(priority)
+
+        # Log when offline/utility mode starts waiting
+        if self._ftcache_is_offline_mode or self._ftcache_is_utility_mode:
+            now = time.monotonic()
+            if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
+                mode = "backtest/hyperopt" if self._ftcache_is_offline_mode else "utility"
+                logger.info(
+                    "[%s] waiting for rate token (priority=LOW) — "
+                    "live bots have priority, this may take a moment",
+                    mode,
+                )
+                self._ftcache_last_wait_log_ts = now
+
         client = self._ftcache_get_client()
         if client is None:
             return True
         try:
-            lock = getattr(self, '_loop_lock', None)
+            lock = getattr(self, "_loop_lock", None)
             if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
                 self._ftcache_bump("acquire_skip_loop")
                 return self._ftcache_local_backoff_check(priority)
@@ -357,7 +422,9 @@ class CachedExchangeMixin:
             logger.info(
                 "rate token acquire timed out after %.0fs — allowing but not rate-limited "
                 "(priority=%s, cost=%.0f)",
-                self._ACQUIRE_TIMEOUT_S, priority, cost,
+                self._ACQUIRE_TIMEOUT_S,
+                priority,
+                cost,
             )
             return True
         except CacheUnavailable:
@@ -366,9 +433,10 @@ class CachedExchangeMixin:
         except TimeoutError:
             self._ftcache_bump("acquire_timeout")
             logger.info(
-                "rate token acquire timed out after %.0fs — allowing "
-                "(priority=%s, cost=%.0f)",
-                self._ACQUIRE_TIMEOUT_S, priority, cost,
+                "rate token acquire timed out after %.0fs — allowing (priority=%s, cost=%.0f)",
+                self._ACQUIRE_TIMEOUT_S,
+                priority,
+                cost,
             )
             return True
         except Exception as e:
@@ -388,27 +456,57 @@ class CachedExchangeMixin:
     ) -> OHLCVResponse:
         if candle_type not in self._CACHEABLE_CANDLE_TYPES:
             return await super()._async_get_candle_history(  # type: ignore[misc]
-                pair, timeframe, candle_type, since_ms,
+                pair,
+                timeframe,
+                candle_type,
+                since_ms,
             )
 
         self._ftcache_maybe_init()
 
+        # In offline mode (backtest/hyperopt), don't use daemon's OHLCV cache —
+        # data is loaded from local files. But still rate-limit if ccxt is called.
+        if self._ftcache_rate_limit_only:
+            client = self._ftcache_get_client()
+            if client is not None:
+                try:
+                    await client.acquire_rate_token(
+                        priority=OhlcvCacheClient.LOW,
+                        cost=4.0,
+                    )
+                except (CacheUnavailable, CacheTimedOut):
+                    pass
+            return await super()._async_get_candle_history(  # type: ignore[misc]
+                pair,
+                timeframe,
+                candle_type,
+                since_ms,
+            )
+
         if not self._ftcache_client:
             return await super()._async_get_candle_history(  # type: ignore[misc]
-                pair, timeframe, candle_type, since_ms,
+                pair,
+                timeframe,
+                candle_type,
+                since_ms,
             )
 
         client: OhlcvCacheClient = self._ftcache_client  # type: ignore[assignment]
         try:
             limit = self.ohlcv_candle_limit(  # type: ignore[attr-defined]
-                timeframe, candle_type=candle_type, since_ms=since_ms,
+                timeframe,
+                candle_type=candle_type,
+                since_ms=since_ms,
             )
             priority: int | None = None
             if pair in self._ftcache_open_pairs:
                 priority = OhlcvCacheClient.CRITICAL
             result = await client.fetch(
-                pair=pair, timeframe=timeframe,
-                candle_type=candle_type, since_ms=since_ms, limit=limit,
+                pair=pair,
+                timeframe=timeframe,
+                candle_type=candle_type,
+                since_ms=since_ms,
+                limit=limit,
                 priority=priority,
             )
             self._ftcache_record_cached("_async_get_candle_history", pair=pair)
@@ -416,26 +514,31 @@ class CachedExchangeMixin:
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
             logger.info(
-                "daemon rate-limited for %s %s — skipping this cycle"
-                " (NOT falling back to ccxt)",
-                pair, timeframe,
+                "daemon rate-limited for %s %s — skipping this cycle (NOT falling back to ccxt)",
+                pair,
+                timeframe,
             )
             raise
         except CacheTimedOut:
             logger.info(
-                "daemon busy (timeout) for %s %s"
-                " — will retry next cycle, not falling back to ccxt",
-                pair, timeframe,
+                "daemon busy (timeout) for %s %s — will retry next cycle, not falling back to ccxt",
+                pair,
+                timeframe,
             )
             raise
         except CacheUnavailable as e:
             self._ftcache_bump("fallback_ccxt")
             logger.warning(
                 "cache unavailable for %s %s (%s) — falling back to ccxt",
-                pair, timeframe, e,
+                pair,
+                timeframe,
+                e,
             )
             return await super()._async_get_candle_history(  # type: ignore[misc]
-                pair, timeframe, candle_type, since_ms,
+                pair,
+                timeframe,
+                candle_type,
+                since_ms,
             )
 
     # -------------------------------------------------------------------- tickers
@@ -451,7 +554,9 @@ class CachedExchangeMixin:
         client = self._ftcache_get_client()
         if client is None:
             return super().get_tickers(  # type: ignore[misc]
-                symbols=symbols, cached=cached, market_type=market_type,
+                symbols=symbols,
+                cached=cached,
+                market_type=market_type,
             )
         if symbols is not None:
             if self._ftcache_should_block_ccxt():
@@ -462,10 +567,15 @@ class CachedExchangeMixin:
                     filtered = {s: stale[s] for s in symbols if s in stale}
                     if filtered:
                         return filtered
-            prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            # Use HIGH priority when any requested symbol has an open position
+            has_open = bool(self._ftcache_open_pairs & set(symbols))
+            base_prio = OhlcvCacheClient.HIGH if has_open else OhlcvCacheClient.NORMAL
+            prio_gt = self._ftcache_init_priority(base_prio)
             self._ftcache_acquire_sync(priority=prio_gt)
             return super().get_tickers(  # type: ignore[misc]
-                symbols=symbols, cached=cached, market_type=market_type,
+                symbols=symbols,
+                cached=cached,
+                market_type=market_type,
             )
 
         if cached:
@@ -479,8 +589,11 @@ class CachedExchangeMixin:
             mt_str = ""
             if market_type is not None:
                 mt_str = market_type.value if hasattr(market_type, "value") else str(market_type)
+            # Use HIGH priority when we have open positions (critical for FreqUI display)
+            has_open = bool(self._ftcache_open_pairs)
+            tickers_prio = OhlcvCacheClient.HIGH if has_open else OhlcvCacheClient.NORMAL
             ok, tickers = self._ftcache_run_on_loop(
-                client.get_tickers(market_type=mt_str),
+                client.get_tickers(market_type=mt_str, priority=tickers_prio),
             )
             if not ok:
                 if self._ftcache_should_block_ccxt():
@@ -490,10 +603,13 @@ class CachedExchangeMixin:
                     if stale:
                         return stale
                     return {}
-                prio_gt = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+                base_prio = OhlcvCacheClient.HIGH if has_open else OhlcvCacheClient.NORMAL
+                prio_gt = self._ftcache_init_priority(base_prio)
                 self._ftcache_acquire_sync(priority=prio_gt)
                 return super().get_tickers(  # type: ignore[misc]
-                    symbols=symbols, cached=cached, market_type=market_type,
+                    symbols=symbols,
+                    cached=cached,
+                    market_type=market_type,
                 )
             if not isinstance(tickers, dict):
                 logger.warning(
@@ -522,7 +638,8 @@ class CachedExchangeMixin:
             if stale:
                 logger.info(
                     "shared tickers rate-limited — using %.0fs-old local cache"
-                    " (NOT falling back to ccxt)", age,
+                    " (NOT falling back to ccxt)",
+                    age,
                 )
                 return stale
             logger.info("shared tickers rate-limited, no local cache — returning empty")
@@ -540,23 +657,24 @@ class CachedExchangeMixin:
             self._ftcache_bump("fallback_ccxt")
             logger.warning("shared tickers failed (%s) — falling back to ccxt", e)
             return super().get_tickers(  # type: ignore[misc]
-                symbols=symbols, cached=cached, market_type=market_type,
+                symbols=symbols,
+                cached=cached,
+                market_type=market_type,
             )
 
     # -------------------------------------------------------------------- positions
 
     def fetch_positions(
-        self, pair: str | None = None, params: dict | None = None,
+        self,
+        pair: str | None = None,
+        params: dict | None = None,
     ) -> list[CcxtPosition]:
         """Shared positions: first bot fetches, others read from cache."""
         if pair is not None:
             if self._ftcache_last_positions is not None:
                 age = time.monotonic() - self._ftcache_last_positions_ts
                 if age < 30.0:
-                    return [
-                        p for p in self._ftcache_last_positions
-                        if p.get("symbol") == pair
-                    ]
+                    return [p for p in self._ftcache_last_positions if p.get("symbol") == pair]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
             return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
 
@@ -581,7 +699,9 @@ class CachedExchangeMixin:
                         )
                         raise CacheUnavailable("positions data corrupted")
                     self._log_exchange_response(  # type: ignore[attr-defined]
-                        "fetch_positions", positions, add_info="from ftcache",
+                        "fetch_positions",
+                        positions,
+                        add_info="from ftcache",
                     )
                     self._ftcache_save_positions(positions)
                     self._ftcache_record_cached("fetch_positions")
@@ -658,14 +778,20 @@ class CachedExchangeMixin:
         return super().create_order(**kwargs)  # type: ignore[misc]
 
     def cancel_order(
-        self, order_id: str, pair: str, params: dict | None = None,
+        self,
+        order_id: str,
+        pair: str,
+        params: dict | None = None,
     ) -> dict[str, Any]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
         return super().cancel_order(order_id, pair, params)  # type: ignore[misc]
 
     def fetch_order(
-        self, order_id: str, pair: str, params: dict | None = None,
+        self,
+        order_id: str,
+        pair: str,
+        params: dict | None = None,
     ) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=1.0)
@@ -740,7 +866,8 @@ class CachedExchangeMixin:
                             logger.warning(
                                 "daemon returned markets as %s (len=%d)"
                                 " — falling back to direct ccxt fetch",
-                                type(markets).__name__, len(markets),
+                                type(markets).__name__,
+                                len(markets),
                             )
                             raise CacheUnavailable("markets data is not a dict")
                         self._markets = markets  # type: ignore[attr-defined]
@@ -797,8 +924,11 @@ class CachedExchangeMixin:
                 pass
             else:
                 try:
+                    # Use HIGH priority for open position pairs
+                    is_open_pair = pair in self._ftcache_open_pairs
+                    tick_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
                     ok, all_tickers = self._ftcache_run_on_loop(
-                        client.get_tickers(market_type=""),
+                        client.get_tickers(market_type="", priority=tick_prio),
                     )
                     if ok:
                         with self._cache_lock:  # type: ignore[attr-defined]
@@ -814,6 +944,9 @@ class CachedExchangeMixin:
                 except CacheUnavailable:
                     pass
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
+            # Use HIGH priority for pairs with open positions (critical for exit decisions)
+            is_open_pair = pair in self._ftcache_open_pairs
+            base_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
             if self._ftcache_should_block_ccxt():
                 cache_key = "fetch_tickers"
                 with self._cache_lock:  # type: ignore[attr-defined]
@@ -821,10 +954,14 @@ class CachedExchangeMixin:
                 if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
                     logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
                     return stale[pair]
+                # For open pairs, allow through even during backoff
+                if is_open_pair:
+                    self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
+                    return super().fetch_ticker(pair)  # type: ignore[misc]
                 raise DDosProtection(
                     f"fetch_ticker blocked for {pair} during backoff (no stale data)"
                 )
-            prio_tick = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            prio_tick = self._ftcache_init_priority(base_prio)
             if not self._ftcache_acquire_sync(priority=prio_tick):
                 cache_key = "fetch_tickers"
                 with self._cache_lock:  # type: ignore[attr-defined]
@@ -863,14 +1000,21 @@ class CachedExchangeMixin:
         return super().fetch_trading_fees()  # type: ignore[misc]
 
     def fetch_bids_asks(
-        self, symbols: list[str] | None = None, *, cached: bool = False,
+        self,
+        symbols: list[str] | None = None,
+        *,
+        cached: bool = False,
     ) -> dict[str, Any]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
         return super().fetch_bids_asks(symbols=symbols, cached=cached)  # type: ignore[misc]
 
     def get_trades_for_order(
-        self, order_id: str, pair: str, since: datetime, params: dict | None = None,
+        self,
+        order_id: str,
+        pair: str,
+        since: datetime,
+        params: dict | None = None,
     ) -> list[dict]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
@@ -901,75 +1045,107 @@ class CachedExchangeMixin:
         return super().get_leverage_tiers()  # type: ignore[misc]
 
     def _set_leverage(
-        self, leverage: float, pair: str | None = None, accept_fail: bool = False,
+        self,
+        leverage: float,
+        pair: str | None = None,
+        accept_fail: bool = False,
     ):
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
         return super()._set_leverage(leverage, pair, accept_fail)  # type: ignore[misc]
 
     def set_margin_mode(
-        self, pair: str, margin_mode: MarginMode,
-        accept_fail: bool = False, params: dict | None = None,
+        self,
+        pair: str,
+        margin_mode: MarginMode,
+        accept_fail: bool = False,
+        params: dict | None = None,
     ):
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.LOW)
         return super().set_margin_mode(pair, margin_mode, accept_fail, params)  # type: ignore[misc]
 
     def _fetch_orders(
-        self, pair: str, since: datetime, params: dict | None = None,
+        self,
+        pair: str,
+        since: datetime,
+        params: dict | None = None,
     ) -> list[CcxtOrder]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
         return super()._fetch_orders(pair, since, params)  # type: ignore[misc]
 
     def create_stoploss(
-        self, pair: str, amount: float, stop_price: float,
-        order_types: dict, side: Any, leverage: float,
+        self,
+        pair: str,
+        amount: float,
+        stop_price: float,
+        order_types: dict,
+        side: Any,
+        leverage: float,
     ) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
         return super().create_stoploss(  # type: ignore[misc]
-            pair, amount, stop_price, order_types, side, leverage,
+            pair,
+            amount,
+            stop_price,
+            order_types,
+            side,
+            leverage,
         )
 
     async def _async_fetch_trades(
-        self, pair: str, since: int | None = None, params: dict | None = None,
+        self,
+        pair: str,
+        since: int | None = None,
+        params: dict | None = None,
     ) -> tuple[list[list], Any]:
         client = self._ftcache_get_client()
         if client is not None:
             try:
                 await client.acquire_rate_token(
-                    priority=OhlcvCacheClient.LOW, cost=1.0,
+                    priority=OhlcvCacheClient.LOW,
+                    cost=1.0,
                 )
             except (CacheUnavailable, CacheTimedOut):
                 pass
         return await super()._async_fetch_trades(pair, since, params)  # type: ignore[misc]
 
     async def get_market_leverage_tiers(
-        self, symbol: str,
+        self,
+        symbol: str,
     ) -> tuple[str, list[dict]]:
         client = self._ftcache_get_client()
         if client is not None:
             try:
                 await client.acquire_rate_token(
-                    priority=OhlcvCacheClient.LOW, cost=1.0,
+                    priority=OhlcvCacheClient.LOW,
+                    cost=1.0,
                 )
             except (CacheUnavailable, CacheTimedOut):
                 pass
         return await super().get_market_leverage_tiers(symbol)  # type: ignore[misc]
 
     async def _fetch_funding_rate_history(
-        self, pair: str, timeframe: str, limit: int, since_ms: int | None = None,
+        self,
+        pair: str,
+        timeframe: str,
+        limit: int,
+        since_ms: int | None = None,
     ) -> list[list]:
         client = self._ftcache_get_client()
         if client is not None:
             try:
                 await client.acquire_rate_token(
-                    priority=OhlcvCacheClient.LOW, cost=1.0,
+                    priority=OhlcvCacheClient.LOW,
+                    cost=1.0,
                 )
             except CacheUnavailable:
                 pass
         return await super()._fetch_funding_rate_history(  # type: ignore[misc]
-            pair, timeframe, limit, since_ms,
+            pair,
+            timeframe,
+            limit,
+            since_ms,
         )
-

@@ -153,7 +153,11 @@ class TestClientFetchRateLimited:
         }
         with patch.object(client, "_send_and_receive", new_callable=AsyncMock, return_value=resp):
             pair, tf, ct, data, drop = await client.fetch(
-                "BTC/USDC", "15m", CandleType.FUTURES, None, 100,
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                None,
+                100,
             )
             assert pair == "BTC/USDC"
             assert tf == "15m"
@@ -225,7 +229,10 @@ class TestClientAcquireRateToken:
 class TestClientPriority:
     def test_explicit_priority_overrides(self):
         c = OhlcvCacheClient("/tmp/x.sock", exchange_id="hl", trading_mode="futures")
-        assert c._compute_priority(since_ms=None, priority=OhlcvCacheClient.LOW) == OhlcvCacheClient.LOW
+        assert (
+            c._compute_priority(since_ms=None, priority=OhlcvCacheClient.LOW)
+            == OhlcvCacheClient.LOW
+        )
 
     def test_dry_run_gets_low(self):
         c = OhlcvCacheClient("/tmp/x.sock", exchange_id="hl", trading_mode="futures", dry_run=True)
@@ -263,12 +270,17 @@ def _make_mixin_exchange(dry_run=False, ftcache_enabled=True):
     mixin._ftcache_warned = False
     mixin._ftcache_open_pairs = frozenset()
     mixin._ftcache_stats = {
-        "rate_limited": 0, "fallback_ccxt": 0, "stale_tickers": 0,
-        "stale_positions": 0, "acquire_timeout": 0, "acquire_skip_loop": 0,
+        "rate_limited": 0,
+        "fallback_ccxt": 0,
+        "stale_tickers": 0,
+        "stale_positions": 0,
+        "acquire_timeout": 0,
+        "acquire_skip_loop": 0,
     }
     mixin._ftcache_last_positions = None
     mixin._ftcache_last_positions_ts = 0.0
     mixin._ftcache_tickers_fresh_ts = 0.0
+    mixin._loop_lock = threading.Lock()
 
     return mixin, client, mock
 
@@ -284,7 +296,11 @@ class TestMixinOhlcvAntiCascade:
 
         with pytest.raises(CacheRateLimited):
             await CachedExchangeMixin._async_get_candle_history(
-                mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+                mixin,
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                None,
             )
 
     @pytest.mark.asyncio
@@ -303,7 +319,11 @@ class TestMixinOhlcvAntiCascade:
         # The important thing: it does NOT raise CacheUnavailable.
         with pytest.raises(AttributeError):
             await CachedExchangeMixin._async_get_candle_history(
-                mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+                mixin,
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                None,
             )
 
     @pytest.mark.asyncio
@@ -316,7 +336,11 @@ class TestMixinOhlcvAntiCascade:
 
         with pytest.raises(CacheTimedOut):
             await CachedExchangeMixin._async_get_candle_history(
-                mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+                mixin,
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                None,
             )
 
     @pytest.mark.asyncio
@@ -328,7 +352,11 @@ class TestMixinOhlcvAntiCascade:
         # which we can't easily mock, but we verify client.fetch is NOT called
         try:
             await CachedExchangeMixin._async_get_candle_history(
-                mixin, "BTC/USDC", "15m", CandleType.MARK, None,
+                mixin,
+                "BTC/USDC",
+                "15m",
+                CandleType.MARK,
+                None,
             )
         except (AttributeError, TypeError):
             # Expected — super() doesn't resolve in this test harness
@@ -341,12 +369,22 @@ class TestMixinOhlcvAntiCascade:
         mixin.ohlcv_candle_limit = MagicMock(return_value=100)
         mixin._ftcache_open_pairs = frozenset({"BTC/USDC"})
 
-        client.fetch = AsyncMock(return_value=(
-            "BTC/USDC", "15m", CandleType.FUTURES, [], True,
-        ))
+        client.fetch = AsyncMock(
+            return_value=(
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                [],
+                True,
+            )
+        )
 
         await CachedExchangeMixin._async_get_candle_history(
-            mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+            mixin,
+            "BTC/USDC",
+            "15m",
+            CandleType.FUTURES,
+            None,
         )
 
         _, kwargs = client.fetch.call_args
@@ -408,7 +446,8 @@ class TestAcquireSync:
         mixin, client, _ = _make_mixin_exchange()
         CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=OhlcvCacheClient.CRITICAL)
         client.acquire_rate_token.assert_awaited_once_with(
-            priority=OhlcvCacheClient.CRITICAL, cost=1.0,
+            priority=OhlcvCacheClient.CRITICAL,
+            cost=1.0,
         )
 
     def test_acquire_default_cost(self):
@@ -420,7 +459,9 @@ class TestAcquireSync:
     def test_acquire_custom_cost(self):
         mixin, client, _ = _make_mixin_exchange()
         CachedExchangeMixin._ftcache_acquire_sync(
-            mixin, priority=OhlcvCacheClient.HIGH, cost=2.5,
+            mixin,
+            priority=OhlcvCacheClient.HIGH,
+            cost=2.5,
         )
         _, kwargs = client.acquire_rate_token.call_args
         assert kwargs["cost"] == 2.5
@@ -447,7 +488,11 @@ class TestAcquireSync:
         original = CachedExchangeMixin._ftcache_acquire_sync
 
         def _acquire_with_short_timeout(self, priority=None, cost=1.0):
-            cl = self._ftcache_get_client() if hasattr(self, '_ftcache_get_client') else self._ftcache_client
+            cl = (
+                self._ftcache_get_client()
+                if hasattr(self, "_ftcache_get_client")
+                else self._ftcache_client
+            )
             if cl is None:
                 return
             try:
@@ -578,7 +623,10 @@ class TestInterceptorPriorities:
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin.get_trades_for_order(
-                mixin, "123", "BTC/USDC", datetime.now(tz=timezone.utc),
+                mixin,
+                "123",
+                "BTC/USDC",
+                datetime.now(tz=timezone.utc),
             )
         except (AttributeError, TypeError):
             pass
@@ -588,7 +636,9 @@ class TestInterceptorPriorities:
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin._get_funding_fees_from_exchange(
-                mixin, "BTC/USDC", datetime.now(tz=timezone.utc),
+                mixin,
+                "BTC/USDC",
+                datetime.now(tz=timezone.utc),
             )
         except (AttributeError, TypeError):
             pass
@@ -622,7 +672,9 @@ class TestInterceptorPriorities:
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin._fetch_orders(
-                mixin, "BTC/USDC", datetime.now(tz=timezone.utc),
+                mixin,
+                "BTC/USDC",
+                datetime.now(tz=timezone.utc),
             )
         except (AttributeError, TypeError):
             pass
@@ -710,7 +762,9 @@ class TestAsyncFundingRateHistory:
             return [[1, 0.01]]
 
         with patch.object(
-            CachedExchangeMixin, "_ftcache_get_client", return_value=client,
+            CachedExchangeMixin,
+            "_ftcache_get_client",
+            return_value=client,
         ):
             # Can't easily call super() in test, just verify acquire is called
             client_mock = AsyncMock(spec=OhlcvCacheClient)
@@ -720,13 +774,18 @@ class TestAsyncFundingRateHistory:
 
             try:
                 await CachedExchangeMixin._fetch_funding_rate_history(
-                    mixin, "BTC/USDC", "1h", 100, None,
+                    mixin,
+                    "BTC/USDC",
+                    "1h",
+                    100,
+                    None,
                 )
             except (AttributeError, TypeError):
                 pass
 
             client_mock.acquire_rate_token.assert_awaited_once_with(
-                priority=OhlcvCacheClient.LOW, cost=1.0,
+                priority=OhlcvCacheClient.LOW,
+                cost=1.0,
             )
 
     @pytest.mark.asyncio
@@ -739,7 +798,11 @@ class TestAsyncFundingRateHistory:
 
         try:
             await CachedExchangeMixin._fetch_funding_rate_history(
-                mixin, "BTC/USDC", "1h", 100, None,
+                mixin,
+                "BTC/USDC",
+                "1h",
+                100,
+                None,
             )
         except (AttributeError, TypeError):
             # Expected — super() not resolvable
@@ -776,7 +839,9 @@ class TestCachedHyperliquid:
         # Call the unbound method directly
         try:
             CachedHyperliquid.fetch_liquidation_fills(
-                mock_instance, "BTC/USDC", datetime.now(tz=timezone.utc),
+                mock_instance,
+                "BTC/USDC",
+                datetime.now(tz=timezone.utc),
             )
         except (AttributeError, TypeError):
             pass
@@ -793,7 +858,9 @@ class TestCachedHyperliquid:
 
         try:
             CachedHyperliquid.fetch_liquidation_fills(
-                mock_instance, "BTC/USDC", datetime.now(tz=timezone.utc),
+                mock_instance,
+                "BTC/USDC",
+                datetime.now(tz=timezone.utc),
             )
         except (AttributeError, TypeError):
             pass
@@ -820,30 +887,35 @@ class TestCachedHyperliquid:
 class TestFtcacheEnabled:
     def test_disabled_in_backtest(self):
         from freqtrade.enums import RunMode
+
         mixin, _, _ = _make_mixin_exchange()
         mixin._config = {"runmode": RunMode.BACKTEST}
         assert CachedExchangeMixin._ftcache_enabled(mixin) is False
 
     def test_disabled_in_hyperopt(self):
         from freqtrade.enums import RunMode
+
         mixin, _, _ = _make_mixin_exchange()
         mixin._config = {"runmode": RunMode.HYPEROPT}
         assert CachedExchangeMixin._ftcache_enabled(mixin) is False
 
     def test_enabled_by_default(self):
         from freqtrade.enums import RunMode
+
         mixin, _, _ = _make_mixin_exchange()
         mixin._config = {"runmode": RunMode.LIVE}
         assert CachedExchangeMixin._ftcache_enabled(mixin) is True
 
     def test_explicit_disable(self):
         from freqtrade.enums import RunMode
+
         mixin, _, _ = _make_mixin_exchange()
         mixin._config = {"runmode": RunMode.LIVE, "shared_ohlcv_cache": {"enabled": False}}
         assert CachedExchangeMixin._ftcache_enabled(mixin) is False
 
     def test_explicit_enable(self):
         from freqtrade.enums import RunMode
+
         mixin, _, _ = _make_mixin_exchange()
         mixin._config = {"runmode": RunMode.LIVE, "shared_ohlcv_cache": {"enabled": True}}
         assert CachedExchangeMixin._ftcache_enabled(mixin) is True
@@ -873,8 +945,12 @@ class TestDiagnosticStats:
         mixin, _, _ = _make_mixin_exchange()
         stats = CachedExchangeMixin.ftcache_get_stats(mixin)
         assert stats == {
-            "rate_limited": 0, "fallback_ccxt": 0, "stale_tickers": 0,
-            "stale_positions": 0, "acquire_timeout": 0, "acquire_skip_loop": 0,
+            "rate_limited": 0,
+            "fallback_ccxt": 0,
+            "stale_tickers": 0,
+            "stale_positions": 0,
+            "acquire_timeout": 0,
+            "acquire_skip_loop": 0,
         }
 
     def test_bump_increments(self):
@@ -899,7 +975,11 @@ class TestDiagnosticStats:
         try:
             asyncio.get_event_loop().run_until_complete(
                 CachedExchangeMixin._async_get_candle_history(
-                    mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+                    mixin,
+                    "BTC/USDC",
+                    "15m",
+                    CandleType.FUTURES,
+                    None,
                 ),
             )
         except CacheRateLimited:
@@ -913,7 +993,11 @@ class TestDiagnosticStats:
         try:
             asyncio.get_event_loop().run_until_complete(
                 CachedExchangeMixin._async_get_candle_history(
-                    mixin, "BTC/USDC", "15m", CandleType.FUTURES, None,
+                    mixin,
+                    "BTC/USDC",
+                    "15m",
+                    CandleType.FUTURES,
+                    None,
                 ),
             )
         except AttributeError:
@@ -1100,7 +1184,9 @@ class TestFallbackRateLimiting:
 
         try:
             CachedExchangeMixin.get_tickers(
-                mixin, symbols=["BTC/USDC"], cached=False,
+                mixin,
+                symbols=["BTC/USDC"],
+                cached=False,
             )
         except (AttributeError, TypeError):
             pass

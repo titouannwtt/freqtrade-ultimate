@@ -56,8 +56,9 @@ logger = logging.getLogger("ftcache.daemon")
 def tf_to_ms(tf: str) -> int:
     unit = tf[-1]
     n = int(tf[:-1])
-    return n * {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000,
-                "w": 604_800_000}.get(unit, 60_000)
+    return n * {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}.get(
+        unit, 60_000
+    )
 
 
 # -------------------------------------------------------------------- token bucket
@@ -93,18 +94,20 @@ class TokenBucket:
     # rate_factor: divisor applied to refill rate (higher = slower)
     _BACKOFF_LEVELS: list[tuple[int, int, float, str]] = [
         # Level 1 — SOFT: shed only LOW, rate ÷2
-        (15, 3, 2.0, "SOFT"),     # LOW=3 → only LOW shed
+        (15, 3, 2.0, "SOFT"),  # LOW=3 → only LOW shed
         # Level 2 — MEDIUM: shed NORMAL+LOW, rate ÷4
-        (30, 2, 4.0, "MEDIUM"),   # NORMAL=2 → NORMAL+LOW shed
+        (30, 2, 4.0, "MEDIUM"),  # NORMAL=2 → NORMAL+LOW shed
         # Level 3 — HARD: shed everything except CRITICAL, rate ÷10
         # 65s > HL's 60s rolling window so backoff outlasts the rate limit
-        (65, 1, 10.0, "HARD"),    # HIGH=1 → HIGH+NORMAL+LOW shed
+        (65, 1, 10.0, "HARD"),  # HIGH=1 → HIGH+NORMAL+LOW shed
     ]
 
     _BACKOFF_COOLDOWN_S = 90  # reset escalation after 90s without 429
 
     def __init__(
-        self, rate_per_s: float, burst: float,
+        self,
+        rate_per_s: float,
+        burst: float,
         weight_mode: bool = False,
         weight_budget_per_min: int = 0,
         exchange: str = "",
@@ -137,14 +140,18 @@ class TokenBucket:
         self._weight_used_last_min: float = 0.0
         if weight_mode:
             logger.info(
-                "TokenBucket[%s] WEIGHT MODE: %.1f weight/sec, burst=%.0f, "
-                "budget=%d weight/min",
-                exchange, rate_per_s, burst, weight_budget_per_min,
+                "TokenBucket[%s] WEIGHT MODE: %.1f weight/sec, burst=%.0f, budget=%d weight/min",
+                exchange,
+                rate_per_s,
+                burst,
+                weight_budget_per_min,
             )
         else:
             logger.info(
                 "TokenBucket[%s] FLAT MODE: %.1f req/sec, burst=%.0f",
-                exchange, rate_per_s, burst,
+                exchange,
+                rate_per_s,
+                burst,
             )
 
     @property
@@ -195,14 +202,20 @@ class TokenBucket:
         return max(0.0, self._weight_used_last_min)
 
     async def acquire(
-        self, cost: float = 1.0, priority: int = 2, capital: float = 0.0,
+        self,
+        cost: float = 1.0,
+        priority: int = 2,
+        capital: float = 0.0,
     ) -> None:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "acquire request: cost=%.1f priority=%d capital=%.0f "
                 "tokens=%.1f/%s backoff=%s weight_1m=%.0f%s",
-                cost, priority, capital,
-                self.tokens, self.burst,
+                cost,
+                priority,
+                capital,
+                self.tokens,
+                self.burst,
                 "ACTIVE" if self.backoff_active else "off",
                 self.weight_used_last_min,
                 f"/{self.weight_budget_per_min}" if self.weight_mode else "",
@@ -218,8 +231,11 @@ class TokenBucket:
                 logger.debug(
                     "backoff active — queuing request (priority=%d, cost=%.0f, "
                     "queue_depth=%d, %s %.0fs remaining)",
-                    priority, cost, len(self._waiters) + 1,
-                    self._current_backoff_label, self.backoff_remaining_s,
+                    priority,
+                    cost,
+                    len(self._waiters) + 1,
+                    self._current_backoff_label,
+                    self.backoff_remaining_s,
                 )
             loop = asyncio.get_running_loop()
             future: asyncio.Future = loop.create_future()
@@ -268,7 +284,8 @@ class TokenBucket:
                             logger.info("back-off fully relaxed, resuming normal rate")
                         else:
                             logger.info(
-                                "back-off relaxed to %.1fx", self._backoff_factor,
+                                "back-off relaxed to %.1fx",
+                                self._backoff_factor,
                             )
                     if self.weight_mode and self.weight_budget_per_min > 0:
                         next_priority = self._waiters[0][0] if self._waiters else 99
@@ -276,13 +293,16 @@ class TokenBucket:
                             used = self.weight_used_last_min
                             headroom = self.weight_budget_per_min * 0.80
                             if used > headroom:
-                                wait_for_decay = max(1.0, (used - headroom) / max(self._effective_rate(), 0.1))
+                                wait_for_decay = max(
+                                    1.0, (used - headroom) / max(self._effective_rate(), 0.1)
+                                )
                                 wait_for_decay = min(wait_for_decay, 15.0)
                                 if served_since_backoff == 0:
                                     logger.info(
                                         "post-backoff weight gate: %.0f/%.0f used "
                                         "(headroom=%.0f%%), waiting %.1fs for decay",
-                                        used, self.weight_budget_per_min,
+                                        used,
+                                        self.weight_budget_per_min,
                                         headroom / self.weight_budget_per_min * 100,
                                         wait_for_decay,
                                     )
@@ -312,14 +332,17 @@ class TokenBucket:
             await asyncio.sleep(wait)
 
     def trigger_backoff(
-        self, factor: float = 2.0, event_log: EventLog | None = None,
+        self,
+        factor: float = 2.0,
+        event_log: EventLog | None = None,
         exchange: str = "",
     ) -> None:
         now = time.monotonic()
         if now < self._backoff_until:
             logger.debug(
                 "trigger_backoff ignored — already in %s backoff (%.0fs remaining)",
-                self._current_backoff_label, self.backoff_remaining_s,
+                self._current_backoff_label,
+                self.backoff_remaining_s,
             )
             return
         # Reset escalation if enough time passed since last 429
@@ -327,7 +350,8 @@ class TokenBucket:
             if self._consecutive_backoffs > 0:
                 logger.info(
                     "backoff escalation reset (%.0fs since last 429, cooldown=%.0fs)",
-                    now - self._last_backoff_trigger, self._BACKOFF_COOLDOWN_S,
+                    now - self._last_backoff_trigger,
+                    self._BACKOFF_COOLDOWN_S,
                 )
             self._consecutive_backoffs = 0
 
@@ -347,13 +371,18 @@ class TokenBucket:
         logger.warning(
             "429 backoff → %s: %.0fs, rate÷%.0f, queuing all requests by priority "
             "(level %d/%d, escalation=%d, %d already queued)",
-            label, duration_s, rate_factor,
-            idx + 1, len(self._BACKOFF_LEVELS),
-            self._consecutive_backoffs, queued_n,
+            label,
+            duration_s,
+            rate_factor,
+            idx + 1,
+            len(self._BACKOFF_LEVELS),
+            self._consecutive_backoffs,
+            queued_n,
         )
         if event_log:
             event_log.emit(
-                "backoff_start", exchange=exchange or self.exchange,
+                "backoff_start",
+                exchange=exchange or self.exchange,
                 duration_s=duration_s,
                 level=idx + 1,
                 label=label,
@@ -375,15 +404,14 @@ class TokenBucket:
                 if self._consecutive_backoffs > 0:
                     self._consecutive_backoffs = max(0, self._consecutive_backoffs - 1)
                     logger.info(
-                        "backoff %s expired — de-escalated to level %d/%d, "
-                        "resuming all priorities",
-                        old_label, self._consecutive_backoffs,
+                        "backoff %s expired — de-escalated to level %d/%d, resuming all priorities",
+                        old_label,
+                        self._consecutive_backoffs,
                         len(self._BACKOFF_LEVELS),
                     )
                 else:
                     logger.info(
-                        "backoff %s expired — shed threshold cleared, "
-                        "resuming all priorities",
+                        "backoff %s expired — shed threshold cleared, resuming all priorities",
                         old_label,
                     )
                 self._current_backoff_label = ""
@@ -412,7 +440,10 @@ class ExchangeFetcher:
     }
 
     def __init__(
-        self, exchange: str, trading_mode: str, budget: TokenBucket,
+        self,
+        exchange: str,
+        trading_mode: str,
+        budget: TokenBucket,
         event_log: EventLog | None = None,
         weight_map: dict[str, float] | None = None,
     ) -> None:
@@ -431,6 +462,7 @@ class ExchangeFetcher:
             if self._client is not None:
                 return self._client
             import ccxt.async_support as ccxt_async
+
             if not hasattr(ccxt_async, self.exchange):
                 raise RuntimeError(f"ccxt has no exchange '{self.exchange}'")
             config: dict[str, Any] = {"enableRateLimit": False}
@@ -441,16 +473,22 @@ class ExchangeFetcher:
             self._client = getattr(ccxt_async, self.exchange)(config)
             logger.info(
                 "initialised ccxt async client for %s (trading_mode=%s)",
-                self.exchange, self.trading_mode,
+                self.exchange,
+                self.trading_mode,
             )
             return self._client
 
     _FETCH_TIMEOUT_S = 60.0
 
     async def fetch_ohlcv(
-        self, pair: str, timeframe: str, since_ms: int | None,
-        limit: int | None, candle_type: str,
-        priority: int = TokenBucket.NORMAL, capital: float = 0.0,
+        self,
+        pair: str,
+        timeframe: str,
+        since_ms: int | None,
+        limit: int | None,
+        candle_type: str,
+        priority: int = TokenBucket.NORMAL,
+        capital: float = 0.0,
     ) -> list[list]:
         client = await self._ensure_client()
         params: dict[str, Any] = {}
@@ -461,8 +499,11 @@ class ExchangeFetcher:
         try:
             data = await asyncio.wait_for(
                 client.fetch_ohlcv(
-                    pair, timeframe=timeframe, since=since_ms,
-                    limit=limit, params=params,
+                    pair,
+                    timeframe=timeframe,
+                    since=since_ms,
+                    limit=limit,
+                    params=params,
                 ),
                 timeout=self._FETCH_TIMEOUT_S,
             )
@@ -470,7 +511,9 @@ class ExchangeFetcher:
         except TimeoutError:
             logger.warning(
                 "fetch_ohlcv timed out after %.0fs for %s %s",
-                self._FETCH_TIMEOUT_S, pair, timeframe,
+                self._FETCH_TIMEOUT_S,
+                pair,
+                timeframe,
             )
             raise
         except Exception as e:
@@ -478,11 +521,15 @@ class ExchangeFetcher:
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 if self._event_log:
                     self._event_log.emit(
-                        "rate_limit_429", exchange=self.exchange,
-                        pair=pair, timeframe=timeframe,
+                        "rate_limit_429",
+                        exchange=self.exchange,
+                        pair=pair,
+                        timeframe=timeframe,
                     )
                 self.budget.trigger_backoff(
-                    2.0, event_log=self._event_log, exchange=self.exchange,
+                    2.0,
+                    event_log=self._event_log,
+                    exchange=self.exchange,
                 )
             raise
 
@@ -501,9 +548,9 @@ class ExchangeFetcher:
 class DaemonStats:
     started_monotonic: float = field(default_factory=time.monotonic)
     requests_total: int = 0
-    cache_hits: int = 0          # served fully from cache, no fetch
-    cache_partial: int = 0       # partial-range: some from cache, some fetched
-    cache_misses: int = 0        # nothing in cache, full fetch
+    cache_hits: int = 0  # served fully from cache, no fetch
+    cache_partial: int = 0  # partial-range: some from cache, some fetched
+    cache_misses: int = 0  # nothing in cache, full fetch
     fetch_errors: int = 0
     active_clients: int = 0
     last_client_disconnect_monotonic: float | None = None
@@ -531,6 +578,7 @@ class DaemonStats:
 @dataclass
 class _TickersCacheEntry:
     """Cached tickers result with wall-clock expiry."""
+
     data: dict
     fetched_at: float  # time.monotonic()
     market_type: str
@@ -539,6 +587,7 @@ class _TickersCacheEntry:
 @dataclass
 class _PositionsCacheEntry:
     """Cached positions result pushed by a bot."""
+
     data: list
     pushed_at: float  # time.monotonic()
 
@@ -546,6 +595,7 @@ class _PositionsCacheEntry:
 @dataclass
 class _BalancesCacheEntry:
     """Cached balances result pushed by a bot."""
+
     data: dict
     pushed_at: float  # time.monotonic()
 
@@ -553,6 +603,7 @@ class _BalancesCacheEntry:
 @dataclass
 class _MarketsCacheEntry:
     """Cached markets result (one fetch shared by all bots)."""
+
     data: dict
     fetched_at: float  # time.monotonic()
 
@@ -560,6 +611,7 @@ class _MarketsCacheEntry:
 @dataclass
 class _FundingRatesCacheEntry:
     """Cached funding rates (bulk fetch, all pairs)."""
+
     data: dict
     fetched_at: float  # time.monotonic()
 
@@ -567,6 +619,7 @@ class _FundingRatesCacheEntry:
 @dataclass
 class _LeverageTiersCacheEntry:
     """Cached leverage tiers (bulk fetch, all pairs)."""
+
     data: dict
     fetched_at: float  # time.monotonic()
 
@@ -652,27 +705,28 @@ class BotRegistry:
             uptime = now - entry.connected_at
             if state == "initializing" and uptime > 120:
                 state = "running"
-            result.append({
-                "bot_id": entry.bot_id,
-                "config_file": entry.config_file,
-                "exchange": entry.exchange,
-                "trading_mode": entry.trading_mode,
-                "strategy": entry.strategy,
-                "timeframe": entry.timeframe,
-                "pairs_count": entry.pairs_count,
-                "dry_run": entry.dry_run,
-                "api_port": entry.api_port,
-                "pid": entry.pid,
-                "state": state,
-                "uptime_s": round(uptime, 1),
-                "last_heartbeat_ago_s": round(now - entry.last_heartbeat, 1),
-            })
+            result.append(
+                {
+                    "bot_id": entry.bot_id,
+                    "config_file": entry.config_file,
+                    "exchange": entry.exchange,
+                    "trading_mode": entry.trading_mode,
+                    "strategy": entry.strategy,
+                    "timeframe": entry.timeframe,
+                    "pairs_count": entry.pairs_count,
+                    "dry_run": entry.dry_run,
+                    "api_port": entry.api_port,
+                    "pid": entry.pid,
+                    "state": state,
+                    "uptime_s": round(uptime, 1),
+                    "last_heartbeat_ago_s": round(now - entry.last_heartbeat, 1),
+                }
+            )
         return result
 
     def count_initializing(self, exchange: str) -> int:
         return sum(
-            1 for b in self._bots.values()
-            if b.exchange == exchange and b.state == "initializing"
+            1 for b in self._bots.values() if b.exchange == exchange and b.state == "initializing"
         )
 
     @property
@@ -710,7 +764,9 @@ class EventLog:
         self._unsaved.append(event)
         logger.info(
             "FLEET_EVENT %s bot=%s %s",
-            event_type, bot_id or "-", details,
+            event_type,
+            bot_id or "-",
+            details,
         )
 
     def query(
@@ -728,12 +784,14 @@ class EventLog:
                 continue
             if bot_id and evt.bot_id != bot_id:
                 continue
-            result.append({
-                "ts": evt.ts,
-                "event_type": evt.event_type,
-                "bot_id": evt.bot_id,
-                "details": evt.details,
-            })
+            result.append(
+                {
+                    "ts": evt.ts,
+                    "event_type": evt.event_type,
+                    "bot_id": evt.bot_id,
+                    "details": evt.details,
+                }
+            )
             if len(result) >= limit:
                 break
         return result
@@ -754,12 +812,15 @@ class EventLog:
         n = len(self._unsaved)
         with self._persist_path.open("a") as f:
             for evt in self._unsaved:
-                line = json.dumps({
-                    "ts": evt.ts,
-                    "type": evt.event_type,
-                    "bot": evt.bot_id,
-                    "d": evt.details,
-                }, separators=(",", ":"))
+                line = json.dumps(
+                    {
+                        "ts": evt.ts,
+                        "type": evt.event_type,
+                        "bot": evt.bot_id,
+                        "d": evt.details,
+                    },
+                    separators=(",", ":"),
+                )
                 f.write(line + "\n")
         self._unsaved.clear()
         return n
@@ -783,10 +844,14 @@ class Daemon:
         self.fetchers: dict[tuple[str, str], ExchangeFetcher] = {}
         self.coordinator = RequestCoordinator()
         self.stats = DaemonStats()
-        self.persistence = FeatherPersistence(
-            root=Path(global_cfg.get("persistence_path", "")),
-            store=self.store,
-        ) if global_cfg.get("persistence_path") else None
+        self.persistence = (
+            FeatherPersistence(
+                root=Path(global_cfg.get("persistence_path", "")),
+                store=self.store,
+            )
+            if global_cfg.get("persistence_path")
+            else None
+        )
         self.registry = BotRegistry()
         events_path = Path(global_cfg.get("persistence_path", "")) / "fleet_events.jsonl"
         self.event_log = EventLog(
@@ -824,7 +889,8 @@ class Daemon:
 
     def _exchange_cfg(self, exchange: str) -> dict:
         return resolve_exchange_config(
-            exchange, self.exchange_overrides.get(exchange),
+            exchange,
+            self.exchange_overrides.get(exchange),
         )
 
     def _get_budget(self, exchange: str) -> TokenBucket:
@@ -877,17 +943,20 @@ class Daemon:
                 "current_shed_threshold": bucket._current_shed_threshold,
                 "current_backoff_duration_s": (
                     bucket._BACKOFF_LEVELS[
-                        min(bucket._consecutive_backoffs - 1,
-                            len(bucket._BACKOFF_LEVELS) - 1)
-                    ][0] if bucket._consecutive_backoffs > 0 else 0
+                        min(bucket._consecutive_backoffs - 1, len(bucket._BACKOFF_LEVELS) - 1)
+                    ][0]
+                    if bucket._consecutive_backoffs > 0
+                    else 0
                 ),
             }
             if bucket.weight_mode:
                 budget_entry["weight_used_last_min"] = round(bucket.weight_used_last_min, 1)
                 budget_entry["weight_budget_per_min"] = bucket.weight_budget_per_min
-                budget_entry["weight_utilization_pct"] = round(
-                    bucket.weight_used_last_min / bucket.weight_budget_per_min * 100, 1
-                ) if bucket.weight_budget_per_min > 0 else 0.0
+                budget_entry["weight_utilization_pct"] = (
+                    round(bucket.weight_used_last_min / bucket.weight_budget_per_min * 100, 1)
+                    if bucket.weight_budget_per_min > 0
+                    else 0.0
+                )
             result[f"budget_{exchange}"] = budget_entry
         if len(self.budgets) == 1:
             only_key = next(iter(result))
@@ -901,7 +970,9 @@ class Daemon:
         if f is None:
             ex_cfg = self._exchange_cfg(exchange)
             f = ExchangeFetcher(
-                exchange, trading_mode, self._get_budget(exchange),
+                exchange,
+                trading_mode,
+                self._get_budget(exchange),
                 event_log=self.event_log,
                 weight_map=ex_cfg.get("weight_map"),
             )
@@ -922,8 +993,12 @@ class Daemon:
         )
 
     async def _fetch_chunk(
-        self, series: CandleSeries, chunk: Gap, exchange_cfg: dict,
-        priority: int = TokenBucket.NORMAL, capital: float = 0.0,
+        self,
+        series: CandleSeries,
+        chunk: Gap,
+        exchange_cfg: dict,
+        priority: int = TokenBucket.NORMAL,
+        capital: float = 0.0,
     ) -> None:
         """Execute one exchange fetch and merge the result into `series`."""
         fetcher = self._get_fetcher(series.exchange, series.trading_mode)
@@ -938,10 +1013,13 @@ class Daemon:
         for attempt in range(max_retries + 1):
             try:
                 data = await fetcher.fetch_ohlcv(
-                    pair=series.pair, timeframe=series.timeframe,
-                    since_ms=chunk.start_ms, limit=limit,
+                    pair=series.pair,
+                    timeframe=series.timeframe,
+                    since_ms=chunk.start_ms,
+                    limit=limit,
                     candle_type=series.candle_type,
-                    priority=priority, capital=capital,
+                    priority=priority,
+                    capital=capital,
                 )
                 break  # success
             except Exception as e:
@@ -953,10 +1031,14 @@ class Daemon:
                     logger.warning(
                         "chunk fetch attempt %d/%d failed with server error "
                         "%s %s [%d..%d): %s — retrying in %ds",
-                        attempt + 1, max_retries + 1,
-                        series.pair, series.timeframe,
-                        chunk.start_ms, chunk.end_ms,
-                        e, delay,
+                        attempt + 1,
+                        max_retries + 1,
+                        series.pair,
+                        series.timeframe,
+                        chunk.start_ms,
+                        chunk.end_ms,
+                        e,
+                        delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -964,9 +1046,12 @@ class Daemon:
                 self.stats.fetch_errors += 1
                 logger.warning(
                     "chunk fetch failed %s %s [%d..%d): %s: %s",
-                    series.pair, series.timeframe,
-                    chunk.start_ms, chunk.end_ms,
-                    e.__class__.__name__, e,
+                    series.pair,
+                    series.timeframe,
+                    chunk.start_ms,
+                    chunk.end_ms,
+                    e.__class__.__name__,
+                    e,
                 )
                 raise
         else:
@@ -990,7 +1075,9 @@ class Daemon:
             series.earliest_available_ts = first_ts
             logger.info(
                 "detected earliest_available_ts=%d for %s %s",
-                first_ts, series.pair, series.timeframe,
+                first_ts,
+                series.pair,
+                series.timeframe,
             )
 
         series.merge(data)
@@ -1013,7 +1100,12 @@ class Daemon:
         capital = float(req.get("capital", 0.0))
 
         series = self.store.get_or_create(
-            exchange, trading_mode, pair, timeframe, candle_type, tf_ms,
+            exchange,
+            trading_mode,
+            pair,
+            timeframe,
+            candle_type,
+            tf_ms,
         )
         ex_cfg = self._exchange_cfg(exchange)
         refresh_overlap = int(ex_cfg.get("refresh_overlap_candles", 3))
@@ -1043,7 +1135,12 @@ class Daemon:
             series.hits += 1
             self.stats.cache_hits += 1
             return self._ok(
-                req["req_id"], series, start_ms, end_ms, t0, served_from="cache",
+                req["req_id"],
+                series,
+                start_ms,
+                end_ms,
+                t0,
+                served_from="cache",
             )
 
         gaps = compute_gaps(
@@ -1060,7 +1157,12 @@ class Daemon:
             series.hits += 1
             self.stats.cache_hits += 1
             return self._ok(
-                req["req_id"], series, start_ms, end_ms, t0, served_from="cache",
+                req["req_id"],
+                series,
+                start_ms,
+                end_ms,
+                t0,
+                served_from="cache",
             )
 
         max_chunk = int(ex_cfg.get("max_candles_per_call", 1000))
@@ -1073,14 +1175,24 @@ class Daemon:
         shed_errors = 0
         for chunk in chunks:
             key = (
-                exchange, trading_mode, pair, timeframe, candle_type,
-                chunk.start_ms, chunk.end_ms,
+                exchange,
+                trading_mode,
+                pair,
+                timeframe,
+                candle_type,
+                chunk.start_ms,
+                chunk.end_ms,
             )
+
             async def _do_fetch(c=chunk):
                 await self._fetch_chunk(
-                    series, c, ex_cfg,
-                    priority=priority, capital=capital,
+                    series,
+                    c,
+                    ex_cfg,
+                    priority=priority,
+                    capital=capital,
                 )
+
             try:
                 await self.coordinator.run(key, _do_fetch)
             except RateLimitShed:
@@ -1111,8 +1223,10 @@ class Daemon:
                 err_type = "FetchFailed"
                 err_msg = f"{errors} chunk(s) failed, no cached data"
             return {
-                "req_id": req["req_id"], "ok": False,
-                "pair": pair, "timeframe": timeframe,
+                "req_id": req["req_id"],
+                "ok": False,
+                "pair": pair,
+                "timeframe": timeframe,
                 "candle_type": candle_type,
                 "error_type": err_type,
                 "error_message": err_msg,
@@ -1120,8 +1234,10 @@ class Daemon:
             }
 
         return {
-            "req_id": req["req_id"], "ok": True,
-            "pair": pair, "timeframe": timeframe,
+            "req_id": req["req_id"],
+            "ok": True,
+            "pair": pair,
+            "timeframe": timeframe,
             "candle_type": candle_type,
             "data": data_rows,
             "drop_incomplete": True if candle_type != "funding_rate" else False,
@@ -1130,12 +1246,19 @@ class Daemon:
         }
 
     def _ok(
-        self, req_id: str, series: CandleSeries,
-        start_ms: int, end_ms: int, t0: float, served_from: str,
+        self,
+        req_id: str,
+        series: CandleSeries,
+        start_ms: int,
+        end_ms: int,
+        t0: float,
+        served_from: str,
     ) -> dict:
         return {
-            "req_id": req_id, "ok": True,
-            "pair": series.pair, "timeframe": series.timeframe,
+            "req_id": req_id,
+            "ok": True,
+            "pair": series.pair,
+            "timeframe": series.timeframe,
             "candle_type": series.candle_type,
             "data": series.slice_range(start_ms, end_ms),
             "drop_incomplete": True if series.candle_type != "funding_rate" else False,
@@ -1181,18 +1304,25 @@ class Daemon:
         budget = self._get_budget(exchange)
         logger.warning(
             "bot reported 429 on direct ccxt call: %s %s — triggering backoff",
-            method, pair or "(no pair)",
+            method,
+            pair or "(no pair)",
         )
         if self.event_log:
             self.event_log.emit(
-                "rate_limit_429", exchange=exchange,
-                method=method, pair=pair, source="bot_report",
+                "rate_limit_429",
+                exchange=exchange,
+                method=method,
+                pair=pair,
+                source="bot_report",
             )
         budget.trigger_backoff(
-            2.0, event_log=self.event_log, exchange=exchange,
+            2.0,
+            event_log=self.event_log,
+            exchange=exchange,
         )
         return {
-            "req_id": req.get("req_id", ""), "ok": True,
+            "req_id": req.get("req_id", ""),
+            "ok": True,
             "backoff_active": budget.backoff_active,
             "backoff_remaining_s": budget.backoff_remaining_s,
         }
@@ -1204,6 +1334,8 @@ class Daemon:
         exchange = req.get("exchange", "hyperliquid")
         trading_mode = req.get("trading_mode", "futures")
         market_type = req.get("market_type", "")
+        # Allow clients to escalate priority (e.g. HIGH when open positions exist)
+        priority = int(req.get("priority", TokenBucket.NORMAL))
         self.stats.tickers_requests += 1
 
         cache_key = f"{exchange}:{trading_mode}:{market_type}"
@@ -1213,8 +1345,10 @@ class Daemon:
         if entry and (now - entry.fetched_at) < self._tickers_ttl_s:
             self.stats.tickers_cache_hits += 1
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": entry.data, "served_from": "cache",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": entry.data,
+                "served_from": "cache",
             }
 
         # Coalesce concurrent requests: if a fetch is already in-flight,
@@ -1226,8 +1360,10 @@ class Daemon:
             if entry:
                 self.stats.tickers_cache_hits += 1
                 return {
-                    "req_id": req.get("req_id", ""), "ok": True,
-                    "data": entry.data, "served_from": "cache",
+                    "req_id": req.get("req_id", ""),
+                    "ok": True,
+                    "data": entry.data,
+                    "served_from": "cache",
                 }
 
         # We do the fetch — set inflight event
@@ -1237,9 +1373,12 @@ class Daemon:
             budget = self._get_budget(exchange)
             tickers_weight = self._get_weight(exchange, "tickers")
             logger.debug(
-                "tickers fetch starting for %s (weight=%.0f)", cache_key, tickers_weight,
+                "tickers fetch starting for %s (weight=%.0f, priority=%d)",
+                cache_key,
+                tickers_weight,
+                priority,
             )
-            await budget.acquire(tickers_weight, priority=TokenBucket.NORMAL)
+            await budget.acquire(tickers_weight, priority=priority)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             params: dict[str, Any] = {}
@@ -1247,22 +1386,28 @@ class Daemon:
                 market_types_map = {"futures": "swap"}
                 params["type"] = market_types_map.get(market_type, market_type)
             data = await asyncio.wait_for(
-                client.fetch_tickers(params=params), timeout=60.0,
+                client.fetch_tickers(params=params),
+                timeout=60.0,
             )
             self._tickers_cache[cache_key] = _TickersCacheEntry(
-                data=data, fetched_at=time.monotonic(), market_type=market_type,
+                data=data,
+                fetched_at=time.monotonic(),
+                market_type=market_type,
             )
             self.stats.tickers_fetches += 1
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": data, "served_from": "fetch",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": data,
+                "served_from": "fetch",
             }
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 budget.trigger_backoff(2.0)
             return {
-                "req_id": req.get("req_id", ""), "ok": False,
+                "req_id": req.get("req_id", ""),
+                "ok": False,
                 "error_type": e.__class__.__name__,
                 "error_message": str(e),
             }
@@ -1279,7 +1424,8 @@ class Daemon:
         cache_key = exchange
         self.stats.positions_puts += 1
         self._positions_cache[cache_key] = _PositionsCacheEntry(
-            data=data, pushed_at=time.monotonic(),
+            data=data,
+            pushed_at=time.monotonic(),
         )
         inflight = self._positions_inflight.pop(cache_key, None)
         if inflight is not None:
@@ -1303,8 +1449,10 @@ class Daemon:
         if entry and (time.monotonic() - entry.pushed_at) < self._positions_ttl_s:
             self.stats.positions_cache_hits += 1
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "hit": True, "data": entry.data,
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "hit": True,
+                "data": entry.data,
                 "age_s": time.monotonic() - entry.pushed_at,
             }
 
@@ -1316,8 +1464,10 @@ class Daemon:
                 if entry:
                     self.stats.positions_cache_hits += 1
                     return {
-                        "req_id": req.get("req_id", ""), "ok": True,
-                        "hit": True, "data": entry.data,
+                        "req_id": req.get("req_id", ""),
+                        "ok": True,
+                        "hit": True,
+                        "data": entry.data,
                         "age_s": time.monotonic() - entry.pushed_at,
                     }
             except TimeoutError:
@@ -1332,13 +1482,18 @@ class Daemon:
             budget.tokens = max(0.0, budget.tokens - cost)
         budget._record_weight(cost)
         logger.debug(
-            "positions_get cache miss for %s — auto-granted %.1f weight", exchange, cost,
+            "positions_get cache miss for %s — auto-granted %.1f weight",
+            exchange,
+            cost,
         )
 
         return {
-            "req_id": req.get("req_id", ""), "ok": True,
-            "hit": False, "data": [],
-            "auto_grant": True, "granted_cost": cost,
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "hit": False,
+            "data": [],
+            "auto_grant": True,
+            "granted_cost": cost,
         }
 
     # --------- centralized rate limiter: shared balances cache
@@ -1347,7 +1502,8 @@ class Daemon:
         exchange = req.get("exchange", "hyperliquid")
         data = req.get("data", {})
         self._balances_cache[exchange] = _BalancesCacheEntry(
-            data=data, pushed_at=time.monotonic(),
+            data=data,
+            pushed_at=time.monotonic(),
         )
         inflight = self._balances_inflight.pop(exchange, None)
         if inflight is not None:
@@ -1360,8 +1516,10 @@ class Daemon:
         entry = self._balances_cache.get(exchange)
         if entry and (time.monotonic() - entry.pushed_at) < self._balances_ttl_s:
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "hit": True, "data": entry.data,
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "hit": True,
+                "data": entry.data,
             }
 
         inflight = self._balances_inflight.get(exchange)
@@ -1371,8 +1529,10 @@ class Daemon:
                 entry = self._balances_cache.get(exchange)
                 if entry:
                     return {
-                        "req_id": req.get("req_id", ""), "ok": True,
-                        "hit": True, "data": entry.data,
+                        "req_id": req.get("req_id", ""),
+                        "ok": True,
+                        "hit": True,
+                        "data": entry.data,
                     }
             except TimeoutError:
                 self._balances_inflight.pop(exchange, None)
@@ -1386,13 +1546,18 @@ class Daemon:
             budget.tokens = max(0.0, budget.tokens - cost)
         budget._record_weight(cost)
         logger.debug(
-            "balances_get cache miss for %s — auto-granted %.1f weight", exchange, cost,
+            "balances_get cache miss for %s — auto-granted %.1f weight",
+            exchange,
+            cost,
         )
 
         return {
-            "req_id": req.get("req_id", ""), "ok": True,
-            "hit": False, "data": {},
-            "auto_grant": True, "granted_cost": cost,
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "hit": False,
+            "data": {},
+            "auto_grant": True,
+            "granted_cost": cost,
         }
 
     # --------- centralized: shared markets cache
@@ -1407,8 +1572,10 @@ class Daemon:
         entry = self._markets_cache.get(cache_key)
         if entry and (now - entry.fetched_at) < self._markets_ttl_s:
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": entry.data, "served_from": "cache",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": entry.data,
+                "served_from": "cache",
                 "age_s": now - entry.fetched_at,
             }
 
@@ -1418,8 +1585,10 @@ class Daemon:
             entry = self._markets_cache.get(cache_key)
             if entry:
                 return {
-                    "req_id": req.get("req_id", ""), "ok": True,
-                    "data": entry.data, "served_from": "cache",
+                    "req_id": req.get("req_id", ""),
+                    "ok": True,
+                    "data": entry.data,
+                    "served_from": "cache",
                     "age_s": time.monotonic() - entry.fetched_at,
                 }
 
@@ -1429,42 +1598,52 @@ class Daemon:
             budget = self._get_budget(exchange)
             markets_weight = self._get_weight(exchange, "markets")
             logger.debug(
-                "markets fetch starting for %s (weight=%.0f)", cache_key, markets_weight,
+                "markets fetch starting for %s (weight=%.0f)",
+                cache_key,
+                markets_weight,
             )
             await budget.acquire(markets_weight, priority=TokenBucket.NORMAL)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
-                client.load_markets(), timeout=120.0,
+                client.load_markets(),
+                timeout=120.0,
             )
             if not isinstance(data, dict):
                 logger.error(
-                    "load_markets returned %s instead of dict — "
-                    "discarding (exchange=%s)",
-                    type(data).__name__, exchange,
+                    "load_markets returned %s instead of dict — discarding (exchange=%s)",
+                    type(data).__name__,
+                    exchange,
                 )
                 return {
-                    "req_id": req.get("req_id", ""), "ok": False,
+                    "req_id": req.get("req_id", ""),
+                    "ok": False,
                     "error_type": "TypeError",
                     "error_message": f"load_markets returned {type(data).__name__}",
                 }
             self._markets_cache[cache_key] = _MarketsCacheEntry(
-                data=data, fetched_at=time.monotonic(),
+                data=data,
+                fetched_at=time.monotonic(),
             )
             logger.info(
                 "markets fetched for %s/%s: %d symbols",
-                exchange, trading_mode, len(data),
+                exchange,
+                trading_mode,
+                len(data),
             )
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": data, "served_from": "fetch",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": data,
+                "served_from": "fetch",
             }
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 budget.trigger_backoff(2.0)
             return {
-                "req_id": req.get("req_id", ""), "ok": False,
+                "req_id": req.get("req_id", ""),
+                "ok": False,
                 "error_type": e.__class__.__name__,
                 "error_message": str(e),
             }
@@ -1484,8 +1663,10 @@ class Daemon:
         entry = self._funding_rates_cache.get(cache_key)
         if entry and (now - entry.fetched_at) < self._funding_rates_ttl_s:
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": entry.data, "served_from": "cache",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": entry.data,
+                "served_from": "cache",
                 "age_s": now - entry.fetched_at,
             }
 
@@ -1495,8 +1676,10 @@ class Daemon:
             entry = self._funding_rates_cache.get(cache_key)
             if entry:
                 return {
-                    "req_id": req.get("req_id", ""), "ok": True,
-                    "data": entry.data, "served_from": "cache",
+                    "req_id": req.get("req_id", ""),
+                    "ok": True,
+                    "data": entry.data,
+                    "served_from": "cache",
                     "age_s": time.monotonic() - entry.fetched_at,
                 }
 
@@ -1506,31 +1689,40 @@ class Daemon:
             budget = self._get_budget(exchange)
             fr_weight = self._get_weight(exchange, "funding_rates")
             logger.debug(
-                "funding_rates fetch starting for %s (weight=%.0f)", cache_key, fr_weight,
+                "funding_rates fetch starting for %s (weight=%.0f)",
+                cache_key,
+                fr_weight,
             )
             await budget.acquire(fr_weight, priority=TokenBucket.NORMAL)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
-                client.fetch_funding_rates(), timeout=60.0,
+                client.fetch_funding_rates(),
+                timeout=60.0,
             )
             self._funding_rates_cache[cache_key] = _FundingRatesCacheEntry(
-                data=data, fetched_at=time.monotonic(),
+                data=data,
+                fetched_at=time.monotonic(),
             )
             logger.info(
                 "funding rates fetched for %s/%s: %d pairs",
-                exchange, trading_mode, len(data),
+                exchange,
+                trading_mode,
+                len(data),
             )
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": data, "served_from": "fetch",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": data,
+                "served_from": "fetch",
             }
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 budget.trigger_backoff(2.0)
             return {
-                "req_id": req.get("req_id", ""), "ok": False,
+                "req_id": req.get("req_id", ""),
+                "ok": False,
                 "error_type": e.__class__.__name__,
                 "error_message": str(e),
             }
@@ -1550,8 +1742,10 @@ class Daemon:
         entry = self._leverage_tiers_cache.get(cache_key)
         if entry and (now - entry.fetched_at) < self._leverage_tiers_ttl_s:
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": entry.data, "served_from": "cache",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": entry.data,
+                "served_from": "cache",
                 "age_s": now - entry.fetched_at,
             }
 
@@ -1561,8 +1755,10 @@ class Daemon:
             entry = self._leverage_tiers_cache.get(cache_key)
             if entry:
                 return {
-                    "req_id": req.get("req_id", ""), "ok": True,
-                    "data": entry.data, "served_from": "cache",
+                    "req_id": req.get("req_id", ""),
+                    "ok": True,
+                    "data": entry.data,
+                    "served_from": "cache",
                     "age_s": time.monotonic() - entry.fetched_at,
                 }
 
@@ -1572,31 +1768,40 @@ class Daemon:
             budget = self._get_budget(exchange)
             lt_weight = self._get_weight(exchange, "leverage_tiers")
             logger.debug(
-                "leverage_tiers fetch starting for %s (weight=%.0f)", cache_key, lt_weight,
+                "leverage_tiers fetch starting for %s (weight=%.0f)",
+                cache_key,
+                lt_weight,
             )
             await budget.acquire(lt_weight, priority=TokenBucket.LOW)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             data = await asyncio.wait_for(
-                client.fetch_leverage_tiers(), timeout=120.0,
+                client.fetch_leverage_tiers(),
+                timeout=120.0,
             )
             self._leverage_tiers_cache[cache_key] = _LeverageTiersCacheEntry(
-                data=data, fetched_at=time.monotonic(),
+                data=data,
+                fetched_at=time.monotonic(),
             )
             logger.info(
                 "leverage tiers fetched for %s/%s: %d pairs",
-                exchange, trading_mode, len(data),
+                exchange,
+                trading_mode,
+                len(data),
             )
             return {
-                "req_id": req.get("req_id", ""), "ok": True,
-                "data": data, "served_from": "fetch",
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": data,
+                "served_from": "fetch",
             }
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 budget.trigger_backoff(2.0)
             return {
-                "req_id": req.get("req_id", ""), "ok": False,
+                "req_id": req.get("req_id", ""),
+                "ok": False,
                 "error_type": e.__class__.__name__,
                 "error_message": str(e),
             }
@@ -1647,27 +1852,44 @@ class Daemon:
     def _handle_register(self, req: dict, conn_id: int) -> dict:
         bot_id = req.get("bot_id", "")
         if not bot_id:
-            return {"req_id": req.get("req_id", ""), "ok": False,
-                    "error_message": "bot_id required"}
+            return {
+                "req_id": req.get("req_id", ""),
+                "ok": False,
+                "error_message": "bot_id required",
+            }
         entry = self.registry.register(bot_id, req, conn_id)
         initializing_count = self.registry.count_initializing(entry.exchange)
         hold_off_s, hold_off_reason = self._compute_hold_off(
-            entry.exchange, initializing_count,
+            entry.exchange,
+            initializing_count,
         )
 
-        self.event_log.emit("bot_connect", bot_id=bot_id,
-                            exchange=entry.exchange, strategy=entry.strategy,
-                            pid=entry.pid, config_file=entry.config_file)
+        self.event_log.emit(
+            "bot_connect",
+            bot_id=bot_id,
+            exchange=entry.exchange,
+            strategy=entry.strategy,
+            pid=entry.pid,
+            config_file=entry.config_file,
+        )
         if hold_off_s > 0:
-            self.event_log.emit("admission_held", bot_id=bot_id,
-                                hold_off_s=round(hold_off_s, 1),
-                                reason=hold_off_reason,
-                                initializing_count=initializing_count)
+            self.event_log.emit(
+                "admission_held",
+                bot_id=bot_id,
+                hold_off_s=round(hold_off_s, 1),
+                reason=hold_off_reason,
+                initializing_count=initializing_count,
+            )
         logger.info(
             "bot registered: %s (exchange=%s strategy=%s pid=%d) "
             "fleet_size=%d hold_off=%.0fs reason=%s",
-            bot_id, entry.exchange, entry.strategy, entry.pid,
-            self.registry.size, hold_off_s, hold_off_reason,
+            bot_id,
+            entry.exchange,
+            entry.strategy,
+            entry.pid,
+            self.registry.size,
+            hold_off_s,
+            hold_off_reason,
         )
         return {
             "req_id": req.get("req_id", ""),
@@ -1681,9 +1903,12 @@ class Daemon:
     def _handle_unregister(self, req: dict, conn_id: int) -> dict:
         entry = self.registry.unregister(conn_id, reason="clean_shutdown")
         if entry:
-            self.event_log.emit("bot_disconnect", bot_id=entry.bot_id,
-                                reason="clean_shutdown",
-                                uptime_s=round(time.monotonic() - entry.connected_at, 1))
+            self.event_log.emit(
+                "bot_disconnect",
+                bot_id=entry.bot_id,
+                reason="clean_shutdown",
+                uptime_s=round(time.monotonic() - entry.connected_at, 1),
+            )
             logger.info("bot unregistered: %s (clean shutdown)", entry.bot_id)
         return {"req_id": req.get("req_id", ""), "ok": True}
 
@@ -1813,7 +2038,8 @@ class Daemon:
             if self._pending_fetches > 10 and self._pending_fetches % 10 == 0:
                 logger.info(
                     "fetch queue depth: %d pending (peak=%d, inflight=%d)",
-                    self._pending_fetches, self._peak_pending,
+                    self._pending_fetches,
+                    self._peak_pending,
                     self.coordinator.active_count(),
                 )
             try:
@@ -1844,7 +2070,9 @@ class Daemon:
     # --------- server loop
 
     async def _handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
     ) -> None:
         self.stats.active_clients += 1
         self.stats.total_connects += 1
@@ -1857,7 +2085,10 @@ class Daemon:
         peer = writer.get_extra_info("peername") or "unix"
         logger.info(
             "client connected (%s) conn=%d — active=%d total=%d",
-            peer, conn_id, self.stats.active_clients, self.stats.total_connects,
+            peer,
+            conn_id,
+            self.stats.active_clients,
+            self.stats.total_connects,
         )
         try:
             while True:
@@ -1884,13 +2115,15 @@ class Daemon:
                 entry = self.registry.unregister(conn_id, reason="connection_lost")
                 if entry:
                     self.event_log.emit(
-                        "bot_crash", bot_id=entry.bot_id,
+                        "bot_crash",
+                        bot_id=entry.bot_id,
                         reason="connection_lost",
                         uptime_s=round(time.monotonic() - entry.connected_at, 1),
                     )
                     logger.warning(
                         "bot crashed: %s (connection lost after %.0fs)",
-                        entry.bot_id, time.monotonic() - entry.connected_at,
+                        entry.bot_id,
+                        time.monotonic() - entry.connected_at,
                     )
             self.stats.active_clients -= 1
             self.stats.total_disconnects += 1
@@ -1902,12 +2135,14 @@ class Daemon:
                 logger.warning(
                     "short-lived connection (%.1fs) — active=%d"
                     " (possible churn: client reconnecting per-request)",
-                    session_s, self.stats.active_clients,
+                    session_s,
+                    self.stats.active_clients,
                 )
             else:
                 logger.info(
                     "client disconnected (%.0fs session) — active=%d",
-                    session_s, self.stats.active_clients,
+                    session_s,
+                    self.stats.active_clients,
                 )
             try:
                 writer.close()
@@ -1927,7 +2162,8 @@ class Daemon:
             if idle_s >= self._idle_shutdown_s:
                 logger.info(
                     "idle for %.0fs (threshold %.0fs) — shutting down",
-                    idle_s, self._idle_shutdown_s,
+                    idle_s,
+                    self._idle_shutdown_s,
                 )
                 self._shutdown_event.set()
                 return
@@ -1968,20 +2204,22 @@ class Daemon:
                 f"{weight_info}"
             )
         budget_str = " | ".join(budget_lines) if budget_lines else "none"
-        conn_stats = (
-            f" conn={s.total_connects}/{s.total_disconnects} "
-            f"peak={s.peak_clients}"
-        )
+        conn_stats = f" conn={s.total_connects}/{s.total_disconnects} peak={s.peak_clients}"
         logger.info(
             "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) "
             "acquire=%d tickers=%d/%d pos=%d/%d pending=%d peak=%d "
             "errors=%d%s | %s",
-            uptime, s.active_clients,
-            total, hit_rate,
+            uptime,
+            s.active_clients,
+            total,
+            hit_rate,
             s.acquire_total,
-            s.tickers_cache_hits, s.tickers_requests,
-            s.positions_cache_hits, s.positions_gets,
-            self._pending_fetches, self._peak_pending,
+            s.tickers_cache_hits,
+            s.tickers_requests,
+            s.positions_cache_hits,
+            s.positions_gets,
+            self._pending_fetches,
+            self._peak_pending,
             s.fetch_errors,
             conn_stats,
             budget_str,
@@ -2011,17 +2249,19 @@ class Daemon:
                 pass
 
         self._server = await asyncio.start_unix_server(
-            self._handle_client, path=self.socket_path,
+            self._handle_client,
+            path=self.socket_path,
             limit=16 * 1024 * 1024,
         )
         os.chmod(self.socket_path, 0o600)
         self._socket_ino = os.stat(self.socket_path).st_ino
         logger.info(
             "daemon listening on %s (pid=%d, proto=%d)",
-            self.socket_path, os.getpid(), PROTOCOL_VERSION,
+            self.socket_path,
+            os.getpid(),
+            PROTOCOL_VERSION,
         )
-        self.event_log.emit("daemon_start", pid=os.getpid(),
-                            socket_path=self.socket_path)
+        self.event_log.emit("daemon_start", pid=os.getpid(), socket_path=self.socket_path)
 
         if self.persistence:
             try:
@@ -2051,8 +2291,7 @@ class Daemon:
                     logger.info("final flush: %d series written", n)
                 except Exception as e:
                     logger.warning("final flush failed: %s", e)
-            self.event_log.emit("daemon_stop",
-                                uptime_s=round(self.stats.uptime_s(), 1))
+            self.event_log.emit("daemon_stop", uptime_s=round(self.stats.uptime_s(), 1))
             self.event_log.flush()
             try:
                 disk_ino = os.stat(self.socket_path).st_ino
@@ -2107,8 +2346,9 @@ def _acquire_pid_lock(socket_path: str) -> int | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=False)
-    parser.add_argument("--config", required=False,
-                        help="JSON string with global+exchanges overrides")
+    parser.add_argument(
+        "--config", required=False, help="JSON string with global+exchanges overrides"
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -2132,7 +2372,8 @@ def main() -> int:
     setup_daemon_logger(global_cfg.get("log_path"), level=args.log_level)
     logger.info(
         "starting ftcache daemon — socket=%s log=%s persistence=%s",
-        global_cfg["socket_path"], global_cfg.get("log_path"),
+        global_cfg["socket_path"],
+        global_cfg.get("log_path"),
         global_cfg.get("persistence_path"),
     )
 

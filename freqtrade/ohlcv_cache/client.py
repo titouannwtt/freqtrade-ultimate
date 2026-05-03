@@ -103,7 +103,8 @@ class OhlcvCacheClient:
         # LimitOverrunError silently and poisons the bot's _klines cache.
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_unix_connection(
-                self.socket_path, limit=16 * 1024 * 1024,
+                self.socket_path,
+                limit=16 * 1024 * 1024,
             ),
             timeout=self.timeout_s,
         )
@@ -129,9 +130,7 @@ class OhlcvCacheClient:
                 _ensure_daemon_running(**self._respawn_cfg)
                 await self._connect()
             except (TimeoutError, FileNotFoundError, ConnectionRefusedError) as e:
-                raise CacheUnavailable(
-                    f"cannot connect to daemon after respawn: {e}"
-                ) from e
+                raise CacheUnavailable(f"cannot connect to daemon after respawn: {e}") from e
             except CacheUnavailable:
                 raise
         await self._auto_register()
@@ -140,10 +139,14 @@ class OhlcvCacheClient:
         if self._writer is not None:
             if self._registered:
                 try:
-                    self._writer.write(dumps({
-                        "op": "unregister",
-                        "req_id": uuid.uuid4().hex,
-                    }))
+                    self._writer.write(
+                        dumps(
+                            {
+                                "op": "unregister",
+                                "req_id": uuid.uuid4().hex,
+                            }
+                        )
+                    )
                     await self._writer.drain()
                 except Exception:  # noqa: S110
                     pass
@@ -170,7 +173,8 @@ class OhlcvCacheClient:
             self._writer.write(dumps(payload))
             await self._writer.drain()
             line = await asyncio.wait_for(
-                self._reader.readline(), timeout=10.0,
+                self._reader.readline(),
+                timeout=10.0,
             )
             if line:
                 resp = loads_response(line)
@@ -186,15 +190,20 @@ class OhlcvCacheClient:
                         self.hold_off_reason or "none",
                     )
                     if self._last_state:
-                        self._writer.write(dumps({
-                            "op": "state_update",
-                            "req_id": uuid.uuid4().hex,
-                            "state": self._last_state,
-                            "pairs_count": self._last_pairs_count,
-                        }))
+                        self._writer.write(
+                            dumps(
+                                {
+                                    "op": "state_update",
+                                    "req_id": uuid.uuid4().hex,
+                                    "state": self._last_state,
+                                    "pairs_count": self._last_pairs_count,
+                                }
+                            )
+                        )
                         await self._writer.drain()
                         await asyncio.wait_for(
-                            self._reader.readline(), timeout=10.0,
+                            self._reader.readline(),
+                            timeout=10.0,
                         )
         except Exception as e:
             logger.debug("fleet register failed (non-fatal): %s", e)
@@ -204,24 +213,31 @@ class OhlcvCacheClient:
         if pairs_count > 0:
             self._last_pairs_count = pairs_count
         try:
-            await self._send_and_receive({
-                "op": "state_update",
-                "req_id": uuid.uuid4().hex,
-                "state": state,
-                "pairs_count": pairs_count or self._last_pairs_count,
-            })
+            await self._send_and_receive(
+                {
+                    "op": "state_update",
+                    "req_id": uuid.uuid4().hex,
+                    "state": state,
+                    "pairs_count": pairs_count or self._last_pairs_count,
+                }
+            )
         except Exception as e:
             logger.debug("fleet state_update failed (non-fatal): %s", e)
 
     async def fleet_status(self) -> dict:
-        return await self._send_and_receive({
-            "op": "fleet_status",
-            "req_id": uuid.uuid4().hex,
-        })
+        return await self._send_and_receive(
+            {
+                "op": "fleet_status",
+                "req_id": uuid.uuid4().hex,
+            }
+        )
 
     async def fleet_events(
-        self, since_ts: float = 0, event_types: list[str] | None = None,
-        bot_id: str | None = None, limit: int = 100,
+        self,
+        since_ts: float = 0,
+        event_types: list[str] | None = None,
+        bot_id: str | None = None,
+        limit: int = 100,
     ) -> dict:
         payload: dict = {
             "op": "fleet_events",
@@ -246,7 +262,8 @@ class OhlcvCacheClient:
                 self._writer.write(dumps(payload))
                 await self._writer.drain()
                 line = await asyncio.wait_for(
-                    self._reader.readline(), timeout=self.timeout_s,
+                    self._reader.readline(),
+                    timeout=self.timeout_s,
                 )
                 if not line:
                     raise CacheUnavailable("daemon closed connection")
@@ -260,16 +277,15 @@ class OhlcvCacheClient:
                 raise
             except TimeoutError as e:
                 await self.close()
-                raise CacheTimedOut(
-                    f"daemon timed out: {e.__class__.__name__}: {e}"
-                ) from e
+                raise CacheTimedOut(f"daemon timed out: {e.__class__.__name__}: {e}") from e
             except (
-                ConnectionError, BrokenPipeError, ValueError, EOFError,
+                ConnectionError,
+                BrokenPipeError,
+                ValueError,
+                EOFError,
             ) as e:
                 await self.close()
-                raise CacheUnavailable(
-                    f"i/o error with daemon: {e.__class__.__name__}: {e}"
-                ) from e
+                raise CacheUnavailable(f"i/o error with daemon: {e.__class__.__name__}: {e}") from e
 
     async def ping(self) -> dict:
         return await self._send_and_receive({"op": "ping", "req_id": uuid.uuid4().hex})
@@ -289,8 +305,11 @@ class OhlcvCacheClient:
         return self.NORMAL
 
     async def fetch(
-        self, pair: str, timeframe: str,
-        candle_type: CandleType | str, since_ms: int | None,
+        self,
+        pair: str,
+        timeframe: str,
+        candle_type: CandleType | str,
+        since_ms: int | None,
         limit: int | None,
         priority: int | None = None,
     ) -> tuple[str, str, CandleType, list, bool]:
@@ -329,12 +348,17 @@ class OhlcvCacheClient:
         if not isinstance(data, list):
             logger.warning(
                 "daemon returned data as %s for %s/%s — discarding",
-                type(data).__name__, pair, timeframe,
+                type(data).__name__,
+                pair,
+                timeframe,
             )
             data = []
         return (
-            resp.get("pair", pair), resp.get("timeframe", timeframe), ct_ret,
-            data, resp.get("drop_incomplete", True),
+            resp.get("pair", pair),
+            resp.get("timeframe", timeframe),
+            ct_ret,
+            data,
+            resp.get("drop_incomplete", True),
         )
 
     # ---------------- centralized rate limiter
@@ -346,27 +370,29 @@ class OhlcvCacheClient:
         are queued by priority instead of hitting the exchange.
         """
         try:
-            await self._send_and_receive({
-                "op": "report_429",
-                "req_id": uuid.uuid4().hex,
-                "exchange": self.exchange_id,
-                "method": method,
-                "pair": pair,
-            })
+            await self._send_and_receive(
+                {
+                    "op": "report_429",
+                    "req_id": uuid.uuid4().hex,
+                    "exchange": self.exchange_id,
+                    "method": method,
+                    "pair": pair,
+                }
+            )
         except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
             pass
 
     async def acquire_rate_token(
-        self, priority: int | None = None, cost: float = 1.0,
+        self,
+        priority: int | None = None,
+        cost: float = 1.0,
     ) -> None:
         """Acquire a rate token from the daemon's centralized TokenBucket.
 
         Bots must call this before any non-OHLCV REST call so that ALL
         API traffic from all bots shares the same rate limit.
         """
-        prio = priority if priority is not None else (
-            self.LOW if self.dry_run else self.HIGH
-        )
+        prio = priority if priority is not None else (self.LOW if self.dry_run else self.HIGH)
         req = {
             "op": "acquire",
             "req_id": uuid.uuid4().hex,
@@ -378,14 +404,12 @@ class OhlcvCacheClient:
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             if resp.get("throttled"):
-                raise CacheRateLimited(
-                    f"acquire shed: {resp.get('error_message')}"
-                )
+                raise CacheRateLimited(f"acquire shed: {resp.get('error_message')}")
             raise CacheUnavailable(
                 f"acquire failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
 
-    async def get_tickers(self, market_type: str = "") -> dict:
+    async def get_tickers(self, market_type: str = "", priority: int | None = None) -> dict:
         """Get tickers from the daemon's shared cache (one fetch for all bots)."""
         req = {
             "op": "tickers",
@@ -394,6 +418,8 @@ class OhlcvCacheClient:
             "trading_mode": self.trading_mode,
             "market_type": market_type,
         }
+        if priority is not None:
+            req["priority"] = priority
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             err_type = resp.get("error_type", "")
@@ -414,8 +440,7 @@ class OhlcvCacheClient:
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(
-                f"positions_put failed: {resp.get('error_type')} "
-                f"{resp.get('error_message')}"
+                f"positions_put failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
 
     async def get_positions(self) -> tuple[bool, list, bool]:
@@ -428,8 +453,7 @@ class OhlcvCacheClient:
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(
-                f"positions_get failed: {resp.get('error_type')} "
-                f"{resp.get('error_message')}"
+                f"positions_get failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
         return resp.get("hit", False), resp.get("data", []), resp.get("auto_grant", False)
 
@@ -444,8 +468,7 @@ class OhlcvCacheClient:
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(
-                f"balances_put failed: {resp.get('error_type')} "
-                f"{resp.get('error_message')}"
+                f"balances_put failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
 
     async def get_markets(self) -> tuple[bool, dict]:
@@ -475,8 +498,7 @@ class OhlcvCacheClient:
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(
-                f"balances_get failed: {resp.get('error_type')} "
-                f"{resp.get('error_message')}"
+                f"balances_get failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
         return resp.get("hit", False), resp.get("data", {}), resp.get("auto_grant", False)
 
@@ -518,21 +540,33 @@ class OhlcvCacheClient:
 
     @classmethod
     def get_or_spawn(
-        cls, exchange_id: str, trading_mode: str, bot_config: dict,
+        cls,
+        exchange_id: str,
+        trading_mode: str,
+        bot_config: dict,
     ) -> OhlcvCacheClient:
         """Return a process-wide singleton client for (exchange_id, trading_mode),
         spawning the daemon if necessary."""
         cache_cfg = bot_config.get("shared_ohlcv_cache") or {}
-        global_cfg = resolve_global_config({
-            k: v for k, v in cache_cfg.items()
-            if k in {
-                "socket_path", "lock_path", "log_path",
-                "persistence_path", "flush_interval_s",
-                "max_candles_per_series",
-                "idle_daemon_shutdown_s", "client_timeout_s",
-                "client_spawn_timeout_s", "client_stagger_s",
+        global_cfg = resolve_global_config(
+            {
+                k: v
+                for k, v in cache_cfg.items()
+                if k
+                in {
+                    "socket_path",
+                    "lock_path",
+                    "log_path",
+                    "persistence_path",
+                    "flush_interval_s",
+                    "max_candles_per_series",
+                    "idle_daemon_shutdown_s",
+                    "client_timeout_s",
+                    "client_spawn_timeout_s",
+                    "client_stagger_s",
+                }
             }
-        })
+        )
         socket_path = global_cfg["socket_path"]
 
         key = f"{exchange_id}:{trading_mode}:{socket_path}"
@@ -572,13 +606,13 @@ class OhlcvCacheClient:
             capital=capital,
         )
         _CLIENT_SINGLETONS[key] = client
-        logger.info("client configured for %s/%s via %s",
-                    exchange_id, trading_mode, socket_path)
+        logger.info("client configured for %s/%s via %s", exchange_id, trading_mode, socket_path)
 
         stagger_s = cls._compute_smart_stagger(client, global_cfg)
         if stagger_s > 0.5:
             logger.info(
-                "startup stagger: waiting %.1fs before first request", stagger_s,
+                "startup stagger: waiting %.1fs before first request",
+                stagger_s,
             )
             time.sleep(stagger_s)
 
@@ -586,19 +620,23 @@ class OhlcvCacheClient:
 
     @classmethod
     def _compute_smart_stagger(
-        cls, client: OhlcvCacheClient, global_cfg: dict,
+        cls,
+        client: OhlcvCacheClient,
+        global_cfg: dict,
     ) -> float:
         stagger_max = float(global_cfg.get("client_stagger_s", 30))
         try:
             uptime = _sync_ping_daemon(client._socket_path)
             if uptime is not None and uptime > 60:
                 logger.info(
-                    "daemon warm (uptime=%.0fs) — skipping stagger", uptime,
+                    "daemon warm (uptime=%.0fs) — skipping stagger",
+                    uptime,
                 )
                 return 0.0
             if uptime is not None:
                 logger.info(
-                    "daemon cold (uptime=%.0fs) — short stagger", uptime,
+                    "daemon cold (uptime=%.0fs) — short stagger",
+                    uptime,
                 )
                 return random.uniform(0, min(5.0, stagger_max))  # noqa: S311
         except Exception as exc:
@@ -614,6 +652,7 @@ class OhlcvCacheClient:
 def _sync_ping_daemon(socket_path: str, timeout_s: float = 3.0) -> float | None:
     """Synchronous ping via raw Unix socket — returns uptime_s or None."""
     import socket as _socket
+
     s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     s.settimeout(timeout_s)
     try:
@@ -694,16 +733,15 @@ def _ensure_daemon_running(
                 os.kill(old_pid, 0)
                 logger.warning(
                     "daemon PID %d alive but unresponsive — waiting "
-                    "instead of spawning a duplicate", old_pid,
+                    "instead of spawning a duplicate",
+                    old_pid,
                 )
                 deadline = time.monotonic() + spawn_timeout_s
                 while time.monotonic() < deadline:
                     if _socket_file_exists(socket_path) and _daemon_responsive(socket_path):
                         return
                     time.sleep(0.5)
-                raise CacheUnavailable(
-                    f"daemon PID {old_pid} alive but never became responsive"
-                )
+                raise CacheUnavailable(f"daemon PID {old_pid} alive but never became responsive")
             except (ProcessLookupError, PermissionError, ValueError):
                 logger.info("stale PID file (PID gone) — will respawn")
                 try:
@@ -716,10 +754,15 @@ def _ensure_daemon_running(
         try:
             subprocess.Popen(
                 [
-                    sys.executable, "-m", "freqtrade.ohlcv_cache.daemon",
-                    "--socket", socket_path,
-                    "--config", json.dumps(daemon_config),
-                    "--log-level", "INFO",
+                    sys.executable,
+                    "-m",
+                    "freqtrade.ohlcv_cache.daemon",
+                    "--socket",
+                    socket_path,
+                    "--config",
+                    json.dumps(daemon_config),
+                    "--log-level",
+                    "INFO",
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=log_f,
