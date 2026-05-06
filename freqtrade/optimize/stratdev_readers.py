@@ -2409,9 +2409,9 @@ def get_backtest_snapshot(dirname: Path, filename: str, strategy: str) -> dict[s
     except Exception:
         result["strategy_params"] = None
     try:
-        raw = load_file_from_zip(zip_path, strategy)
-        strat_data = rapidjson.loads(raw)
-        result["strategy_summary"] = strat_data
+        raw = load_file_from_zip(zip_path, f"{filename}.json")
+        stats = rapidjson.loads(raw)
+        result["strategy_summary"] = stats.get("strategy", {}).get(strategy, None)
     except Exception:
         result["strategy_summary"] = None
     return result
@@ -2751,10 +2751,11 @@ def convert_backtest_entries(
         }
         try:
             raw = load_file_from_zip(
-                dirname / f"{entry['filename']}.zip", entry["strategy"]
+                dirname / f"{entry['filename']}.zip", f"{entry['filename']}.json"
             )
             if raw:
-                strat_data = rapidjson.loads(raw)
+                stats = rapidjson.loads(raw)
+                strat_data = stats.get("strategy", {}).get(entry["strategy"], {})
                 result["total_profit_pct"] = round(
                     strat_data.get("profit_total", 0) * 100, 2
                 )
