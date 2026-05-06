@@ -446,7 +446,22 @@ class CachedExchangeMixin:
         if not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
             return False, None
         try:
-            return True, self.loop.run_until_complete(coro)  # type: ignore[attr-defined]
+            loop = self.loop  # type: ignore[attr-defined]
+            client = self._ftcache_client
+            if client and client is not False:
+                # WFA / repeated Backtesting instances create new event loops.
+                # The singleton client's asyncio.Lock and streams are bound to the
+                # loop that was active when they were created.  If the exchange's
+                # loop changed, we must recreate them to avoid
+                # "Future attached to a different loop".
+                client_loop = getattr(client, "_bound_loop", None)
+                if client_loop is not loop:
+                    client._reader = None
+                    client._writer = None
+                    client._lock = asyncio.Lock()
+                    client._registered = False
+                    client._bound_loop = loop
+            return True, loop.run_until_complete(coro)
         finally:
             lock.release()
 
