@@ -55,6 +55,7 @@ def store_backtest_results(
     wallet_summary: dict[str, DataFrame] | None = None,
     analysis_results: dict[str, dict[str, DataFrame]] | None = None,
     strategy_files: dict[str, str] | None = None,
+    strategy_default_params: dict[str, dict[str, dict]] | None = None,
 ) -> Path:
     """
     Stores backtest results and analysis data in a zip file, with metadata stored separately
@@ -103,16 +104,18 @@ def store_backtest_results(
                 strategy_buf.write(strategy_file_obj.read())
             strategy_buf.seek(0)
             zipf.writestr(f"{base_filename.stem}_{strategy_name}.py", strategy_buf.getvalue())
-            strategy_params = strategy_path.with_suffix(".json")
-            if strategy_params.is_file():
+            strategy_params_path = strategy_path.with_suffix(".json")
+            params_zip_name = f"{base_filename.stem}_{strategy_name}.json"
+            if strategy_params_path.is_file():
                 strategy_params_buf = BytesIO()
-                with strategy_params.open("rb") as strategy_params_obj:
+                with strategy_params_path.open("rb") as strategy_params_obj:
                     strategy_params_buf.write(strategy_params_obj.read())
                 strategy_params_buf.seek(0)
-                zipf.writestr(
-                    f"{base_filename.stem}_{strategy_name}.json",
-                    strategy_params_buf.getvalue(),
-                )
+                zipf.writestr(params_zip_name, strategy_params_buf.getvalue())
+            elif strategy_default_params and strategy_name in strategy_default_params:
+                params_buf = StringIO()
+                dump_json_to_file(params_buf, strategy_default_params[strategy_name])
+                zipf.writestr(params_zip_name, params_buf.getvalue())
 
         # Add market change data if present
         if market_change_data is not None:

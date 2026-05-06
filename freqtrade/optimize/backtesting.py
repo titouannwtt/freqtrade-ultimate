@@ -1840,6 +1840,19 @@ class Backtesting:
                 self.config["user_data_dir"] / "backtest_results", self.run_ids, min_backtest_date
             )
 
+    def _extract_strategy_params(self) -> dict[str, dict[str, dict]]:
+        from freqtrade.strategy.hyper import detect_all_parameters
+
+        result: dict[str, dict[str, dict]] = {}
+        for strat in self.strategylist:
+            name = strat.get_strategy_name()
+            params: dict[str, dict] = {}
+            for space, space_params in detect_all_parameters(strat).items():
+                params[space] = {k: p.value for k, p in space_params.items()}
+            if params:
+                result[name] = params
+        return result
+
     def start(self) -> None:
         """
         Run backtesting end-to-end
@@ -1888,6 +1901,7 @@ class Backtesting:
                         if "wallet_summary" in x
                     },
                     strategy_files={s.get_strategy_name(): s.__file__ for s in self.strategylist},
+                    strategy_default_params=self._extract_strategy_params(),
                 )
 
         # Results may be mixed up now. Sort them so they follow --strategy-list order.
