@@ -200,3 +200,4 @@ config.json
 *secret*
 *.key
 *.pem
+.aider*
