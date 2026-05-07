@@ -61,16 +61,23 @@ class Worker:
 
         # Per-bot candle boundary jitter to prevent thundering herd.
         # Deterministic hash of bot_name so the jitter is stable across restarts
-        # but different for each bot.  Spread over 0-25s.
+        # but different for each bot.
+        # Live bots: 0-5s (tight window, fast reaction)
+        # Dry-run bots: 5-15s (yield to live bots at candle boundary)
         import hashlib
 
         bot_name = self._config.get("bot_name", "")
         hash_val = int(hashlib.md5(bot_name.encode()).hexdigest()[:8], 16)
-        self._candle_jitter_s = (hash_val % 250) / 10.0  # 0.0 to 25.0 seconds
+        is_dry_run = self._config.get("dry_run", False)
+        if is_dry_run:
+            self._candle_jitter_s = 5.0 + (hash_val % 100) / 10.0  # 5.0 to 14.9s
+        else:
+            self._candle_jitter_s = (hash_val % 50) / 10.0  # 0.0 to 4.9s
         logger.info(
-            "candle boundary jitter for '%s': %.1fs",
+            "candle boundary jitter for '%s': %.1fs (%s)",
             bot_name,
             self._candle_jitter_s,
+            "dry-run" if is_dry_run else "live",
         )
 
         self._sd_notify = (
