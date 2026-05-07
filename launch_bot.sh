@@ -10,8 +10,26 @@ fi
 
 config_file="$1"
 
+# Stagger startup to avoid thundering herd on ftcache daemon.
+# Hash bot config name → deterministic delay (stable across restarts).
+# Dry-run configs get longer delay (20-60s) to yield to live bots (0-15s).
+hash_val=$(echo -n "$config_file" | md5sum | cut -c1-4)
+hash_dec=$((16#$hash_val))
+if grep -q '"dry_run": true' "live_configs/$config_file" 2>/dev/null; then
+    stagger=$((20 + hash_dec % 40))
+else
+    stagger=$((hash_dec % 15))
+fi
+
+first_start=true
+
 while true
 do
+    if $first_start && [ "$stagger" -gt 0 ]; then
+        echo "Startup stagger: waiting ${stagger}s before first launch (rate limit protection)..."
+        sleep "$stagger"
+        first_start=false
+    fi
     freqtrade trade --config live_configs/"$config_file"
     echo "You have 60 seconds to press Ctrl+C to stop the bot."
     echo "Restarting in:"
