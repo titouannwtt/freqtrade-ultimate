@@ -1220,7 +1220,7 @@ class CachedExchangeMixin:
         Falls through to ccxt when cached ticker lacks bid/ask.
         """
         client = self._ftcache_get_client()
-        if client is not None and not self._config.get("dry_run"):  # type: ignore[attr-defined]
+        if client is not None:
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 tickers = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
@@ -1229,11 +1229,10 @@ class CachedExchangeMixin:
                 return tickers[pair]
             fresh_ts = getattr(self, "_ftcache_tickers_fresh_ts", 0) or 0
             cache_age = time.monotonic() - fresh_ts
-            if tickers and cache_age < 15.0:
+            if tickers and cache_age < 30.0:
                 pass
             else:
                 try:
-                    # Use HIGH priority for open position pairs
                     is_open_pair = pair in self._ftcache_open_pairs
                     tick_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
                     ok, all_tickers = self._ftcache_run_on_loop(
@@ -1252,40 +1251,33 @@ class CachedExchangeMixin:
                         self._ftcache_last_backoff_ts = time.monotonic()
                 except CacheUnavailable:
                     pass
-        if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            # Use HIGH priority for pairs with open positions (critical for exit decisions)
-            is_open_pair = pair in self._ftcache_open_pairs
-            base_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
-            if self._ftcache_should_block_ccxt():
-                cache_key = "fetch_tickers"
-                with self._cache_lock:  # type: ignore[attr-defined]
-                    stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-                if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
-                    logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
-                    return stale[pair]
-                # For open pairs, allow through even during backoff
-                if is_open_pair:
-                    self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH)
-                    return super().fetch_ticker(pair)  # type: ignore[misc]
-                raise DDosProtection(
-                    f"fetch_ticker blocked for {pair} during backoff (no stale data)"
-                )
-            prio_tick = self._ftcache_init_priority(base_prio)
-            if not self._ftcache_acquire_sync(priority=prio_tick):
-                cache_key = "fetch_tickers"
-                with self._cache_lock:  # type: ignore[attr-defined]
-                    stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-                if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
-                    logger.debug("fetch_ticker shed — using stale cache for %s", pair)
-                    return stale[pair]
-                raise DDosProtection(f"fetch_ticker shed for {pair} during 429 backoff")
+        is_open_pair = pair in self._ftcache_open_pairs
+        base_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
+        if self._ftcache_should_block_ccxt():
+            cache_key = "fetch_tickers"
+            with self._cache_lock:  # type: ignore[attr-defined]
+                stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+            if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
+                logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
+                return stale[pair]
+            if is_open_pair and self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH):
+                return super().fetch_ticker(pair)  # type: ignore[misc]
+            raise DDosProtection(
+                f"fetch_ticker blocked for {pair} during backoff (no stale data)"
+            )
+        prio_tick = self._ftcache_init_priority(base_prio)
+        if not self._ftcache_acquire_sync(priority=prio_tick):
+            cache_key = "fetch_tickers"
+            with self._cache_lock:  # type: ignore[attr-defined]
+                stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
+            if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
+                logger.debug("fetch_ticker shed — using stale cache for %s", pair)
+                return stale[pair]
+            raise DDosProtection(f"fetch_ticker shed for {pair} during 429 backoff")
         return super().fetch_ticker(pair)  # type: ignore[misc]
 
     def fetch_funding_rate(self, pair: str) -> FundingRate:
         """Fetch funding rate from daemon's bulk cache when possible."""
-        if self._config.get("dry_run"):  # type: ignore[attr-defined]
-            return super().fetch_funding_rate(pair)  # type: ignore[misc]
-
         client = self._ftcache_get_client()
         if client is not None:
             try:

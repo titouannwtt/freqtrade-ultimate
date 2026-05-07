@@ -741,13 +741,14 @@ class TestDryRunGuards:
             pass
         mixin._ftcache_acquire_sync.assert_not_called()
 
-    def test_fetch_ticker_skips_in_dry_run(self):
+    def test_fetch_ticker_acquires_in_dry_run(self):
+        """Dry-run bots now go through rate limiter (priority floored to LOW)."""
         mixin = self._make_dry_run_mixin()
         try:
             CachedExchangeMixin.fetch_ticker(mixin, "BTC/USDC")
         except (AttributeError, TypeError):
             pass
-        mixin._ftcache_acquire_sync.assert_not_called()
+        mixin._ftcache_acquire_sync.assert_called()
 
     def test_reload_markets_always_acquires(self):
         """reload_markets has no dry_run guard — always rate-limited."""

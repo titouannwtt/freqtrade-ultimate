@@ -954,7 +954,7 @@ class Daemon:
         self._peak_pending = 0
         # Shared caches for centralized rate limiting
         self._tickers_cache: dict[str, _TickersCacheEntry] = {}
-        self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 15.0))
+        self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 30.0))
         self._tickers_inflight: dict[str, asyncio.Event] = {}
         self._positions_cache: dict[str, _PositionsCacheEntry] = {}
         self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 3.0))
