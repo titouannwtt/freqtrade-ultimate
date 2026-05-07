@@ -1217,21 +1217,29 @@ class CachedExchangeMixin:
         """Extract ticker from shared tickers cache when possible.
 
         Avoids per-pair API calls — all bots share one bulk fetch.
-        Falls through to ccxt when cached ticker lacks bid/ask.
+        Falls through to ccxt only when pair is absent from cache entirely.
         """
         client = self._ftcache_get_client()
+        # Exchanges without bid/ask in bulk tickers (e.g. Hyperliquid) still
+        # return lastPrice which is sufficient for pricing. Only fall through
+        # to per-pair ccxt if the pair is completely absent from the cache.
+        exchange_has_pricing = getattr(self, "_ft_has", {}).get("tickers_have_bid_ask", True)
         if client is not None:
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 tickers = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-            if tickers and pair in tickers and self._ticker_has_pricing(tickers[pair]):
-                self._ftcache_record_cached("fetch_ticker", pair=pair)
-                return tickers[pair]
+            if tickers and pair in tickers:
+                if exchange_has_pricing and not self._ticker_has_pricing(tickers[pair]):
+                    pass  # need bid/ask but don't have it — try refresh
+                else:
+                    self._ftcache_record_cached("fetch_ticker", pair=pair)
+                    return tickers[pair]
             fresh_ts = getattr(self, "_ftcache_tickers_fresh_ts", 0) or 0
             cache_age = time.monotonic() - fresh_ts
-            if tickers and cache_age < 30.0:
-                pass
-            else:
+            if tickers and pair in tickers and cache_age < 30.0:
+                self._ftcache_record_cached("fetch_ticker", pair=pair)
+                return tickers[pair]
+            if not tickers or cache_age >= 30.0:
                 try:
                     is_open_pair = pair in self._ftcache_open_pairs
                     tick_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
@@ -1242,7 +1250,7 @@ class CachedExchangeMixin:
                         with self._cache_lock:  # type: ignore[attr-defined]
                             self._fetch_tickers_cache[cache_key] = all_tickers  # type: ignore[attr-defined]
                         self._ftcache_tickers_fresh_ts = time.monotonic()
-                        if pair in all_tickers and self._ticker_has_pricing(all_tickers[pair]):
+                        if pair in all_tickers:
                             self._ftcache_record_cached("fetch_ticker", pair=pair)
                             return all_tickers[pair]
                 except (CacheRateLimited, CacheTimedOut) as exc:
@@ -1257,7 +1265,7 @@ class CachedExchangeMixin:
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-            if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
+            if stale and pair in stale:
                 logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
                 return stale[pair]
             if is_open_pair and self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH):
@@ -1270,7 +1278,7 @@ class CachedExchangeMixin:
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]
-            if stale and pair in stale and self._ticker_has_pricing(stale[pair]):
+            if stale and pair in stale:
                 logger.debug("fetch_ticker shed — using stale cache for %s", pair)
                 return stale[pair]
             raise DDosProtection(f"fetch_ticker shed for {pair} during 429 backoff")
