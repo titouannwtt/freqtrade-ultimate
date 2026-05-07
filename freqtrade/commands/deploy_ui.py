@@ -34,19 +34,28 @@ def read_ui_version(dest_folder: Path) -> str | None:
 
 def download_and_install_ui(dest_folder: Path, dl_url: str, version: str):
     from io import BytesIO
-    from zipfile import ZipFile
 
     logger.info(f"Downloading {dl_url}")
     resp = requests.get(dl_url, timeout=req_timeout).content
     dest_folder.mkdir(parents=True, exist_ok=True)
-    with ZipFile(BytesIO(resp)) as zf:
-        for fn in zf.filelist:
-            with zf.open(fn) as x:
-                destfile = dest_folder / fn.filename
-                if fn.is_dir():
-                    destfile.mkdir(exist_ok=True)
-                else:
-                    destfile.write_bytes(x.read())
+
+    if dl_url.endswith(".tar.gz") or dl_url.endswith(".tgz"):
+        import tarfile
+
+        with tarfile.open(fileobj=BytesIO(resp), mode="r:gz") as tf:
+            tf.extractall(path=dest_folder)
+    else:
+        from zipfile import ZipFile
+
+        with ZipFile(BytesIO(resp)) as zf:
+            for fn in zf.filelist:
+                with zf.open(fn) as x:
+                    destfile = dest_folder / fn.filename
+                    if fn.is_dir():
+                        destfile.mkdir(exist_ok=True)
+                    else:
+                        destfile.write_bytes(x.read())
+
     with (dest_folder / ".uiversion").open("w") as f:
         f.write(version)
 

@@ -110,6 +110,36 @@ git merge upstream/stable --no-edit
 .venv/bin/pip install -e .
 ```
 
+## FreqUI fork (`../frequi`)
+
+The custom FreqUI lives in `../frequi` (repo: `titouannwtt/frequi-fork`). The built UI is served via `freqtrade install-ui` which downloads the latest release artifact from GitHub.
+
+### How users update FreqUI
+
+`freqtrade install-ui` downloads the latest `frequi-dist.tar.gz` from `titouannwtt/frequi-fork/releases`. Users just need to update freqtrade-fork and run install-ui:
+```bash
+cd freqtrade
+git pull origin main
+freqtrade install-ui
+# Restart bot(s) to serve the new UI
+```
+
+### Release checklist
+
+1. **Bump `package.json` version** in `../frequi` before building (`"version": "X.Y.Z"`). This is the source of truth for the version badge in the navbar.
+2. `cd ../frequi && npm run build`
+3. `cp -r dist/* freqtrade/rpc/api_server/ui/installed/` (local deploy)
+4. Commit, push, create GitHub release with `frequi-dist.tar.gz` artifact
+5. Every release description must include the "How to update" instructions block
+
+### Deploy locally (no release)
+
+```bash
+cd ../frequi && npm run build
+cp -r dist/* freqtrade/rpc/api_server/ui/installed/
+# Restart bot(s) to serve the new UI
+```
+
 ## Hard constraints
 
 - **Never suggest backtests.** Strategy testing is done live with small capital.
