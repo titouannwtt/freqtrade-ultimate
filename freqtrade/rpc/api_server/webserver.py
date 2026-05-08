@@ -215,6 +215,8 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_pair_history import router as api_pair_history
         from freqtrade.rpc.api_server.api_pairlists import router as api_pairlists
         from freqtrade.rpc.api_server.api_stratdev import router as api_stratdev
+        from freqtrade.rpc.api_server.api_stratdev_editor import router as api_stratdev_editor
+        from freqtrade.rpc.api_server.api_stratdev_jobs import router as api_stratdev_jobs
         from freqtrade.rpc.api_server.api_trading import router as api_trading
         from freqtrade.rpc.api_server.api_v1 import router as api_v1
         from freqtrade.rpc.api_server.api_v1 import router_public as api_v1_public
@@ -276,6 +278,18 @@ class ApiServer(RPCHandler):
             api_stratdev,
             prefix="/api/v1",
             tags=["Strategy-Dev"],
+            dependencies=[Depends(http_basic_or_jwt_token)],
+        )
+        app.include_router(
+            api_stratdev_jobs,
+            prefix="/api/v1",
+            tags=["Strategy-Dev", "Jobs"],
+            dependencies=[Depends(http_basic_or_jwt_token)],
+        )
+        app.include_router(
+            api_stratdev_editor,
+            prefix="/api/v1",
+            tags=["Strategy-Dev", "Editor"],
             dependencies=[Depends(http_basic_or_jwt_token)],
         )
         app.include_router(ws_router, prefix="/api/v1")
