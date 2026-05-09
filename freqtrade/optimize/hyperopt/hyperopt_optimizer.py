@@ -64,6 +64,14 @@ optuna_samplers_dict = {
 log_queue: Any
 
 
+class _NoOpLock:
+    """Picklable no-op context manager replacing threading.Lock for worker processes."""
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+
+
 class HyperOptimizer:
     """
     HyperoptOptimizer class
@@ -90,10 +98,18 @@ class HyperOptimizer:
         self.custom_hyperopt.strategy = self.backtesting.strategy
 
         self.hyperopt_pickle_magic(self.backtesting.strategy.__class__.__bases__)
+        strat_mod = sys.modules.get(self.backtesting.strategy.__class__.__module__)
+        if strat_mod:
+            cloudpickle.register_pickle_by_value(strat_mod)
+
         self.custom_hyperoptloss: IHyperOptLoss = HyperOptLossResolver.load_hyperoptloss(
             self.config
         )
         self.calculate_loss = self.custom_hyperoptloss.hyperopt_loss_function
+
+        loss_mod = sys.modules.get(self.custom_hyperoptloss.__class__.__module__)
+        if loss_mod:
+            cloudpickle.register_pickle_by_value(loss_mod)
 
         self.data_pickle_file = data_pickle_file
 
@@ -140,8 +156,14 @@ class HyperOptimizer:
         self.backtesting.exchange._cache_lock = None  # type: ignore
         if hasattr(self.backtesting.exchange, '_metrics'):
             self.backtesting.exchange._metrics._lock = None  # type: ignore
+        if hasattr(self.backtesting.exchange, '_ftcache_client'):
+            self.backtesting.exchange._ftcache_client = None
         # self.backtesting.exchange = None  # type: ignore
         self.backtesting.pairlists = None  # type: ignore
+        if hasattr(self.backtesting.dataprovider, '_DataProvider__cached_pairs_lock'):
+            self.backtesting.dataprovider._DataProvider__cached_pairs_lock = _NoOpLock()  # type: ignore
+        if hasattr(self.backtesting.dataprovider, '_pairlists'):
+            self.backtesting.dataprovider._pairlists = None  # type: ignore
 
     def get_strategy_name(self) -> str:
         return self.backtesting.strategy.get_strategy_name()
