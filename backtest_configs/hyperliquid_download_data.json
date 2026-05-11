@@ -1,0 +1,19 @@
+{
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "stake_currency": "USDC",
+    "dry_run": true,
+    "exchange": {
+        "name": "hyperliquid",
+        "pair_blacklist": []
+    },
+    "pairlists": [
+        {
+            "method": "VolumePairList",
+            "number_assets": 500,
+            "sort_key": "quoteVolume",
+            "min_value": 0,
+            "refresh_period": 86400
+        }
+    ]
+}

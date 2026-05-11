@@ -32,6 +32,11 @@ class CachedHyperliquid(CachedExchangeMixin, Hyperliquid):
     Hyperliquid (no override there) -> Exchange's implementation.
     """
 
+    _ft_has: dict = {
+        **Hyperliquid._ft_has,
+        "ohlcv_has_history": True,
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._ftcache_warn_deprecated_config()
