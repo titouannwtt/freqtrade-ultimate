@@ -303,6 +303,38 @@ python -m freqtrade.pairlist_cache.daemon
 
 Integration is automatic — when the daemon is running, bots with matching filter parameters share cached results instead of each computing their own.
 
+#### Hyperliquid historical data
+
+This fork ships with **pre-downloaded Hyperliquid OHLCV data** in `user_data/data/hyperliquid/futures/`. Hyperliquid's API only returns the last 5,000 candles per pair — this repo maintains a longer history, updated regularly.
+
+**Included timeframes:** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — covering 300+ futures pairs.
+
+**Using the data for backtesting:**
+
+```bash
+freqtrade backtesting --strategy MyStrategy \
+  -c backtest_configs/futures_hyperliquid_30.json \
+  --pairs BTC/USDC:USDC ETH/USDC:USDC SOL/USDC:USDC \
+  --timerange 20250601-20260501 \
+  --data-format-ohlcv feather
+```
+
+**Updating the data yourself:**
+
+You can download the latest candles autonomously. If you run `ftcache`, this goes through the shared daemon at LOW priority so it won't cause 429 errors on your running bots:
+
+```bash
+freqtrade download-data \
+  -c backtest_configs/hyperliquid_download_data.json \
+  -d user_data/data/hyperliquid \
+  --pairs-file backtest_configs/hyperliquid_pairs.json \
+  -t 5m 15m 30m 1h 2h 4h 1d 1w \
+  --days 2 --data-format-ohlcv feather \
+  --candle-types futures --no-parallel-download
+```
+
+This merges new candles into the existing files without overwriting historical data.
+
 ### Companion repos
 
 - **[titouannwtt/frequi-fork](https://github.com/titouannwtt/frequi-fork)** — my FreqUI fork. Fleet monitoring, rich popovers, market context (BTC/ETH benchmarks, Fear & Greed), per-bot alerts, drag-and-drop dashboard, full i18n. `freqtrade install-ui` in this fork already points here.
@@ -583,6 +615,38 @@ python -m freqtrade.pairlist_cache.daemon
 ```
 
 L'intégration est automatique — quand le daemon tourne, les bots ayant des paramètres de filtres identiques partagent les résultats en cache au lieu de les calculer chacun de leur côté.
+
+#### Historique de donnees Hyperliquid
+
+Ce fork inclut des **donnees OHLCV Hyperliquid pre-telechargees** dans `user_data/data/hyperliquid/futures/`. L'API Hyperliquid ne retourne que les 5 000 dernieres bougies par paire — ce repo maintient un historique plus long, mis a jour regulierement.
+
+**Timeframes incluses :** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — couvrant 300+ paires futures.
+
+**Utilisation pour le backtesting :**
+
+```bash
+freqtrade backtesting --strategy MaStrategie \
+  -c backtest_configs/futures_hyperliquid_30.json \
+  --pairs BTC/USDC:USDC ETH/USDC:USDC SOL/USDC:USDC \
+  --timerange 20250601-20260501 \
+  --data-format-ohlcv feather
+```
+
+**Mise a jour des donnees :**
+
+Vous pouvez telecharger les dernieres bougies de maniere autonome. Si vous utilisez `ftcache`, le telechargement passe par le daemon en priorite LOW pour ne pas provoquer de 429 sur vos bots en cours d'execution :
+
+```bash
+freqtrade download-data \
+  -c backtest_configs/hyperliquid_download_data.json \
+  -d user_data/data/hyperliquid \
+  --pairs-file backtest_configs/hyperliquid_pairs.json \
+  -t 5m 15m 30m 1h 2h 4h 1d 1w \
+  --days 2 --data-format-ohlcv feather \
+  --candle-types futures --no-parallel-download
+```
+
+Les nouvelles bougies sont fusionnees avec les fichiers existants sans ecraser l'historique.
 
 ### Autres repos associés
 
