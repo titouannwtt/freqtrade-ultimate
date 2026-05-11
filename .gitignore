@@ -197,6 +197,7 @@ user_data/data/hyperliquid/futures/*
 # Download-data config and pairs file (no secrets)
 !backtest_configs/hyperliquid_download_data.json
 !backtest_configs/hyperliquid_pairs.json
+!backtest_configs/futures_hyperliquid_tradfi.json
 
 # Local docs and notes (share CLAUDE.md, .claude-tips/, and README.md)
 *.md
