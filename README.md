@@ -307,17 +307,29 @@ Integration is automatic — when the daemon is running, bots with matching filt
 
 This fork ships with **pre-downloaded Hyperliquid OHLCV data** in `user_data/data/hyperliquid/futures/`. Hyperliquid's API only returns the last 5,000 candles per pair — this repo maintains a longer history, updated regularly.
 
-**Included timeframes:** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — covering 300+ futures pairs.
+**Included timeframes:** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — covering 245+ futures pairs (crypto, TradFi stocks, commodities, forex, indices).
+
+**Supported asset classes:** This includes Hyperliquid's HIP-3 TradFi perpetuals — stocks (XYZ-AAPL, XYZ-NVDA, XYZ-TSLA...), commodities (XYZ-GOLD, XYZ-SILVER, XYZ-BRENTOIL...), forex (XYZ-EUR, XYZ-JPY), indices (XYZ-SP500, XYZ-JP225), and crypto indices (PARA-BTCD, PARA-TOTAL2).
 
 **Using the data for backtesting:**
 
 ```bash
+# Crypto pairs
 freqtrade backtesting --strategy MyStrategy \
   -c backtest_configs/futures_hyperliquid_30.json \
   --pairs BTC/USDC:USDC ETH/USDC:USDC SOL/USDC:USDC \
   --timerange 20250601-20260501 \
   --data-format-ohlcv feather
+
+# TradFi / HIP-3 pairs (requires hip3_dexes in config)
+freqtrade backtesting --strategy MyStrategy \
+  -c backtest_configs/futures_hyperliquid_tradfi.json \
+  --pairs XYZ-AAPL/USDC:USDC XYZ-GOLD/USDC:USDC PARA-BTCD/USDC:USDC \
+  --timerange 20260201-20260501 \
+  --data-format-ohlcv feather
 ```
+
+> **Note:** TradFi pairs require `"hip3_dexes": ["xyz", "para"]` in your exchange config. The provided `futures_hyperliquid_tradfi.json` and `hyperliquid_strategy_config_example.json` already include this.
 
 **Updating the data yourself:**
 
@@ -620,17 +632,29 @@ L'intégration est automatique — quand le daemon tourne, les bots ayant des pa
 
 Ce fork inclut des **donnees OHLCV Hyperliquid pre-telechargees** dans `user_data/data/hyperliquid/futures/`. L'API Hyperliquid ne retourne que les 5 000 dernieres bougies par paire — ce repo maintient un historique plus long, mis a jour regulierement.
 
-**Timeframes incluses :** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — couvrant 300+ paires futures.
+**Timeframes incluses :** 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1w — couvrant 245+ paires futures (crypto, actions TradFi, matieres premieres, forex, indices).
+
+**Classes d'actifs supportees :** Inclut les perpetuels TradFi HIP-3 d'Hyperliquid — actions (XYZ-AAPL, XYZ-NVDA, XYZ-TSLA...), matieres premieres (XYZ-GOLD, XYZ-SILVER, XYZ-BRENTOIL...), forex (XYZ-EUR, XYZ-JPY), indices (XYZ-SP500, XYZ-JP225) et indices crypto (PARA-BTCD, PARA-TOTAL2).
 
 **Utilisation pour le backtesting :**
 
 ```bash
+# Paires crypto
 freqtrade backtesting --strategy MaStrategie \
   -c backtest_configs/futures_hyperliquid_30.json \
   --pairs BTC/USDC:USDC ETH/USDC:USDC SOL/USDC:USDC \
   --timerange 20250601-20260501 \
   --data-format-ohlcv feather
+
+# Paires TradFi / HIP-3 (necessite hip3_dexes dans la config)
+freqtrade backtesting --strategy MaStrategie \
+  -c backtest_configs/futures_hyperliquid_tradfi.json \
+  --pairs XYZ-AAPL/USDC:USDC XYZ-GOLD/USDC:USDC PARA-BTCD/USDC:USDC \
+  --timerange 20260201-20260501 \
+  --data-format-ohlcv feather
 ```
+
+> **Note :** Les paires TradFi necessitent `"hip3_dexes": ["xyz", "para"]` dans la config exchange. Les configs fournies `futures_hyperliquid_tradfi.json` et `hyperliquid_strategy_config_example.json` incluent deja cette option.
 
 **Mise a jour des donnees :**
 
