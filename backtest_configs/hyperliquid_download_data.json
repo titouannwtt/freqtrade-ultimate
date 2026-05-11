@@ -5,6 +5,7 @@
     "dry_run": true,
     "exchange": {
         "name": "hyperliquid",
+        "hip3_dexes": ["xyz", "para"],
         "pair_blacklist": []
     },
     "pairlists": [
