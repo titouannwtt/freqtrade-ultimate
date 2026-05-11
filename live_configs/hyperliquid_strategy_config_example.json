@@ -1,47 +1,44 @@
 {
+    "_doc": "Example Hyperliquid futures config. Copy this file, rename it, and fill in your values.",
+    "_doc_hip3": "To trade TradFi/HIP-3 pairs (XYZ-AAPL, XYZ-GOLD, PARA-BTCD, etc.), keep hip3_dexes below. Remove it if you only trade crypto.",
+
     "add_config_files": [
         "_default_spot_usdc.json",
         "_hyperliquid_freqtrade_access_example.json"
     ],
 
-    "max_open_trades": 4,
-    "available_capital": 10000,
-    "capital_withdrawal": 0,
-    "tradable_balance_ratio": 0.75,
+    "max_open_trades": 5,
+    "available_capital": 1000,
+    "tradable_balance_ratio": 0.99,
     "stake_amount": "unlimited",
+    "process_throttle_secs": 60,
     "dry_run": true,
-    "dry_run_wallet": 10000,
+    "dry_run_wallet": 1000,
 
     "trading_mode": "futures",
     "margin_mode": "isolated",
     "stake_currency": "USDC",
 
-    "bot_name": "hyperliquid_bot_name",
-    "strategy": "hyperliquid_strategy_name",
-    "db_url": "sqlite:///database/hyperliquid_strategy_name.sqlite",
+    "bot_name": "my_bot_name",
+    "strategy": "MyStrategyName",
+    "db_url": "sqlite:///database/my_bot_name.sqlite",
 
-    "api_server": {
-        "listen_port": 12345
+    "exchange": {
+        "hip3_dexes": ["xyz", "para"],
+        "pair_blacklist": [
+            "PAXG/USDC:USDC",
+            "EUR/.*",
+            "USDT/.*"
+        ]
     },
 
     "pairlists": [
         {
             "method": "VolumePairList",
-            "number_assets": 80,
-            "sort_key": "quoteVolume"
-        },
-        {
-            "method": "PerformanceFilter",
-            "minutes": 4280,
-            "max_profit": 0.1
-        },
-        {
-            "method": "VolumePairList",
             "number_assets": 40,
             "sort_key": "quoteVolume",
             "min_value": 0,
-            "refresh_period": 604800,
-            "lookback_days": 7
+            "refresh_period": 86400
         }
     ]
 }
