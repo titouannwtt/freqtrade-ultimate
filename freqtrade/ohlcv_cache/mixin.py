@@ -442,8 +442,10 @@ class CachedExchangeMixin:
         """
         lock = getattr(self, "_loop_lock", None)
         if lock is None:
+            coro.close()
             return False, None
         if not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
+            coro.close()
             return False, None
         try:
             loop = self.loop  # type: ignore[attr-defined]
