@@ -194,6 +194,7 @@ user_data/data/hyperliquid/futures/*
 !user_data/data/hyperliquid/futures/*-4h-futures.feather
 !user_data/data/hyperliquid/futures/*-1d-futures.feather
 !user_data/data/hyperliquid/futures/*-1w-futures.feather
+!user_data/data/hyperliquid/futures/*-funding_rate.feather
 
 # Download-data config and pairs file (no secrets)
 !backtest_configs/hyperliquid_download_data.json
