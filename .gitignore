@@ -1,5 +1,6 @@
 # Freqtrade rules
 config*.json
+capital_adjustments/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
