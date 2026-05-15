@@ -312,7 +312,9 @@ AVAILABLE_CLI_OPTIONS = {
             "CmaEsSampler: gradient-free — best for continuous "
             "parameter spaces. GPSampler: Gaussian process — "
             "thorough but slow with >10 params. "
-            "QMCSampler: pure exploration, no learning."
+            "QMCSampler: pure exploration, no learning. "
+            "CWSampler: coordinate-wise (Lefort method) — optimizes "
+            "one param at a time, selects plateaus over peaks."
         ),
         choices=[
             "NSGAIIISampler",
@@ -321,6 +323,7 @@ AVAILABLE_CLI_OPTIONS = {
             "CmaEsSampler",
             "GPSampler",
             "QMCSampler",
+            "CWSampler",
         ],
         metavar="NAME",
     ),

@@ -52,6 +52,8 @@ INITIAL_POINTS = 30
 
 MAX_LOSS = 100000  # just a big enough number to be bad result in loss optimization
 
+from freqtrade.optimize.hyperopt.cw_sampler import CWSampler
+
 optuna_samplers_dict = {
     "TPESampler": optuna.samplers.TPESampler,
     "GPSampler": optuna.samplers.GPSampler,
@@ -59,6 +61,7 @@ optuna_samplers_dict = {
     "NSGAIISampler": optuna.samplers.NSGAIISampler,
     "NSGAIIISampler": optuna.samplers.NSGAIIISampler,
     "QMCSampler": optuna.samplers.QMCSampler,
+    "CWSampler": CWSampler,
 }
 
 log_queue: Any

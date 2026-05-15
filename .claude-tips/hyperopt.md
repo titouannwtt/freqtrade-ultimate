@@ -116,6 +116,50 @@ To stop gracefully: `screen -S <session> -X stuff $'\003'` (sends Ctrl+C)
 
 **Ne jamais utiliser `pkill`/`kill`/`kill -9`** — laisse des workers orphelins en mémoire (joblib/loky). Toujours Ctrl+C via screen pour cleanup propre.
 
+## CWSampler — Coordinate-Wise Sampler (méthode Lefort)
+
+Sampler custom inspiré de la méthode d'Eric Lefort pour le tuning de paramètres de stratégie.
+Ref: https://youtu.be/GaXngWITLSg?si=Fc1PQQtBW6VmtA0j&t=1991
+
+### Principe
+
+Optimise un paramètre à la fois en fixant les autres à leur valeur par défaut (midpoint).
+Pour chaque paramètre, scanne toute la plage et cherche des **plateaux** (régions stables) plutôt que des **pics isolés** (overfitting).
+
+### Phases
+
+1. **BASELINE** — évalue la stratégie avec tous les params à leur midpoint (1 trial)
+2. **SCAN** — pour chaque param, varie sur sa grille en fixant les autres au baseline. Budget = `points_per_param × n_params` trials
+3. **PLATEAU DETECTION** — pour chaque param, score combiné = 50% performance + 50% robustesse (stabilité des voisins). Params sans plateau stable → fallback au baseline
+4. **ASSEMBLY** — combine les meilleurs params robustes et raffine avec jitter ±10%
+
+### Usage
+
+```bash
+freqtrade hyperopt --strategy MyStrategy --sampler CWSampler --epochs 300 ...
+```
+
+### Dimensionnement des epochs
+
+Le scan consomme `1 + (points_per_param × n_params)` trials avant de passer en assembly.
+Avec `points_per_param=20` (défaut) et 10 params → 201 trials de scan. Prévoir au moins 250-300 epochs pour avoir de l'assembly.
+
+Pour peu de params (2-4), `points_per_param=20` suffit largement.
+Pour beaucoup de params (10+), réduire à `points_per_param=10` ou augmenter les epochs.
+
+### Quand utiliser CWSampler vs TPE
+
+| Situation | Sampler |
+|---|---|
+| Peu de params (2-6), chercher robustesse | **CWSampler** |
+| Beaucoup de params, exploration libre | TPESampler |
+| Params fortement couplés (interactions) | TPESampler (CWSampler ignore les interactions) |
+| Validation de stabilité après TPE | **CWSampler** (confirme que les params sont sur un plateau) |
+
+### Limitation principale
+
+CWSampler optimise chaque param **indépendamment** — il ne capture pas les interactions entre params. Si `param_A=5` est optimal seulement quand `param_B=10`, CWSampler peut rater cette combinaison. Pour les stratégies DCA avec params faiblement couplés (RSI period, EMA length, threshold), c'est un avantage: moins d'overfitting.
+
 ## Bonnes pratiques (toujours suivre sauf justification explicite)
 
 - ✅ **Feature importance > backtesting**. La méthode dominante (rechercher par BT) revient à du data mining brut. (tips.txt #79, Lopez de Prado)
