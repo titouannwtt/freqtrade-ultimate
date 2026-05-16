@@ -48,13 +48,56 @@ logger = logging.getLogger(__name__)
 PLATEAU_NEIGHBOR_RADIUS = 0.15
 PLATEAU_MIN_RATIO = 0.5
 
+# Default scan/total ratio: how much of the epoch budget to spend in scan vs assembly.
+# 0.6 = 60% scan, 40% assembly. Empirically: assembly needs ≥30% for plateau refinement
+# to be meaningful, and scan needs ≥50% for plateau detection to have enough points
+# per param. 0.6 is the sweet spot.
+DEFAULT_SCAN_BUDGET_RATIO = 0.6
+# Minimum points per param to make plateau detection meaningful (15% neighbour radius
+# requires at least ~7 points to have neighbours, ≥5 is the absolute floor).
+MIN_POINTS_PER_PARAM = 5
+# Hard cap on points per param — above 20, the marginal cost outweighs grid density gain
+# (the plateau radius is 15% of range so >20 points gives <1.5% precision per point).
+MAX_POINTS_PER_PARAM = 20
+
 
 class CWSampler(BaseSampler):
-    """Coordinate-Wise Sampler: optimizes one parameter at a time, selects plateaus."""
+    """Coordinate-Wise Sampler: optimizes one parameter at a time, selects plateaus.
 
-    def __init__(self, seed: int = 42, points_per_param: int = 20, **kwargs):
+    Args:
+        seed: RNG seed for reproducibility.
+        points_per_param: scan grid points per parameter. If `total_epochs` is given,
+            this is auto-adjusted to fit within the scan budget (recommended).
+            Defaults to 20 if total_epochs is not provided.
+        total_epochs: Total epoch budget for the hyperopt. If provided, the sampler
+            self-adjusts `points_per_param` so that scan + assembly fits within this
+            budget (scan = total_epochs × 0.6, assembly = remaining ~40%). When using
+            CWSampler, freqtrade auto-passes this from --epochs.
+        defaults: Optional dict {param_name: default_value}. Used as the baseline
+            (anchor point for the scan). If not provided, falls back to the midpoint
+            of each parameter's range — but this often gives suboptimal results since
+            the midpoint may be far from the hand-tuned default. Strongly recommended
+            to provide hand-tuned defaults when known.
+    """
+
+    def __init__(
+        self,
+        seed: int = 42,
+        points_per_param: int = 20,
+        total_epochs: int | None = None,
+        defaults: dict[str, Any] | None = None,
+        scan_budget_ratio: float = DEFAULT_SCAN_BUDGET_RATIO,
+        **kwargs,
+    ):
         self._seed = seed
         self._rng = np.random.RandomState(seed)
+        self._points_per_param_requested = points_per_param
+        self._total_epochs = total_epochs
+        self._scan_budget_ratio = scan_budget_ratio
+        self._user_defaults = defaults or {}
+
+        # Final points_per_param is computed in _finalize_init based on total_epochs
+        # and n_params discovered. Start with the user request.
         self._points_per_param = points_per_param
 
         self._param_names: list[str] = []
@@ -67,6 +110,7 @@ class CWSampler(BaseSampler):
         self._schedule: list[dict[str, Any]] = []
         self._initialized = False
         self._last_seen_trial: int = -1
+        self._assembly_entered_logged = False
 
     # ── Optuna interface ──────────────────────────────────────────────
 
@@ -116,35 +160,89 @@ class CWSampler(BaseSampler):
     # ── Phase management ──────────────────────────────────────────────
 
     def _update_phase(self, study: Study) -> None:
-        completed = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
-        n_completed = len(completed)
+        # 2026-05-16 fix — count COMPLETE + PRUNED trials, not just COMPLETE.
+        # Freqtrade prunes duplicate-parameter trials (sets state=PRUNED) and
+        # those weren't counted, which blocked the scan→assembly transition
+        # forever when duplicates occurred (which happens systematically with
+        # CWSampler scan, since each scan trial = baseline + 1 varied param,
+        # producing dup with baseline when grid value == baseline). Now we
+        # count ALL attempted trials regardless of dedup outcome.
+        all_attempted = study.get_trials(
+            deepcopy=False,
+            states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL],
+        )
+        completed = [t for t in all_attempted if t.state == TrialState.COMPLETE]
+        n_attempted = len(all_attempted)
 
         if self._phase == "init":
             self._phase = "baseline"
             return
 
-        if self._phase == "baseline" and n_completed >= 1:
+        if self._phase == "baseline" and n_attempted >= 1:
             self._finalize_init()
             return
 
         if self._phase == "scan" and self._initialized:
-            # Check if scan schedule is exhausted
-            # trial_number is 0-based; trial 0 = baseline, trials 1..N = scan
-            scan_trial_idx = n_completed - 1  # how many scan trials completed
+            # Check if scan schedule is exhausted (count ALL attempted, not just complete)
+            scan_trial_idx = n_attempted - 1
             if scan_trial_idx >= len(self._schedule):
                 self._transition_to_assembly(completed)
 
     def _finalize_init(self) -> None:
+        n_params = len(self._param_distributions)
+
+        # Self-budget: if total_epochs is known, adjust points_per_param to fit budget
+        if self._total_epochs is not None and n_params > 0:
+            scan_budget = max(n_params * MIN_POINTS_PER_PARAM,
+                              int(self._total_epochs * self._scan_budget_ratio))
+            auto_ppp = max(MIN_POINTS_PER_PARAM,
+                           min(MAX_POINTS_PER_PARAM, scan_budget // n_params))
+            if auto_ppp != self._points_per_param_requested:
+                logger.info(
+                    f"CWSampler: auto-adjusted points_per_param "
+                    f"{self._points_per_param_requested} → {auto_ppp} "
+                    f"(budget={self._total_epochs} epochs, {n_params} params, "
+                    f"target scan_ratio={self._scan_budget_ratio:.0%})"
+                )
+            self._points_per_param = auto_ppp
+
+        # Build baseline (defaults if provided, else midpoint) and scan grids
+        baseline_source: dict[str, str] = {}
         for name, dist in self._param_distributions.items():
-            self._baseline[name] = self._get_midpoint(dist)
+            if name in self._user_defaults:
+                # Clip the user default to the dist range to avoid grid-build errors
+                self._baseline[name] = self._clip_to_dist(self._user_defaults[name], dist)
+                baseline_source[name] = "default"
+            else:
+                self._baseline[name] = self._get_midpoint(dist)
+                baseline_source[name] = "midpoint"
             self._scan_grid[name] = self._make_grid(dist, self._points_per_param)
 
         self._build_schedule()
         self._initialized = True
         self._phase = "scan"
+
+        # Diagnostic logging
+        n_from_default = sum(1 for v in baseline_source.values() if v == "default")
+        n_from_midpoint = n_params - n_from_default
+        budget_msg = ""
+        if self._total_epochs is not None:
+            assembly_target = self._total_epochs - len(self._schedule)
+            budget_msg = (
+                f", budget={self._total_epochs} → "
+                f"scan_pct={len(self._schedule)/max(1,self._total_epochs):.0%}, "
+                f"assembly={max(0, assembly_target)} trials"
+            )
+            if assembly_target < n_params:
+                logger.error(
+                    f"CWSampler: assembly budget too low ({assembly_target} trials < "
+                    f"{n_params} params). Increase --epochs or accept that the assembly "
+                    f"phase will be skipped (results will be midpoint-anchored)."
+                )
         logger.info(
-            f"CWSampler: {len(self._param_names)} params, "
-            f"scan={len(self._schedule)} trials, then assembly refinement"
+            f"CWSampler: {n_params} params (baselines: {n_from_default} from default, "
+            f"{n_from_midpoint} from midpoint), scan={len(self._schedule)} trials"
+            f"{budget_msg}"
         )
 
     # ── Schedule ──────────────────────────────────────────────────────
@@ -178,8 +276,21 @@ class CWSampler(BaseSampler):
 
         self._compute_robust_optima(completed_trials)
         self._phase = "assembly"
-        logger.info("CWSampler: scan complete → entering ASSEMBLY phase")
-        logger.info(f"CWSampler: robust optima = {dict(self._best_robust)}")
+        if not self._assembly_entered_logged:
+            self._assembly_entered_logged = True
+            logger.info("=" * 70)
+            logger.info("CWSampler: SCAN complete → entering ASSEMBLY phase")
+            logger.info(f"CWSampler: robust optima = {dict(self._best_robust)}")
+            # Per-param summary: was the chosen value default or baseline-fallback?
+            n_fallback = 0
+            for pname, chosen in self._best_robust.items():
+                if chosen == self._baseline.get(pname):
+                    n_fallback += 1
+            logger.info(
+                f"CWSampler: {len(self._best_robust) - n_fallback} params found stable "
+                f"plateaus, {n_fallback} fell back to baseline (no plateau detected)"
+            )
+            logger.info("=" * 70)
 
     # ── Plateau detection ─────────────────────────────────────────────
 
@@ -331,6 +442,34 @@ class CWSampler(BaseSampler):
         if isinstance(dist, CategoricalDistribution):
             return dist.choices[len(dist.choices) // 2]
         return 0
+
+    @staticmethod
+    def _clip_to_dist(value: Any, dist: BaseDistribution) -> Any:
+        """Clip a user-provided default to the distribution's valid range.
+
+        If the value is outside [low, high] for numeric dists, clamp it.
+        For categoricals, fall back to midpoint if value not in choices.
+        For float dists with step, snap to nearest grid point.
+        """
+        if isinstance(dist, IntDistribution):
+            v = int(value)
+            return max(dist.low, min(dist.high, v))
+        if isinstance(dist, FloatDistribution):
+            v = float(value)
+            v = max(dist.low, min(dist.high, v))
+            if dist.step and dist.step > 0:
+                v = round(v / dist.step) * dist.step
+                v = max(dist.low, min(dist.high, v))
+            return v
+        if isinstance(dist, CategoricalDistribution):
+            if value in dist.choices:
+                return value
+            logger.warning(
+                f"CWSampler: default value {value!r} not in categorical choices "
+                f"{list(dist.choices)}, falling back to midpoint"
+            )
+            return dist.choices[len(dist.choices) // 2]
+        return value
 
     @staticmethod
     def _make_grid(dist: BaseDistribution, n_points: int) -> list[Any]:

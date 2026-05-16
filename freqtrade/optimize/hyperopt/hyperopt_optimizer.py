@@ -430,6 +430,35 @@ class HyperOptimizer:
                 )
         return o_dimensions
 
+    def _extract_strategy_defaults(self) -> dict:
+        """Collect the default values of every IHyperOptParameter in the strategy.
+
+        Used by the CWSampler to anchor its baseline on hand-tuned defaults rather
+        than the midpoint of each parameter's range. Returns {param_name: default_value}.
+
+        Reads `param.value` AT INIT TIME — before the hyperopt mutates anything.
+        For DecimalParameter/IntParameter/CategoricalParameter, `value` returns the
+        `default=X` kwarg when no .json co-located has been loaded (and even when
+        loaded, the .json values are themselves the right starting point).
+        """
+        try:
+            from freqtrade.strategy.parameters import BaseParameter
+        except ImportError:
+            return {}
+
+        defaults: dict[str, Any] = {}
+        strategy = self.backtesting.strategy
+        for attr_name in dir(type(strategy)):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(type(strategy), attr_name, None)
+            if isinstance(attr, BaseParameter):
+                try:
+                    defaults[attr_name] = attr.value
+                except Exception:
+                    continue
+        return defaults
+
     def get_optimizer(
         self,
         random_state: int,
@@ -451,6 +480,32 @@ class HyperOptimizer:
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state, n_startup_trials=INITIAL_POINTS
                     )
+                elif o_sampler == "CWSampler":
+                    # CWSampler needs the epoch budget and hand-tuned defaults to:
+                    #  - self-adjust points_per_param to fit scan + assembly
+                    #  - use defaults as baseline anchor (vs midpoint fallback)
+                    # Early-stop is INCOMPATIBLE with the coordinate-wise scan
+                    # (most scan trials don't improve best → triggers early-stop
+                    # before scan completes, plateau detection is skipped).
+                    if self.es_epochs and self.es_epochs > 0:
+                        raise OperationalException(
+                            "CWSampler is incompatible with --early-stop "
+                            f"(currently set to {self.es_epochs}). Either omit "
+                            "--early-stop or pass --early-stop 0. The sampler "
+                            "manages its own scan/assembly schedule and needs the "
+                            "full epoch budget to complete plateau detection."
+                        )
+                    cw_defaults = self._extract_strategy_defaults()
+                    sampler = optuna_samplers_dict[o_sampler](
+                        seed=random_state,
+                        total_epochs=self.config.get("epochs"),
+                        defaults=cw_defaults,
+                    )
+                    if cw_defaults:
+                        logger.info(
+                            f"CWSampler: passed {len(cw_defaults)} hand-tuned defaults "
+                            f"as baseline anchors"
+                        )
                 else:
                     sampler = optuna_samplers_dict[o_sampler](seed=random_state)
         else:
