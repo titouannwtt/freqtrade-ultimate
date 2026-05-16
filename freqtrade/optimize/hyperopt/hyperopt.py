@@ -245,6 +245,27 @@ class Hyperopt:
 
         return parallel(self.hyperopter.generate_optimizer_wrapped(v) for v in asked)
 
+    def _record_trial_metrics_for_sampler(self, trial, full_result: dict) -> None:
+        """If the active sampler exposes a record_trial_metrics() hook, push
+        per-trial metrics into it.
+
+        Currently used by CWSampler to feed the activity floor: trials with too
+        few trades have their plateau-detection performance score reduced
+        proportionally, preventing inactive "do nothing" plateaus from winning.
+
+        Generic enough to be reused by any future custom sampler that wants
+        per-trial signal beyond just the loss value.
+        """
+        sampler = getattr(self.opt, "sampler", None)
+        if sampler is None or not hasattr(sampler, "record_trial_metrics"):
+            return
+        try:
+            n_trades = int(full_result.get("results_metrics", {}).get("total_trades", 0))
+            sampler.record_trial_metrics(trial.number, n_trades)
+        except Exception:
+            # Never break the hyperopt loop over a telemetry call
+            pass
+
     def _set_random_state(self, random_state: int | None) -> int:
         return random_state or random.randint(1, 2**16 - 1)  # noqa: S311
 
@@ -367,6 +388,7 @@ class Hyperopt:
                         )
                         f_val0 = self.hyperopter.generate_optimizer(asked[0].params)
                         self.opt.tell(asked[0], [f_val0["loss"]])
+                        self._record_trial_metrics_for_sampler(asked[0], f_val0)
                         self.evaluate_result(f_val0, 1, is_random[0])
                         pbar.update(task, advance=1)
                         start += 1
@@ -388,8 +410,9 @@ class Hyperopt:
                         )
 
                         f_val_loss = [v["loss"] for v in f_val]
-                        for o_ask, v in zip(asked, f_val_loss, strict=False):
+                        for o_ask, v, full_result in zip(asked, f_val_loss, f_val, strict=False):
                             self.opt.tell(o_ask, v)
+                            self._record_trial_metrics_for_sampler(o_ask, full_result)
 
                         for j, val in enumerate(f_val):
                             # Use human-friendly indexes here (starting from 1)

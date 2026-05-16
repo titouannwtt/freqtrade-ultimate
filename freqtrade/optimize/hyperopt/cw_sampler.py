@@ -63,6 +63,26 @@ MIN_POINTS_PER_PARAM = 5
 # (the plateau radius is 15% of range so >20 points gives <1.5% precision per point).
 MAX_POINTS_PER_PARAM = 20
 
+# Minimum trades for a grid point's trial to be considered "active" in plateau scoring.
+# Below this threshold, the trial's performance contribution is penalised proportionally
+# (a "stable plateau where the strategy fires 0 times" should NOT win — that pathology
+# was observed on DCA short crypto strategies where over-conservative robust optima
+# would produce 0 OOS trades despite having low/zero in-sample loss).
+DEFAULT_MIN_ACTIVE_TRADES = 10
+
+# Assembly mode controls how the assembly phase explores around the robust optima:
+# - "jitter" (legacy): random ±10% perturbation around the assembled all-robust point.
+# - "mixing": deterministic+random exploration of robust-vs-baseline param subsets.
+#             Trials gradually swap params from baseline → robust, exposing the
+#             interaction trade-off. Default since 2026-05-16 because pure jitter
+#             can't escape an inactive all-robust region.
+DEFAULT_ASSEMBLY_MODE = "mixing"
+
+# Health check threshold: if the first N assembly trials all show loss > baseline_loss
+# × HEALTH_BAD_RATIO, log a loud warning that the robust optima may be over-conservative.
+HEALTH_CHECK_AFTER_N_ASSEMBLY = 5
+HEALTH_BAD_RATIO = 1.20  # 20% worse than baseline = warning
+
 
 class CWSampler(BaseSampler):
     """Coordinate-Wise Sampler: optimizes one parameter at a time, selects plateaus.
@@ -92,6 +112,9 @@ class CWSampler(BaseSampler):
         scan_budget_ratio: float = DEFAULT_SCAN_BUDGET_RATIO,
         output_dir: Path | str | None = None,
         strategy_name: str | None = None,
+        min_active_trades: int = DEFAULT_MIN_ACTIVE_TRADES,
+        assembly_mode: str = DEFAULT_ASSEMBLY_MODE,
+        performance_weight: float = 0.5,
         **kwargs,
     ):
         self._seed = seed
@@ -109,6 +132,33 @@ class CWSampler(BaseSampler):
         self._output_dir = Path(output_dir) if output_dir else None
         self._strategy_name = strategy_name
 
+        # Activity floor: scan trials with fewer than min_active_trades trades have
+        # their performance score multiplied by (n_trades / min_active_trades).
+        # Prevents "stable plateau where strategy fires 0 times" from winning.
+        # Trade counts are fed by the freqtrade hyperopt loop via record_trade_count().
+        self._min_active_trades = max(1, min_active_trades)
+        # trial_number → n_trades, populated as trials complete (by external caller)
+        self._trial_n_trades: dict[int, int] = {}
+
+        # Assembly exploration mode: "mixing" (default, swaps robust/baseline subsets)
+        # or "jitter" (legacy, ±10% Gaussian around all-robust point).
+        if assembly_mode not in ("mixing", "jitter"):
+            raise ValueError(f"assembly_mode must be 'mixing' or 'jitter', got {assembly_mode!r}")
+        self._assembly_mode = assembly_mode
+        # Per-trial cached subset decision for mixing mode (recomputed each new trial)
+        self._mixing_trial_number: int = -1
+        self._mixing_robust_mask: dict[str, bool] = {}
+        # Counter of assembly trials seen so far (for ordering the mixing schedule)
+        self._assembly_trial_count: int = 0
+
+        # Performance/robustness weight in the combined plateau score (must sum to 1.0).
+        # Default 0.5/0.5 (Lefort original). Increase performance_weight (e.g. 0.7) when
+        # the loss landscape is noisy and robust_optima tend to be over-conservative.
+        if not 0.0 <= performance_weight <= 1.0:
+            raise ValueError(f"performance_weight must be in [0, 1], got {performance_weight}")
+        self._performance_weight = performance_weight
+        self._robustness_weight = 1.0 - performance_weight
+
         # Final points_per_param is computed in _finalize_init based on total_epochs
         # and n_params discovered. Start with the user request.
         self._points_per_param = points_per_param
@@ -118,12 +168,31 @@ class CWSampler(BaseSampler):
         self._baseline: dict[str, Any] = {}
         self._scan_grid: dict[str, list[Any]] = {}
         self._best_robust: dict[str, Any] = {}
+        # Per-param robustness score from plateau detection (filled in _compute_robust_optima).
+        # Used by mixing assembly to order params by confidence (high robustness first).
+        self._best_robustness_scores: dict[str, float] = {}
+
+        # Baseline trial loss, captured after the baseline trial completes (used by
+        # the health check to compare assembly trials against).
+        self._baseline_loss: float | None = None
+        self._health_check_done: bool = False
 
         self._phase = "init"
         self._schedule: list[dict[str, Any]] = []
         self._initialized = False
         self._last_seen_trial: int = -1
         self._assembly_entered_logged = False
+
+    # ── External hook for trade count injection ──────────────────────
+
+    def record_trial_metrics(self, trial_number: int, n_trades: int) -> None:
+        """Called by freqtrade's hyperopt loop after each trial completes.
+
+        Records the number of trades produced by the trial, used by the activity
+        floor in plateau scoring. If not called, the activity floor is skipped
+        (all trials treated as fully active).
+        """
+        self._trial_n_trades[trial_number] = int(n_trades)
 
     # ── Optuna interface ──────────────────────────────────────────────
 
@@ -201,6 +270,9 @@ class CWSampler(BaseSampler):
                     states=[TrialState.COMPLETE],
                 )
                 self._transition_to_assembly(completed)
+        elif self._phase == "assembly" and not self._health_check_done:
+            # Run the health check once enough assembly trials have completed
+            self._check_assembly_health(study)
 
     def _finalize_init(self) -> None:
         n_params = len(self._param_distributions)
@@ -403,8 +475,16 @@ class CWSampler(BaseSampler):
     def _compute_robust_optima(self, completed_trials: list[FrozenTrial]) -> None:
         logger.info("CWSampler: computing robust optima (plateau detection)...")
 
+        # Capture baseline loss for health check (trial 0 = baseline)
+        for t in completed_trials:
+            if t.number == 0 and t.values is not None:
+                self._baseline_loss = float(t.values[0])
+                break
+
         # Build per-parameter results from scan trials (skip baseline = trial 0)
+        # Also track which trial.number produced each value (for activity floor lookup)
         scan_results: dict[str, list[tuple[Any, float]]] = defaultdict(list)
+        scan_trial_numbers: dict[str, list[int]] = defaultdict(list)
         for t in completed_trials:
             if t.number == 0 or t.values is None:
                 continue
@@ -416,24 +496,29 @@ class CWSampler(BaseSampler):
             for pname in self._param_names:
                 if scheduled[pname] != self._baseline.get(pname):
                     scan_results[pname].append((scheduled[pname], t.values[0]))
+                    scan_trial_numbers[pname].append(t.number)
                     break
             else:
                 # All at baseline — record for all params
                 for pname in self._param_names:
                     val = t.params.get(pname, self._baseline.get(pname))
                     scan_results[pname].append((val, t.values[0]))
+                    scan_trial_numbers[pname].append(t.number)
 
         for pname in self._param_names:
             results = scan_results.get(pname, [])
+            tnums = scan_trial_numbers.get(pname, [])
             if not results:
                 self._best_robust[pname] = self._baseline.get(pname, 0)
+                self._best_robustness_scores[pname] = 0.0
                 continue
 
             dist = self._param_distributions.get(pname)
             if isinstance(dist, CategoricalDistribution):
                 self._best_robust[pname] = self._best_categorical(results)
+                self._best_robustness_scores[pname] = 0.5  # cat baseline robustness
             else:
-                self._best_robust[pname] = self._best_plateau(pname, results)
+                self._best_robust[pname] = self._best_plateau(pname, results, tnums)
 
     def _best_categorical(self, results: list[tuple[Any, float]]) -> Any:
         by_val: dict[Any, list[float]] = defaultdict(list)
@@ -442,17 +527,28 @@ class CWSampler(BaseSampler):
         avg = {v: float(np.mean(losses)) for v, losses in by_val.items()}
         return min(avg, key=avg.get)
 
-    def _best_plateau(self, pname: str, results: list[tuple[Any, float]]) -> Any:
+    def _best_plateau(
+        self,
+        pname: str,
+        results: list[tuple[Any, float]],
+        trial_numbers: list[int] | None = None,
+    ) -> Any:
         if len(results) < 3:
             best_idx = int(np.argmin([r[1] for r in results]))
             return results[best_idx][0]
 
-        results_sorted = sorted(results, key=lambda x: float(x[0]))
+        # Sort results + trial_numbers in parallel by parameter value
+        if trial_numbers is None:
+            trial_numbers = [-1] * len(results)
+        pairs = sorted(zip(results, trial_numbers), key=lambda x: float(x[0][0]))
+        results_sorted = [p[0] for p in pairs]
+        trials_sorted = [p[1] for p in pairs]
         values = [float(r[0]) for r in results_sorted]
         losses = [float(r[1]) for r in results_sorted]
 
         param_range = values[-1] - values[0]
         if param_range == 0:
+            self._best_robustness_scores[pname] = 0.0
             return results_sorted[0][0]
 
         radius = param_range * PLATEAU_NEIGHBOR_RADIUS
@@ -474,21 +570,46 @@ class CWSampler(BaseSampler):
         worst_loss = max(losses)
         loss_range = worst_loss - best_loss if worst_loss != best_loss else 1.0
 
+        # Activity floor: penalise grid points whose trial fired < min_active_trades.
+        # Trade count is only available if record_trial_metrics() was called by the
+        # hyperopt host (freqtrade). When absent, the penalty is skipped (all trials
+        # treated as fully active).
+        activity_penalties = []
+        for tnum in trials_sorted:
+            n_trades = self._trial_n_trades.get(tnum)
+            if n_trades is None:
+                activity_penalties.append(1.0)
+            elif n_trades >= self._min_active_trades:
+                activity_penalties.append(1.0)
+            else:
+                # Linear penalty: 0 trades → 0.0, half threshold → 0.5, full → 1.0
+                activity_penalties.append(n_trades / self._min_active_trades)
+
         best_combined = -1.0
         best_idx = 0
         for i in range(len(values)):
-            performance = 1.0 - (losses[i] - best_loss) / loss_range
-            combined = 0.5 * performance + 0.5 * robustness_scores[i]
+            performance_raw = 1.0 - (losses[i] - best_loss) / loss_range
+            performance = performance_raw * activity_penalties[i]
+            combined = (
+                self._performance_weight * performance
+                + self._robustness_weight * robustness_scores[i]
+            )
             if combined > best_combined:
                 best_combined = combined
                 best_idx = i
 
         chosen_val = results_sorted[best_idx][0]
         chosen_robustness = robustness_scores[best_idx]
+        chosen_activity = activity_penalties[best_idx]
+        n_trades_chosen = self._trial_n_trades.get(trials_sorted[best_idx])
 
+        activity_str = (
+            f", n_trades={n_trades_chosen}" if n_trades_chosen is not None else ""
+        )
         logger.info(
             f"  {pname}: chosen={chosen_val} (loss={losses[best_idx]:.4f}, "
-            f"robustness={chosen_robustness:.2f}, baseline={self._baseline.get(pname)})"
+            f"robustness={chosen_robustness:.2f}, activity_factor={chosen_activity:.2f}"
+            f"{activity_str}, baseline={self._baseline.get(pname)})"
         )
 
         if chosen_robustness < PLATEAU_MIN_RATIO:
@@ -497,13 +618,90 @@ class CWSampler(BaseSampler):
                 f"(robustness={chosen_robustness:.2f} < {PLATEAU_MIN_RATIO}), "
                 f"keeping baseline={self._baseline.get(pname)}"
             )
+            self._best_robustness_scores[pname] = 0.0
             return self._baseline.get(pname, chosen_val)
 
+        self._best_robustness_scores[pname] = chosen_robustness
         return chosen_val
 
     # ── Assembly sampling ─────────────────────────────────────────────
 
     def _sample_assembly(self, param_name: str, param_distribution: BaseDistribution) -> Any:
+        if self._assembly_mode == "mixing":
+            return self._sample_assembly_mixing(param_name, param_distribution)
+        return self._sample_assembly_jitter(param_name, param_distribution)
+
+    def _sample_assembly_mixing(
+        self, param_name: str, param_distribution: BaseDistribution
+    ) -> Any:
+        """Mixing strategy: each assembly trial uses a SUBSET of robust_optima
+        (rest from baseline), exploring the trade-off between full-robust (often
+        too conservative) and full-baseline (= no optimization).
+
+        Schedule:
+          Trial 1 of assembly: ALL params robust (= what jitter would explore at center)
+          Trial 2: all robust EXCEPT the lowest-robustness param (revert to baseline)
+          Trial 3: all robust EXCEPT the 2 lowest-robustness params
+          ...
+          Trial n_params: only the highest-robustness param uses robust value
+          Trial n_params+1 and beyond: random subsets (more diverse exploration)
+
+        After the deterministic schedule completes, switch to random k-out-of-n
+        mixing for variety. The schedule choice is cached per trial.number so all
+        param calls in the same trial see a consistent decision.
+        """
+        # Recompute the mix decision when we see a new trial
+        if self._last_seen_trial != self._mixing_trial_number:
+            self._mixing_trial_number = self._last_seen_trial
+            self._assembly_trial_count += 1
+            self._mixing_robust_mask = self._build_mixing_mask(self._assembly_trial_count)
+
+        use_robust = self._mixing_robust_mask.get(param_name, True)
+        if use_robust:
+            return self._best_robust.get(param_name, self._baseline.get(param_name))
+        return self._baseline.get(param_name, self._get_midpoint(param_distribution))
+
+    def _build_mixing_mask(self, assembly_n: int) -> dict[str, bool]:
+        """Decide for the n-th assembly trial which params use robust vs baseline.
+
+        For the first n_params trials, we follow a deterministic schedule that
+        progressively reverts params from robust to baseline, lowest-robustness
+        first. After that, we draw random subsets.
+        """
+        n_params = len(self._param_names)
+        if n_params == 0:
+            return {}
+
+        # Order params by robustness ascending (lowest first = first to be reverted)
+        params_by_robustness = sorted(
+            self._param_names,
+            key=lambda p: self._best_robustness_scores.get(p, 0.0),
+        )
+
+        if assembly_n == 1:
+            # All robust (test the assembled point as-is)
+            return {p: True for p in self._param_names}
+
+        if assembly_n <= n_params:
+            # Revert the (assembly_n - 1) lowest-robustness params to baseline
+            n_baseline = assembly_n - 1
+            baseline_set = set(params_by_robustness[:n_baseline])
+            return {p: (p not in baseline_set) for p in self._param_names}
+
+        # Past the deterministic schedule: random subset (biased toward high-k robust)
+        # Sample k from a distribution favouring k close to n_params (most robust)
+        # k follows a triangular distribution biased toward n_params
+        k_min = max(1, n_params // 3)
+        k = int(self._rng.triangular(k_min, n_params, n_params))
+        # Random selection of k params to keep robust
+        selected = list(self._rng.choice(n_params, size=k, replace=False))
+        selected_set = {self._param_names[i] for i in selected}
+        return {p: (p in selected_set) for p in self._param_names}
+
+    def _sample_assembly_jitter(
+        self, param_name: str, param_distribution: BaseDistribution
+    ) -> Any:
+        """Legacy assembly mode: ±10% Gaussian jitter around the all-robust point."""
         center = self._best_robust.get(param_name)
         if center is None:
             return self._get_midpoint(param_distribution)
@@ -533,6 +731,63 @@ class CWSampler(BaseSampler):
             return val
 
         return center
+
+    def _check_assembly_health(self, study: Study) -> None:
+        """Compare early assembly trials to the baseline. Warn if assembly is
+        consistently MUCH worse than baseline → robust optima may be over-
+        conservative (the activity floor + mixing assembly help, but if they
+        still under-perform, the user should consider tuning weights).
+        """
+        if self._health_check_done:
+            return
+        if self._baseline_loss is None or self._assembly_trial_count < HEALTH_CHECK_AFTER_N_ASSEMBLY:
+            return
+
+        # Collect losses from the first N assembly trials
+        scan_size = len(self._schedule)
+        assembly_trials = [
+            t for t in study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
+            if t.number > scan_size and t.values is not None
+        ]
+        if len(assembly_trials) < HEALTH_CHECK_AFTER_N_ASSEMBLY:
+            return
+
+        assembly_losses = sorted(float(t.values[0]) for t in assembly_trials)
+        # Use the best (lowest) loss seen in early assembly
+        best_assembly_loss = assembly_losses[0]
+        ratio = abs(best_assembly_loss) / max(abs(self._baseline_loss), 1e-9)
+
+        self._health_check_done = True
+        if (
+            (self._baseline_loss < 0 and best_assembly_loss > self._baseline_loss * HEALTH_BAD_RATIO)
+            or (self._baseline_loss >= 0 and best_assembly_loss > self._baseline_loss * HEALTH_BAD_RATIO)
+        ):
+            logger.warning(
+                "=" * 70
+            )
+            logger.warning(
+                "CWSampler: HEALTH WARNING — assembly losses are significantly worse "
+                "than baseline. The first %d assembly trials have best loss=%.4f, "
+                "vs baseline_loss=%.4f (ratio %.2fx).",
+                HEALTH_CHECK_AFTER_N_ASSEMBLY, best_assembly_loss, self._baseline_loss, ratio,
+            )
+            logger.warning(
+                "This usually means the robust_optima are over-conservative for this "
+                "loss landscape (the strategy is happier with the v1 defaults than "
+                "with the plateau-anchored values). Mitigations:"
+            )
+            logger.warning(
+                "  - increase performance_weight (default 0.5 → try 0.7 or 0.8)"
+            )
+            logger.warning(
+                "  - increase min_active_trades (default %d → try 20-50) to penalise "
+                "inactive plateaus more strongly",
+                DEFAULT_MIN_ACTIVE_TRADES,
+            )
+            logger.warning(
+                "  - use assembly_mode='jitter' if mixing isn't helping converge"
+            )
+            logger.warning("=" * 70)
 
     # ── Utilities ─────────────────────────────────────────────────────
 
