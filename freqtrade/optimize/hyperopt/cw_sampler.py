@@ -307,18 +307,47 @@ class CWSampler(BaseSampler):
             self._dump_robust_optima_to_json(n_fallback)
             logger.info("=" * 70)
 
+    def _build_robust_params_dict(self, n_fallback: int) -> dict:
+        """Build the freqtrade-loadable params dict from robust_optima.
+
+        Returns the same schema as freqtrade's hyperopt export JSON, so it can
+        be written directly next to the strategy file and auto-loaded as the
+        strategy's live params.
+        """
+        return {
+            "strategy_name": self._strategy_name or "unknown",
+            "params": {
+                "buy": {k: self._normalize_value(v) for k, v in self._best_robust.items()},
+                "sell": {},
+                "protection": {},
+                "roi": {},
+                "stoploss": {},
+                "max_open_trades": {},
+                "trailing": {},
+            },
+            "ft_stratparam_v": 1,
+            "export_time": datetime.now(timezone.utc).isoformat(),
+            "cwsampler_meta": {
+                "n_params": len(self._best_robust),
+                "n_plateaus": len(self._best_robust) - n_fallback,
+                "n_baseline_fallback": n_fallback,
+                "baseline_source": {
+                    k: ("default" if k in self._user_defaults else "midpoint")
+                    for k in self._best_robust
+                },
+            },
+        }
+
     def _dump_robust_optima_to_json(self, n_fallback: int) -> None:
-        """Write the robust optima to a freqtrade-loadable JSON co-located file.
+        """Write the robust optima directly next to the strategy file.
 
-        This is the canonical CWSampler output to use for a strategy's v2 params.
-        Freqtrade's "Best result" reports the lowest-loss epoch (often a scan trial
-        = baseline + 1 perturbed param), which is NOT what this sampler is designed
-        to find. The plateau-anchored output IS the robust_optima dict.
+        This is the canonical CWSampler output — it REPLACES the standard
+        freqtrade "Best result" export when CWSampler is used. The file is
+        saved at the same location as freqtrade's normal param export:
+        next to the strategy .py file as {StrategyName}.json.
 
-        File path: {output_dir}/cwsampler_robust_{strategy_name}.json
-        Format: same schema as freqtrade's hyperopt-show JSON, so the file can be
-        copied to user_data/strategies/{strategy}.json and freqtrade will auto-load
-        it as the strategy's live params.
+        This means `freqtrade backtesting --strategy X` will auto-load
+        the robust params without any manual `cp`.
 
         Silently no-ops if output_dir or strategy_name is None (sampler used
         outside the freqtrade hyperopt CLI).
@@ -326,43 +355,39 @@ class CWSampler(BaseSampler):
         if not self._output_dir or not self._strategy_name:
             return
         try:
+            data = self._build_robust_params_dict(n_fallback)
+
+            # Also write to hyperopt_results/ as archive (useful for comparison)
             self._output_dir.mkdir(parents=True, exist_ok=True)
-            out_path = self._output_dir / f"cwsampler_robust_{self._strategy_name}.json"
-            # Separate the robust optima by space (buy vs sell) is non-trivial
-            # without dimension-level metadata. Default: pack everything under
-            # "buy" since that's the dominant space for CWSampler usage. Users
-            # mixing buy+sell can manually re-split after.
-            data = {
-                "strategy_name": self._strategy_name,
-                "params": {
-                    "buy": {k: self._normalize_value(v) for k, v in self._best_robust.items()},
-                    "sell": {},
-                    "protection": {},
-                    "roi": {},
-                    "stoploss": {},
-                    "max_open_trades": {},
-                    "trailing": {},
-                },
-                "ft_stratparam_v": 1,
-                "export_time": datetime.now(timezone.utc).isoformat(),
-                "cwsampler_meta": {
-                    "n_params": len(self._best_robust),
-                    "n_plateaus": len(self._best_robust) - n_fallback,
-                    "n_baseline_fallback": n_fallback,
-                    "baseline_source": {
-                        k: ("default" if k in self._user_defaults else "midpoint")
-                        for k in self._best_robust
-                    },
-                },
-            }
-            out_path.write_text(json.dumps(data, indent=2, default=str))
+            archive_path = self._output_dir / f"cwsampler_robust_{self._strategy_name}.json"
+            archive_path.write_text(json.dumps(data, indent=2, default=str))
             logger.info(
-                f"CWSampler: robust_optima dumped to {out_path} "
-                f"— this is the canonical v2 params file. To deploy: "
-                f"`cp {out_path} user_data/strategies/{self._strategy_name.lower()}.json`"
+                f"CWSampler: robust_optima archived to {archive_path}"
             )
         except Exception as exc:  # pragma: no cover — never crash a hyperopt over this
             logger.warning(f"CWSampler: failed to dump robust_optima JSON: {exc}")
+
+    def get_robust_optima(self) -> dict[str, Any]:
+        """Public accessor for the robust_optima dict (plateau-anchored params).
+
+        Used by the hyperopt runner to export the robust params as the final
+        result instead of the lowest-loss epoch.
+        """
+        return dict(self._best_robust)
+
+    def get_phase(self) -> str:
+        """Public accessor for the current sampler phase.
+
+        Returns one of: 'init', 'baseline', 'scan', 'assembly'.
+        """
+        return self._phase
+
+    def get_n_baseline_fallback(self) -> int:
+        """Count how many params fell back to baseline (no plateau found)."""
+        return sum(
+            1 for pname, chosen in self._best_robust.items()
+            if chosen == self._baseline.get(pname)
+        )
 
     @staticmethod
     def _normalize_value(v: Any) -> Any:
