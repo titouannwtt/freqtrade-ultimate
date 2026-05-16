@@ -342,8 +342,12 @@ class Worker:
         # Clean up current freqtrade modules
         self.freqtrade.cleanup()
 
-        # Load and validate config and create new instance of the bot
-        self._init(True)
+        try:
+            # Load and validate config and create new instance of the bot
+            self._init(True)
+        except Exception:
+            logger.exception("Fatal error during config reload — bot cannot continue")
+            raise
 
         self.freqtrade.notify_status(f"{State(self.freqtrade.state)} after config reloaded")
 

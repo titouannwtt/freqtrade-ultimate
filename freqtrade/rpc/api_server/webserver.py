@@ -178,6 +178,7 @@ class ApiServer(RPCHandler):
             logger.info("Stopping API Server")
             # self._server.force_exit, self._server.should_exit = True, True
             self._server.cleanup()
+        self.shutdown()
 
     @classmethod
     def shutdown(cls):
