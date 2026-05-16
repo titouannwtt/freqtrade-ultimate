@@ -495,10 +495,30 @@ class HyperOptimizer:
                             "manages its own scan/assembly schedule and needs the "
                             "full epoch budget to complete plateau detection."
                         )
+                    # Hard guard: budget must be sufficient for at least the minimum
+                    # scan (1 baseline + n_params × MIN_POINTS_PER_PARAM=5). Below this,
+                    # the sampler can't even cover all params with floor density and
+                    # plateau detection is meaningless.
+                    from freqtrade.optimize.hyperopt.cw_sampler import (
+                        MIN_POINTS_PER_PARAM as CW_MIN_POINTS,
+                    )
+                    n_params_cw = len(self.dimensions)
+                    epochs_cw = self.config.get("epochs", 0) or 0
+                    min_budget = 1 + n_params_cw * CW_MIN_POINTS
+                    if epochs_cw < min_budget:
+                        recommended = max(min_budget * 2, 1 + n_params_cw * 20 * 17 // 10)
+                        raise OperationalException(
+                            f"CWSampler: --epochs {epochs_cw} is below the minimum "
+                            f"viable budget for {n_params_cw} optimizable parameters. "
+                            f"Minimum = 1 + {n_params_cw} × {CW_MIN_POINTS} = {min_budget} "
+                            f"(just enough to scan all params at floor density). "
+                            f"Recommended = {recommended} (proper scan + assembly). "
+                            f"See docs/hyperopt-cwsampler.md for budget guidance."
+                        )
                     cw_defaults = self._extract_strategy_defaults()
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state,
-                        total_epochs=self.config.get("epochs"),
+                        total_epochs=epochs_cw,
                         defaults=cw_defaults,
                     )
                     if cw_defaults:
