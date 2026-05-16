@@ -16,6 +16,7 @@ class HyperoptOutput:
     def __init__(self, streaming=False) -> None:
         self._results: list[Any] = []
         self._streaming = streaming
+        self._has_cw_phase = False
         self.__init_table()
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
@@ -29,6 +30,8 @@ class HyperoptOutput:
         # Headers
         self.table.add_column("Best", justify="left")
         self.table.add_column("Epoch", justify="right")
+        if self._has_cw_phase:
+            self.table.add_column("Phase", justify="center")
         self.table.add_column("Trades", justify="right")
         self.table.add_column("Win  Draw  Loss  Win%", justify="right")
         self.table.add_column("Avg profit", justify="right")
@@ -55,6 +58,9 @@ class HyperoptOutput:
     ) -> None:
         """Format one or multiple rows and add them"""
         stake_currency = config["stake_currency"]
+        # Detect CWSampler phase column on first result that has it
+        if not self._has_cw_phase and any(r.get("cw_phase") for r in results):
+            self._has_cw_phase = True
         self._results.extend(results)
 
         max_rows: int | None = None
@@ -77,63 +83,75 @@ class HyperoptOutput:
 
         self.__init_table()
         for r in self._results[max_rows:]:
-            self.table.add_row(
-                *[
-                    # "Best":
-                    (
-                        ("*" if r["is_initial_point"] or r["is_random"] else "")
-                        + (" Best" if r["is_best"] else "")
-                    ).lstrip(),
-                    # "Epoch":
-                    f"{r['current_epoch']}/{total_epochs}",
-                    # "Trades":
-                    str(r["results_metrics"]["total_trades"]),
-                    # "Win  Draw  Loss  Win%":
-                    generate_wins_draws_losses(
-                        r["results_metrics"]["wins"],
-                        r["results_metrics"]["draws"],
-                        r["results_metrics"]["losses"],
-                    ),
-                    # "Avg profit":
-                    f"{r['results_metrics']['profit_mean']:.2%}"
-                    if r["results_metrics"]["profit_mean"] is not None
-                    else "--",
-                    # "Profit":
-                    Text(
-                        "{} {}".format(
-                            fmt_coin(
-                                r["results_metrics"]["profit_total_abs"],
-                                stake_currency,
-                                keep_trailing_zeros=True,
-                            ),
-                            f"({r['results_metrics']['profit_total']:,.2%})".rjust(10, " "),
-                        )
-                        if r["results_metrics"].get("profit_total_abs", 0) != 0.0
-                        else "--",
-                        style=(
-                            "green"
-                            if r["results_metrics"].get("profit_total_abs", 0) > 0
-                            else "red"
-                        )
-                        if not r["is_best"]
-                        else "",
-                    ),
-                    # "Avg duration":
-                    str(r["results_metrics"]["holding_avg"]),
-                    # "Objective":
-                    f"{r['loss']:,.5f}" if r["loss"] != 100000 else "N/A",
-                    # "Max Drawdown (Acct)":
+            row_cells = [
+                # "Best":
+                (
+                    ("*" if r["is_initial_point"] or r["is_random"] else "")
+                    + (" Best" if r["is_best"] else "")
+                ).lstrip(),
+                # "Epoch":
+                f"{r['current_epoch']}/{total_epochs}",
+            ]
+            # CWSampler phase column (only if detected)
+            if self._has_cw_phase:
+                phase = r.get("cw_phase", "")
+                phase_styles = {
+                    "baseline": "[dim]BASE[/dim]",
+                    "scan": "[cyan]SCAN[/cyan]",
+                    "assembly": "[green]ASSM[/green]",
+                }
+                row_cells.append(phase_styles.get(phase, phase.upper()[:4] if phase else ""))
+            row_cells.extend([
+                # "Trades":
+                str(r["results_metrics"]["total_trades"]),
+                # "Win  Draw  Loss  Win%":
+                generate_wins_draws_losses(
+                    r["results_metrics"]["wins"],
+                    r["results_metrics"]["draws"],
+                    r["results_metrics"]["losses"],
+                ),
+                # "Avg profit":
+                f"{r['results_metrics']['profit_mean']:.2%}"
+                if r["results_metrics"]["profit_mean"] is not None
+                else "--",
+                # "Profit":
+                Text(
                     "{} {}".format(
                         fmt_coin(
-                            r["results_metrics"]["max_drawdown_abs"],
+                            r["results_metrics"]["profit_total_abs"],
                             stake_currency,
                             keep_trailing_zeros=True,
                         ),
-                        (f"({r['results_metrics']['max_drawdown_account']:,.2%})").rjust(10, " "),
+                        f"({r['results_metrics']['profit_total']:,.2%})".rjust(10, " "),
                     )
-                    if r["results_metrics"]["max_drawdown_account"] != 0.0
+                    if r["results_metrics"].get("profit_total_abs", 0) != 0.0
                     else "--",
-                ],
+                    style=(
+                        "green"
+                        if r["results_metrics"].get("profit_total_abs", 0) > 0
+                        else "red"
+                    )
+                    if not r["is_best"]
+                    else "",
+                ),
+                # "Avg duration":
+                str(r["results_metrics"]["holding_avg"]),
+                # "Objective":
+                f"{r['loss']:,.5f}" if r["loss"] != 100000 else "N/A",
+                # "Max Drawdown (Acct)":
+                "{} {}".format(
+                    fmt_coin(
+                        r["results_metrics"]["max_drawdown_abs"],
+                        stake_currency,
+                        keep_trailing_zeros=True,
+                    ),
+                    (f"({r['results_metrics']['max_drawdown_account']:,.2%})").rjust(10, " "),
+                )
+                if r["results_metrics"]["max_drawdown_account"] != 0.0
+                else "--",
+            ])
+            self.table.add_row(
+                *row_cells,
                 style=" ".join(
                     [
                         "bold gold1" if r["is_best"] and highlight_best else "",
