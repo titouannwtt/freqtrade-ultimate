@@ -343,8 +343,31 @@ class Wallets:
         respecting tradable_balance_ratio.
         Calculated as
         (<open_trade stakes> + free amount) * tradable_balance_ratio
+
+        Anti-compounding (backtest/hyperopt only): if config["backtest_lock_wallet"] is True
+        AND runmode is BACKTEST or HYPEROPT, the returned amount is LOCKED to the initial
+        wallet value (no growth with accumulated profits). This prevents the well-known
+        backtest artifact where compounded sizing produces unrealistic profit numbers
+        because the simulator doesn't model exchange position-size limits, orderbook
+        depth, or liquidity constraints. In live/dry-run, behaviour is unchanged.
         """
         val_tied_up = Trade.total_open_trades_stakes()
+
+        # === Anti-compounding lock (backtest/hyperopt only) ===
+        if (
+            self._config.get("backtest_lock_wallet", False)
+            and self._config.get("runmode") in (RunMode.BACKTEST, RunMode.HYPEROPT)
+        ):
+            if "available_capital" in self._config:
+                starting_balance = float(self._config["available_capital"])
+                withdrawal = self.get_capital_withdrawal()
+                locked_amount = max(0.0, starting_balance - withdrawal)
+            else:
+                # Use dry_run_wallet (initial balance) × tradable_balance_ratio
+                starting = float(self._config.get("dry_run_wallet", 1000.0) or 1000.0)
+                locked_amount = starting * self._config.get("tradable_balance_ratio", 1.0)
+            return locked_amount
+
         if "available_capital" in self._config:
             starting_balance = self._config["available_capital"]
             tot_profit = Trade.get_total_closed_profit()
