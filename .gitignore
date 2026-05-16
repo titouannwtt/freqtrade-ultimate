@@ -226,3 +226,6 @@ config.json
 *.key
 *.pem
 .aider*
+
+# Large binary dumps (analysis artefacts)
+*.pkl
