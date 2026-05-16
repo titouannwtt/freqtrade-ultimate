@@ -305,6 +305,12 @@ class Hyperopt:
         val["current_epoch"] = current
         val["is_initial_point"] = current <= INITIAL_POINTS
 
+        # Annotate with CWSampler phase if applicable
+        if self._is_cwsampler():
+            sampler = self._get_cwsampler()
+            if sampler:
+                val["cw_phase"] = sampler.get_phase()
+
         logger.debug("Optimizer epoch evaluated: %s", val)
 
         is_best = HyperoptTools.is_best_loss(val, self.current_best_loss)
@@ -417,18 +423,27 @@ class Hyperopt:
         self._save_run_end_metadata()
 
         if self.current_best_epoch:
-            HyperoptTools.try_export_params(
-                self.config,
-                self.hyperopter.get_strategy_name(),
-                self.current_best_epoch,
-            )
-
-            if not self.config.get("wfa_silent"):
-                HyperoptTools.show_epoch_details(
-                    self.current_best_epoch, self.total_epochs, self.print_json
+            # When CWSampler is used, the "best result" is NOT the lowest-loss
+            # epoch (which is often a scan trial with only 1 param changed).
+            # Instead, export the robust_optima (plateau-anchored params) directly
+            # to the strategy file — this is the actual CWSampler output.
+            if self._is_cwsampler() and self._export_cwsampler_robust():
+                if not self.config.get("wfa_silent"):
+                    self._show_cwsampler_result()
+                    self._print_post_run_summary(self.current_best_epoch)
+                    self._export_html_report()
+            else:
+                HyperoptTools.try_export_params(
+                    self.config,
+                    self.hyperopter.get_strategy_name(),
+                    self.current_best_epoch,
                 )
-                self._print_post_run_summary(self.current_best_epoch)
-                self._export_html_report()
+                if not self.config.get("wfa_silent"):
+                    HyperoptTools.show_epoch_details(
+                        self.current_best_epoch, self.total_epochs, self.print_json
+                    )
+                    self._print_post_run_summary(self.current_best_epoch)
+                    self._export_html_report()
         elif self.num_epochs_saved > 0:
             print(
                 f"No good result found for given optimization function in {self.num_epochs_saved} "
@@ -438,6 +453,87 @@ class Hyperopt:
             # This is printed when Ctrl+C is pressed quickly, before first epochs have
             # a chance to be evaluated.
             print("No epochs evaluated yet, no best result.")
+
+    def _is_cwsampler(self) -> bool:
+        """Check if the current hyperopt uses CWSampler."""
+        return self.config.get("hyperopt_sampler") == "CWSampler"
+
+    def _get_cwsampler(self):
+        """Get the CWSampler instance from the Optuna study."""
+        from freqtrade.optimize.hyperopt.cw_sampler import CWSampler
+        if self.opt and hasattr(self.opt, "sampler"):
+            sampler = self.opt.sampler
+            if isinstance(sampler, CWSampler):
+                return sampler
+        return None
+
+    def _export_cwsampler_robust(self) -> bool:
+        """Export CWSampler's robust_optima directly to the strategy file.
+
+        Returns True if robust params were successfully exported, False otherwise
+        (falls back to standard best-epoch export).
+        """
+        sampler = self._get_cwsampler()
+        if not sampler:
+            return False
+
+        robust = sampler.get_robust_optima()
+        if not robust:
+            logger.warning(
+                "CWSampler: no robust_optima available (scan may not have completed). "
+                "Falling back to standard best-epoch export."
+            )
+            return False
+
+        strategy_name = self.hyperopter.get_strategy_name()
+        n_fallback = sampler.get_n_baseline_fallback()
+        data = sampler._build_robust_params_dict(n_fallback)
+
+        # Export directly next to the strategy file (same as freqtrade's
+        # standard try_export_params) so it auto-loads on next backtesting/live
+        fn = HyperoptTools.get_strategy_filename(self.config, strategy_name)
+        if fn:
+            out_path = fn.with_suffix(".json")
+            import json as json_mod
+            out_path.write_text(json_mod.dumps(data, indent=2, default=str))
+            logger.info(
+                f"CWSampler: robust params exported to {out_path} "
+                f"(auto-loaded on next backtest/live run)"
+            )
+        else:
+            logger.warning("Strategy file not found, robust params not exported to strategy dir.")
+
+        return True
+
+    def _show_cwsampler_result(self) -> None:
+        """Display CWSampler's robust result instead of the standard best-epoch."""
+        sampler = self._get_cwsampler()
+        if not sampler:
+            return
+
+        robust = sampler.get_robust_optima()
+        n_fallback = sampler.get_n_baseline_fallback()
+        n_params = len(robust)
+        n_plateaus = n_params - n_fallback
+
+        print(f"\n{'='*70}")
+        print(f"CWSampler — Robust parameters (plateau-anchored)")
+        print(f"{'='*70}")
+        print(f"\n  {n_plateaus}/{n_params} params found stable plateaus"
+              f"{f', {n_fallback} fell back to baseline' if n_fallback else ''}\n")
+        print("  Robust optima:")
+        for k, v in robust.items():
+            marker = " (baseline fallback)" if v == sampler._baseline.get(k) else ""
+            print(f"    {k}: {v}{marker}")
+        print(f"\n{'='*70}")
+        print(
+            "  These params are exported as the strategy's active parameters."
+        )
+        print(
+            "  They replace the standard 'Best result' which is NOT meaningful "
+            "for CWSampler."
+        )
+        print(f"{'='*70}\n")
 
     @staticmethod
     def _threshold_label(slug: str, value: float) -> str:
