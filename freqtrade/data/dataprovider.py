@@ -51,6 +51,7 @@ class DataProvider:
         self.__rpc = rpc
         self.__cached_pairs: dict[PairWithTimeframe, tuple[DataFrame, datetime]] = {}
         self.__cached_pairs_lock = threading.Lock()
+        self.__last_stale_warning: dict[PairWithTimeframe, datetime] = {}
         self.__slice_index: dict[str, int] = {}
         self.__slice_date: datetime | None = None
 
@@ -100,16 +101,27 @@ class DataProvider:
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         """
         pair_key = (pair, timeframe, candle_type)
-        if len(dataframe) > 0 and "date" in dataframe.columns:
+        # Skip stale-candle warning in backtest/hyperopt: "age vs now()" is meaningless
+        # when the data is intentionally bounded by --timerange. In live, throttle to
+        # 1 warning per (pair, timeframe, candle_type) per hour to avoid log spam.
+        if (
+            len(dataframe) > 0
+            and "date" in dataframe.columns
+            and self._config.get("runmode") not in (RunMode.BACKTEST, RunMode.HYPEROPT)
+        ):
             last_candle_ts = dataframe.iloc[-1]["date"]
             if hasattr(last_candle_ts, "timestamp"):
-                age_seconds = (datetime.now(UTC) - last_candle_ts.to_pydatetime()).total_seconds()
+                now = datetime.now(UTC)
+                age_seconds = (now - last_candle_ts.to_pydatetime()).total_seconds()
                 tf_seconds = timeframe_to_seconds(timeframe)
                 if age_seconds > tf_seconds * 2:
-                    logger.warning(
-                        "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
-                        pair, timeframe, age_seconds, age_seconds / tf_seconds,
-                    )
+                    last_warned = self.__last_stale_warning.get(pair_key)
+                    if last_warned is None or (now - last_warned).total_seconds() >= 3600:
+                        logger.warning(
+                            "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
+                            pair, timeframe, age_seconds, age_seconds / tf_seconds,
+                        )
+                        self.__last_stale_warning[pair_key] = now
         with self.__cached_pairs_lock:
             self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
 
