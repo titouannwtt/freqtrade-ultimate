@@ -133,7 +133,7 @@ class CWSampler(BaseSampler):
         # Only update state once per trial (first param call)
         if trial.number != self._last_seen_trial:
             self._last_seen_trial = trial.number
-            self._update_phase(study)
+            self._update_phase(study, trial.number)
 
         if self._phase in ("init", "baseline"):
             return self._baseline.get(param_name, self._get_midpoint(param_distribution))
@@ -159,33 +159,34 @@ class CWSampler(BaseSampler):
 
     # ── Phase management ──────────────────────────────────────────────
 
-    def _update_phase(self, study: Study) -> None:
-        # 2026-05-16 fix — count COMPLETE + PRUNED trials, not just COMPLETE.
-        # Freqtrade prunes duplicate-parameter trials (sets state=PRUNED) and
-        # those weren't counted, which blocked the scan→assembly transition
-        # forever when duplicates occurred (which happens systematically with
-        # CWSampler scan, since each scan trial = baseline + 1 varied param,
-        # producing dup with baseline when grid value == baseline). Now we
-        # count ALL attempted trials regardless of dedup outcome.
-        all_attempted = study.get_trials(
-            deepcopy=False,
-            states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL],
-        )
-        completed = [t for t in all_attempted if t.state == TrialState.COMPLETE]
-        n_attempted = len(all_attempted)
-
+    def _update_phase(self, study: Study, current_trial_number: int) -> None:
+        # 2026-05-16 fix v2 — use Optuna's monotonic trial.number, NOT
+        # len(study.get_trials()). Freqtrade dedups duplicate-parameter trials
+        # BEFORE they enter the Optuna study, so get_trials() undercount
+        # attempted trials. trial.number is always monotonic (Optuna assigns it
+        # before any dedup decision), so it accurately tracks the schedule index.
+        #
+        # Schedule:
+        #   trial.number 0       = baseline (baseline trial)
+        #   trial.number 1..N    = scan trials (N = len(self._schedule))
+        #   trial.number > N     = assembly trials
         if self._phase == "init":
             self._phase = "baseline"
             return
 
-        if self._phase == "baseline" and n_attempted >= 1:
+        if self._phase == "baseline" and current_trial_number >= 1:
             self._finalize_init()
             return
 
         if self._phase == "scan" and self._initialized:
-            # Check if scan schedule is exhausted (count ALL attempted, not just complete)
-            scan_trial_idx = n_attempted - 1
-            if scan_trial_idx >= len(self._schedule):
+            scan_idx = current_trial_number - 1   # 0-indexed scan position
+            if scan_idx >= len(self._schedule):
+                # Need actual COMPLETE trials for plateau detection — those ARE
+                # tracked by Optuna correctly (only the dedup'd ones are missing)
+                completed = study.get_trials(
+                    deepcopy=False,
+                    states=[TrialState.COMPLETE],
+                )
                 self._transition_to_assembly(completed)
 
     def _finalize_init(self) -> None:

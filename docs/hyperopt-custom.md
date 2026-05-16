@@ -205,6 +205,7 @@ When omitted, the fork defaults to `NSGAIIISampler`.
 | `CmaEsSampler` | Evolution strategy | Continuous parameter spaces | Moderate | Moderate | 500-1000 |
 | `GPSampler` | Gaussian process surrogate | Few parameters (<8), each epoch expensive | Slow | High | 100-200 |
 | `QMCSampler` | Quasi-Monte Carlo | Initial landscape mapping | N/A (no learning) | Very high | 200-500 |
+| `CWSampler` | Coordinate-wise, plateau-aware | **Robustness refinement** after a first hyperopt pass; preserves hand-tuned defaults | Deterministic | Targeted (per-param scan) | n_params × 30-50 (e.g. 400-600 for 11 params) |
 
 #### Practical guidance
 
@@ -222,6 +223,14 @@ When omitted, the fork defaults to `NSGAIIISampler`.
   at scale.
 - **QMCSampler** does not learn from previous results. Use it for an initial mapping
   pass — then rerun with TPE or NSGA-III initialized from the best QMC points.
+- **CWSampler** is the only sampler in this fork that explicitly optimises for
+  **parameter-space robustness** rather than peak in-sample loss. It runs a
+  deterministic coordinate-wise scan anchored on the strategy's `default=X` values,
+  then refines in an assembly phase. Use it as a **second pass** after TPE / NSGA-III
+  found something interesting, to validate that the chosen parameters sit on a
+  plateau rather than an isolated peak (overfitting indicator). Incompatible with
+  `--early-stop`. See [docs/hyperopt-cwsampler.md](hyperopt-cwsampler.md) for the
+  full design and use-case guide.
 
 ---
 
