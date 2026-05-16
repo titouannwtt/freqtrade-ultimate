@@ -516,10 +516,20 @@ class HyperOptimizer:
                             f"See docs/hyperopt-cwsampler.md for budget guidance."
                         )
                     cw_defaults = self._extract_strategy_defaults()
+                    # Pass output_dir + strategy_name so the sampler auto-dumps
+                    # the robust_optima to a freqtrade-loadable JSON at scan→
+                    # assembly transition. This is the canonical v2 params file
+                    # (vs freqtrade's "Best result" which is just the lowest-loss
+                    # epoch = often a scan trial = baseline + 1 perturbation).
+                    cw_output_dir = self.config.get("user_data_dir")
+                    if cw_output_dir is not None:
+                        cw_output_dir = Path(cw_output_dir) / "hyperopt_results"
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state,
                         total_epochs=epochs_cw,
                         defaults=cw_defaults,
+                        output_dir=cw_output_dir,
+                        strategy_name=self.config.get("strategy"),
                     )
                     if cw_defaults:
                         logger.info(

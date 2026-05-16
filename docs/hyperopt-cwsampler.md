@@ -354,6 +354,82 @@ to that single parameter and a warning is logged.
 
 ---
 
+## Consuming the output — `robust_optima` is the v2 file
+
+⚠ **Critical distinction**: freqtrade's "Best result" at the end of a hyperopt run
+displays the lowest-loss epoch. With CWSampler, this is **usually a scan trial**
+(baseline + 1 perturbed parameter), NOT the assembled robust optima.
+
+The CWSampler's actual recommendation is the `robust_optima` dict computed during
+plateau detection. To make this trivially consumable, the sampler **automatically
+dumps it to a freqtrade-loadable JSON** at the scan→assembly transition:
+
+```
+user_data/hyperopt_results/cwsampler_robust_<strategy_name>.json
+```
+
+Format (identical to freqtrade's `hyperopt-show` output schema):
+
+```json
+{
+  "strategy_name": "ExhaustionHunterV2",
+  "params": {
+    "buy": {
+      "loi_threshold": 0.85,
+      "fgm_low": -19,
+      "custom_stoploss_value": -0.8,
+      "...": "..."
+    },
+    "sell": {}, "protection": {}, "roi": {}, "stoploss": {},
+    "max_open_trades": {}, "trailing": {}
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-05-16T15:33:50.000+00:00",
+  "cwsampler_meta": {
+    "n_params": 11,
+    "n_plateaus": 9,
+    "n_baseline_fallback": 2,
+    "baseline_source": {"loi_threshold": "default", "...": "..."}
+  }
+}
+```
+
+The log line at scan→assembly transition tells you exactly where to find it:
+
+```
+CWSampler: robust_optima dumped to user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json
+           — this is the canonical v2 params file. To deploy:
+           `cp user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json
+              user_data/strategies/exhaustionhunterv2.json`
+```
+
+### Deploying the v2
+
+1. Read the dumped JSON to inspect `cwsampler_meta`. If `n_plateaus / n_params` is
+   ≥ 0.7, the sampler has high confidence. If < 0.5, most params fell back to
+   baseline — the CWSampler didn't find much room for improvement.
+2. **Backtest the v2 params on OOS** (the holdout window NOT used for hyperopt).
+3. **Backtest the v1 baseline on the same OOS**.
+4. Compare. If v2 OOS metrics beat v1 OOS, deploy v2. If equal, keep v1 (less
+   change = less risk). If v2 is worse, the CWSampler didn't help on this
+   strategy (probably v1 was already near-optimum, see "When NOT to use" above).
+5. To deploy, copy the dumped file as the strategy's co-located .json
+   (filename = lowercase strategy class name):
+   ```bash
+   cp user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json \
+      user_data/strategies/exhaustionhunterv2.json
+   ```
+   Freqtrade will auto-load these params on next run.
+
+### What if you want freqtrade's "Best result" instead?
+
+It is still in the .fthypt file as before; nothing changed for that flow. But
+remember: freqtrade-best ≠ CWSampler-output. They optimise different things
+(raw loss vs plateau-membership). For the CWSampler use case (robustness over
+peak performance), always start with the dumped robust_optima.
+
+---
+
 ## Reading the logs
 
 A successful CWSampler run produces (in chronological order):

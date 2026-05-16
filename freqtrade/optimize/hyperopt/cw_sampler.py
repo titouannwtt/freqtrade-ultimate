@@ -27,8 +27,11 @@ The sampler uses a deterministic grid scan: 1 baseline trial + (points_per_param
 scan trials, then all remaining epochs are assembly refinement.
 """
 
+import json
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -87,6 +90,8 @@ class CWSampler(BaseSampler):
         total_epochs: int | None = None,
         defaults: dict[str, Any] | None = None,
         scan_budget_ratio: float = DEFAULT_SCAN_BUDGET_RATIO,
+        output_dir: Path | str | None = None,
+        strategy_name: str | None = None,
         **kwargs,
     ):
         self._seed = seed
@@ -95,6 +100,14 @@ class CWSampler(BaseSampler):
         self._total_epochs = total_epochs
         self._scan_budget_ratio = scan_budget_ratio
         self._user_defaults = defaults or {}
+        # output_dir + strategy_name enable the auto-dump of robust_optima
+        # to a freqtrade-loadable .json at scan→assembly transition. This is
+        # the recommended way to consume the CWSampler's output for v2 deploy:
+        # freqtrade's "Best result" reports the lowest-loss epoch (often a
+        # scan trial = baseline + 1 perturbed param), NOT the robust optima.
+        # The plateau-anchored output of this sampler IS robust_optima.
+        self._output_dir = Path(output_dir) if output_dir else None
+        self._strategy_name = strategy_name
 
         # Final points_per_param is computed in _finalize_init based on total_epochs
         # and n_params discovered. Start with the user request.
@@ -279,19 +292,86 @@ class CWSampler(BaseSampler):
         self._phase = "assembly"
         if not self._assembly_entered_logged:
             self._assembly_entered_logged = True
+            # Per-param summary: was the chosen value default or baseline-fallback?
+            n_fallback = sum(
+                1 for pname, chosen in self._best_robust.items()
+                if chosen == self._baseline.get(pname)
+            )
             logger.info("=" * 70)
             logger.info("CWSampler: SCAN complete → entering ASSEMBLY phase")
             logger.info(f"CWSampler: robust optima = {dict(self._best_robust)}")
-            # Per-param summary: was the chosen value default or baseline-fallback?
-            n_fallback = 0
-            for pname, chosen in self._best_robust.items():
-                if chosen == self._baseline.get(pname):
-                    n_fallback += 1
             logger.info(
                 f"CWSampler: {len(self._best_robust) - n_fallback} params found stable "
                 f"plateaus, {n_fallback} fell back to baseline (no plateau detected)"
             )
+            self._dump_robust_optima_to_json(n_fallback)
             logger.info("=" * 70)
+
+    def _dump_robust_optima_to_json(self, n_fallback: int) -> None:
+        """Write the robust optima to a freqtrade-loadable JSON co-located file.
+
+        This is the canonical CWSampler output to use for a strategy's v2 params.
+        Freqtrade's "Best result" reports the lowest-loss epoch (often a scan trial
+        = baseline + 1 perturbed param), which is NOT what this sampler is designed
+        to find. The plateau-anchored output IS the robust_optima dict.
+
+        File path: {output_dir}/cwsampler_robust_{strategy_name}.json
+        Format: same schema as freqtrade's hyperopt-show JSON, so the file can be
+        copied to user_data/strategies/{strategy}.json and freqtrade will auto-load
+        it as the strategy's live params.
+
+        Silently no-ops if output_dir or strategy_name is None (sampler used
+        outside the freqtrade hyperopt CLI).
+        """
+        if not self._output_dir or not self._strategy_name:
+            return
+        try:
+            self._output_dir.mkdir(parents=True, exist_ok=True)
+            out_path = self._output_dir / f"cwsampler_robust_{self._strategy_name}.json"
+            # Separate the robust optima by space (buy vs sell) is non-trivial
+            # without dimension-level metadata. Default: pack everything under
+            # "buy" since that's the dominant space for CWSampler usage. Users
+            # mixing buy+sell can manually re-split after.
+            data = {
+                "strategy_name": self._strategy_name,
+                "params": {
+                    "buy": {k: self._normalize_value(v) for k, v in self._best_robust.items()},
+                    "sell": {},
+                    "protection": {},
+                    "roi": {},
+                    "stoploss": {},
+                    "max_open_trades": {},
+                    "trailing": {},
+                },
+                "ft_stratparam_v": 1,
+                "export_time": datetime.now(timezone.utc).isoformat(),
+                "cwsampler_meta": {
+                    "n_params": len(self._best_robust),
+                    "n_plateaus": len(self._best_robust) - n_fallback,
+                    "n_baseline_fallback": n_fallback,
+                    "baseline_source": {
+                        k: ("default" if k in self._user_defaults else "midpoint")
+                        for k in self._best_robust
+                    },
+                },
+            }
+            out_path.write_text(json.dumps(data, indent=2, default=str))
+            logger.info(
+                f"CWSampler: robust_optima dumped to {out_path} "
+                f"— this is the canonical v2 params file. To deploy: "
+                f"`cp {out_path} user_data/strategies/{self._strategy_name.lower()}.json`"
+            )
+        except Exception as exc:  # pragma: no cover — never crash a hyperopt over this
+            logger.warning(f"CWSampler: failed to dump robust_optima JSON: {exc}")
+
+    @staticmethod
+    def _normalize_value(v: Any) -> Any:
+        """Convert numpy types to native Python types for JSON serialisation."""
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            return float(v)
+        return v
 
     # ── Plateau detection ─────────────────────────────────────────────
 
