@@ -9,6 +9,19 @@ from freqtrade.ft_types import AnnotationType, ValidExchangesType
 from freqtrade.rpc.api_server.webserver_bgwork import ProgressTask
 
 
+class PairSignalCounts(BaseModel):
+    enter_long: int = 0
+    exit_long: int = 0
+    enter_short: int = 0
+    exit_short: int = 0
+
+
+class SignalSummaryResponse(BaseModel):
+    pairs: dict[str, PairSignalCounts]
+    timeframe: str
+    last_analyzed_ts: int
+
+
 class ExchangeModePayloadMixin(BaseModel):
     trading_mode: TradingMode | None = None
     margin_mode: MarginMode | None = None
@@ -259,6 +272,7 @@ class ShowConfig(BaseModel):
     stake_currency: str
     stake_amount: str
     available_capital: float | None = None
+    tradable_balance_ratio: float = 1.0
     stake_currency_decimals: int
     max_open_trades: IntOrInf
     minimal_roi: dict[str, Any]

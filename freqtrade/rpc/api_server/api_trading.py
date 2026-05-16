@@ -25,6 +25,7 @@ from freqtrade.rpc.api_server.api_schemas import (
     OpenTradeSchema,
     PairCandlesRequest,
     PairHistory,
+    SignalSummaryResponse,
     PerformanceEntry,
     Profit,
     ProfitAll,
@@ -364,3 +365,8 @@ def pair_candles_filtered(payload: PairCandlesRequest, rpc: RPC = Depends(get_rp
     return rpc._rpc_analysed_dataframe(
         payload.pair, payload.timeframe, payload.limit, payload.columns
     )
+
+
+@router.get("/signal_summary", response_model=SignalSummaryResponse, tags=["Candle data"])
+def signal_summary(rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_signal_summary()

@@ -153,6 +153,7 @@ class RPC:
             "stake_currency_decimals": decimals_per_coin(config["stake_currency"]),
             "stake_amount": str(config["stake_amount"]),
             "available_capital": config.get("available_capital"),
+            "tradable_balance_ratio": config.get("tradable_balance_ratio", 1.0),
             "max_open_trades": (
                 config.get("max_open_trades", 0)
                 if config.get("max_open_trades", 0) != float("inf")
@@ -1877,6 +1878,25 @@ class RPC:
     def _ws_request_whitelist(self):
         """Whitelist data for WebSocket"""
         return self._freqtrade.active_pair_whitelist
+
+    def _rpc_signal_summary(self) -> dict[str, Any]:
+        timeframe = self._freqtrade.config["timeframe"]
+        pairlist = self._freqtrade.active_pair_whitelist
+        result: dict[str, dict[str, int]] = {}
+        last_ts = 0
+        signal_cols = ("enter_long", "exit_long", "enter_short", "exit_short")
+        for pair in pairlist:
+            _data, last_analyzed = self._freqtrade.dataprovider.get_analyzed_dataframe(
+                pair, timeframe
+            )
+            signals = {c: 0 for c in signal_cols}
+            if len(_data) > 0:
+                for col in signal_cols:
+                    if col in _data.columns:
+                        signals[col] = int((_data[col] == 1).sum())
+                last_ts = max(last_ts, int(last_analyzed.timestamp()))
+            result[pair] = signals
+        return {"pairs": result, "timeframe": timeframe, "last_analyzed_ts": last_ts}
 
     @staticmethod
     def _rpc_analysed_history_full(
