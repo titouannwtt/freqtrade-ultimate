@@ -25,6 +25,27 @@ Usage:
 
 The sampler uses a deterministic grid scan: 1 baseline trial + (points_per_param × n_params)
 scan trials, then all remaining epochs are assembly refinement.
+
+Empirical limits (validated on a 3-strategy DCA campaign 2026-05-17):
+  - The sampler cannot improve a v1 that is already near a Pareto front. On such
+    strategies (e.g. very high in-sample Sharpe + low DD + tightly-coupled
+    multi-condition entry filters), the assembled v2 will under-perform v1 on
+    OOS. This was cross-validated with TPESampler on the same strategy — TPE
+    also failed, confirming the limit is the strategy, not the sampler.
+  - Plateau detection assumes a smooth loss landscape. Cliff-shaped parameters
+    (cumulative counters like "n consecutive bars above threshold") have no
+    plateaus to detect; they degrade silently to baseline-fallback.
+  - The activity floor below enforces trade-count ≥ 70% of baseline on TRAIN,
+    but cannot enforce it on HOLDOUT. If train and holdout regimes differ (e.g.
+    different volatility regimes), the robust optimum picked under train may
+    fire 10×-70× fewer trades on holdout. Consumers MUST run an OOS trade-count
+    parity check before deploying the v2 (see docs/hyperopt-cwsampler.md
+    "Trade-count parity guardrail").
+  - The loss function used for the CWSampler run MUST match the loss function
+    that selected the v1. Mismatched losses produce plateau optima optimised
+    for a different objective than what made v1 good; the v2 will diverge on
+    OOS even if in-sample metrics look fine. Confirmed empirically: realigning
+    the v2 loss to v1's loss recovered an OOS win on ConfluenceShortV2.
 """
 
 import json
@@ -111,6 +132,13 @@ class CWSampler(BaseSampler):
             of each parameter's range — but this often gives suboptimal results since
             the midpoint may be far from the hand-tuned default. Strongly recommended
             to provide hand-tuned defaults when known.
+
+            IMPORTANT — loss alignment: if your defaults came from a prior hyperopt or
+            a hand-tuned process that optimised against loss function A, run THIS
+            CWSampler under the same loss A. The sampler's plateau detection cannot
+            recover v1's selection conditions if the loss is different — it will
+            converge to robust optima under a different objective, and the resulting
+            v2 will diverge from what made v1 good on OOS.
     """
 
     def __init__(
