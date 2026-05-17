@@ -257,6 +257,60 @@ metric that matters for live trading.
 | Highly categorical search space (40+ choices per param) | The plateau concept doesn't apply to categoricals (no neighbour notion) | TPESampler |
 | No epoch budget constraints + want absolute peak | TPE will eventually beat CWSampler on raw loss minimisation | TPESampler with 3000+ epochs |
 | Strategy testing parameters that should NEVER fall back to baseline | The default-fallback safety can hide a parameter that *should* move significantly | Pass `defaults={}` explicitly to force midpoint baseline |
+| **Strategy with hard "cliff" parameters** (e.g. `n_bars_required ≥ 8` cumulative counters, `cumulative_entry_bars`) | Plateau detection assumes smooth loss landscapes. Cliffs are staircases, not plateaus — perturbing by ±1 destroys the signal | Keep v1 as-is; CWSampler will mis-classify the cliff as a baseline-fallback or pick a degraded variant |
+| **Strategy already near a Pareto front** (very high Sharpe + low DD + few free dimensions) | No move improves anything; all directions degrade. CWSampler will export a "robust" v2 that under-performs v1 on every metric | Keep v1; confirmed via TPE A/B that even TPE produces equal-or-worse results — the limit is the strategy, not the sampler |
+
+---
+
+## Strategy profile checklist — does CWSampler stand a chance?
+
+Empirically, on a 3-strategy campaign (mean-reversion DCA on Hyperliquid USDC perps,
+14-month train + 6-month OOS, run 2026-05-17), only **1 of 3 strategies** produced a v2
+that beat its v1 on holdout. The 2 failures were not sampler bugs — they were strategy
+profiles where no parameter perturbation could improve the v1 (cross-validated with TPE).
+
+Before running CWSampler, sanity-check the v1 against this rule of thumb on the **train**
+window:
+
+| v1 in-sample Sharpe | Expected CWSampler outcome | Action |
+|---|---|---|
+| < 1.0 | High probability of a meaningful v2 (the v1 is sub-optimal, there's room to plateau-search) | Run CWSampler with confidence |
+| 1.0 – 4.0 | Mixed. Plateau may or may not exist. Run it, but apply the **trade-count guardrail** below | Run CWSampler, validate on holdout |
+| > 4.0 | Likely Pareto-optimal already. The v2 will probably be a degraded variant fitting an artificially conservative pocket | Run CWSampler only if you have epoch budget to spare; expect v1 to win |
+
+This rule is a proxy, not a law. A high Sharpe but only 30-50 trades = noisy estimate
+that may still hide room to plateau. Conversely, a low Sharpe with a structurally bad
+strategy idea won't be saved by any sampler.
+
+### Trade-count parity guardrail — non-negotiable
+
+If the CWSampler-produced v2 generates **< 70% of v1's holdout trade count**, **reject
+the v2**. This is the single most important sanity check.
+
+Reason: the "plateau" the sampler converged to corresponds to a restrictive parameter
+combination that fires far fewer signals. Even if the per-trade metrics look better, the
+v2 has lost diversification (fewer trades = each trade carries disproportionate weight
+= overfitting risk increases despite the apparent "stability"). The activity floor
+inside the sampler enforces this on **train** but cannot enforce it on **holdout** if
+the train and holdout regimes differ (typical case: train has high volatility, the
+robust optimum is a stricter ATR filter, holdout has low volatility → filter rarely
+fires → v2 collapses to a handful of trades).
+
+Example failure mode (VwapRevertV2, 2026-05-17): v1 = 631 trades on holdout with
+Sharpe 4.37; CWSampler-v2 = 9 trades on holdout with Sharpe 0.44 — a 70× drop in
+activity, hidden by reasonable in-sample metrics.
+
+### Loss-function alignment — critical
+
+If your v1 was selected (manually or by a prior hyperopt) under loss function A, **run
+CWSampler with the same loss function A**. Running with a different loss B means the
+plateau detection optimises for a different objective than the one that originally made
+v1 good; the resulting robust_optima will diverge from v1's success conditions, often
+producing a v2 with the right "shape" under loss B but no actual carryover to live.
+
+Confirmed empirically: aligning the v2 hyperopt loss to the v1's loss (e.g.
+`RobustResearchHyperOptLoss` for both) recovered the ConfluenceShortV2 OOS win that
+was lost when v2 was first run under a different loss.
 
 ---
 
@@ -410,10 +464,20 @@ CWSampler: robust_optima dumped to user_data/hyperopt_results/cwsampler_robust_E
    baseline — the CWSampler didn't find much room for improvement.
 2. **Backtest the v2 params on OOS** (the holdout window NOT used for hyperopt).
 3. **Backtest the v1 baseline on the same OOS**.
-4. Compare. If v2 OOS metrics beat v1 OOS, deploy v2. If equal, keep v1 (less
-   change = less risk). If v2 is worse, the CWSampler didn't help on this
-   strategy (probably v1 was already near-optimum, see "When NOT to use" above).
-5. To deploy, copy the dumped file as the strategy's co-located .json
+4. **Apply both gates** (in this order):
+   - **Trade-count gate**: `v2_trades / v1_trades ≥ 0.7`. If the v2 trades fewer
+     than 70% of v1's holdout trades, reject the v2 immediately — the "plateau"
+     it found is in fact a restrictive corner that won't fire enough in live.
+     See "Trade-count parity guardrail" above.
+   - **Risk-adjusted gate**: v2 Sharpe ≥ v1 Sharpe AND v2 max DD ≤ v1 max DD.
+     If only one of these is true (e.g. Sharpe up but DD up too), prefer v1 —
+     the v2 has shifted the risk profile, not reduced it.
+5. If v2 passes both gates, deploy. If equal or borderline, keep v1 (less change
+   = less risk). If v2 is worse, the CWSampler didn't help on this strategy —
+   the v1 was likely near-Pareto already (see "Strategy profile checklist"
+   above) or the loss function used for the v2 hyperopt diverged from what
+   made the v1 good (see "Loss-function alignment").
+6. To deploy, copy the dumped file as the strategy's co-located .json
    (filename = lowercase strategy class name):
    ```bash
    cp user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json \
