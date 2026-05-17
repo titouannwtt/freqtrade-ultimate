@@ -183,6 +183,7 @@ class FreqtradeBot(LoggingMixin):
             # the initial state of the bot.
             # Keep this at the end of this initialization method.
             self.rpc: RPCManager = RPCManager(self)
+            _tracer.mark("RPC + API server started")
 
             self.dataprovider = DataProvider(self.config, self.exchange, rpc=self.rpc)
             self.pairlists = PairListManager(self.exchange, self.config, self.dataprovider)
@@ -193,13 +194,6 @@ class FreqtradeBot(LoggingMixin):
             self.strategy.dp = self.dataprovider
             # Attach Wallets to strategy instance
             self.strategy.wallets = self.wallets
-
-            # Start API server after all bot components are initialized
-            # to avoid FreqUI polling endpoints that reference uninitialized attributes
-            if config.get("api_server", {}).get("enabled", False):
-                from freqtrade.rpc.api_server import ApiServer
-                ApiServer(config)
-            _tracer.mark("API server started")
 
             # Init ExternalMessageConsumer if enabled
             self.emc: ExternalMessageConsumer | None = (
