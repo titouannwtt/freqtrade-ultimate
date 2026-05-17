@@ -63,12 +63,22 @@ MIN_POINTS_PER_PARAM = 5
 # (the plateau radius is 15% of range so >20 points gives <1.5% precision per point).
 MAX_POINTS_PER_PARAM = 20
 
-# Minimum trades for a grid point's trial to be considered "active" in plateau scoring.
-# Below this threshold, the trial's performance contribution is penalised proportionally
-# (a "stable plateau where the strategy fires 0 times" should NOT win — that pathology
-# was observed on DCA short crypto strategies where over-conservative robust optima
-# would produce 0 OOS trades despite having low/zero in-sample loss).
+# Activity floor — anti-over-conservatism. Two thresholds (whichever is tighter):
+# 1. Absolute floor: trial must have >= DEFAULT_MIN_ACTIVE_TRADES trades.
+# 2. Relative floor: trial must have >= DEFAULT_MIN_TRADES_RATIO × baseline_n_trades.
+# The relative floor is computed once after the baseline trial completes, using the
+# baseline (= v1 defaults) trade count as reference. This prevents the sampler from
+# silently picking restrictive params that fire 10x-60x fewer trades than v1, which
+# was observed to be a major over-fitting risk: fewer trades = each trade carries
+# more statistical weight = less diversification = HIGHER overfitting risk despite
+# the apparent "stability" of the loss surface.
+#
+# Trials below the activity floor are now HARD-EXCLUDED from plateau detection
+# (not softly penalised). If ALL grid values for a param fall below the floor, the
+# sampler falls back to the baseline value — preserving v1's known-good trade
+# regime rather than picking an artificially conservative variant.
 DEFAULT_MIN_ACTIVE_TRADES = 10
+DEFAULT_MIN_TRADES_RATIO = 0.7  # require >= 70% of baseline's trade count
 
 # Assembly mode controls how the assembly phase explores around the robust optima:
 # - "jitter" (legacy): random ±10% perturbation around the assembled all-robust point.
@@ -113,6 +123,7 @@ class CWSampler(BaseSampler):
         output_dir: Path | str | None = None,
         strategy_name: str | None = None,
         min_active_trades: int = DEFAULT_MIN_ACTIVE_TRADES,
+        min_trades_ratio: float = DEFAULT_MIN_TRADES_RATIO,
         assembly_mode: str = DEFAULT_ASSEMBLY_MODE,
         performance_weight: float = 0.5,
         **kwargs,
@@ -132,11 +143,23 @@ class CWSampler(BaseSampler):
         self._output_dir = Path(output_dir) if output_dir else None
         self._strategy_name = strategy_name
 
-        # Activity floor: scan trials with fewer than min_active_trades trades have
-        # their performance score multiplied by (n_trades / min_active_trades).
-        # Prevents "stable plateau where strategy fires 0 times" from winning.
-        # Trade counts are fed by the freqtrade hyperopt loop via record_trade_count().
-        self._min_active_trades = max(1, min_active_trades)
+        # Activity floor: scan trials with too few trades are HARD-EXCLUDED from
+        # plateau detection. The effective floor is computed at baseline completion
+        # as max(min_active_trades, min_trades_ratio × baseline_n_trades). This
+        # baseline-relative threshold prevents the sampler from picking restrictive
+        # params that fire fewer trades than v1 (= the over-conservatism failure
+        # mode). Trade counts are fed by the freqtrade hyperopt loop via
+        # record_trial_metrics().
+        self._min_active_trades_abs = max(1, min_active_trades)
+        if not 0.0 <= min_trades_ratio <= 1.5:
+            raise ValueError(
+                f"min_trades_ratio must be in [0, 1.5] (typical: 0.7), got {min_trades_ratio}"
+            )
+        self._min_trades_ratio = min_trades_ratio
+        # Effective floor (resolved at baseline completion). Starts at abs only.
+        self._min_active_trades = self._min_active_trades_abs
+        # Trial 0 (baseline) trade count, used to compute the relative floor
+        self._baseline_n_trades: int | None = None
         # trial_number → n_trades, populated as trials complete (by external caller)
         self._trial_n_trades: dict[int, int] = {}
 
@@ -307,6 +330,27 @@ class CWSampler(BaseSampler):
         self._build_schedule()
         self._initialized = True
         self._phase = "scan"
+
+        # Compute baseline-relative activity floor now that baseline trial is done.
+        # Trial 0 (baseline = all-defaults) ran in the previous phase; its trade count
+        # is in self._trial_n_trades[0] (fed by freqtrade's record_trial_metrics hook).
+        # We anchor the activity threshold on this number: any scan trial firing
+        # fewer than min_trades_ratio × baseline_n_trades trades is HARD-EXCLUDED
+        # from plateau detection. This prevents the sampler from picking restrictive
+        # params that fire 10x-60x fewer trades than v1 (a known over-fitting risk:
+        # fewer trades = each trade carries more statistical weight = worse OOS).
+        self._baseline_n_trades = self._trial_n_trades.get(0)
+        if self._baseline_n_trades and self._baseline_n_trades > 0:
+            relative_floor = int(self._baseline_n_trades * self._min_trades_ratio)
+            new_floor = max(self._min_active_trades_abs, relative_floor)
+            if new_floor != self._min_active_trades:
+                logger.info(
+                    f"CWSampler: activity floor raised to {new_floor} trades "
+                    f"(was abs={self._min_active_trades_abs}, "
+                    f"baseline_n_trades={self._baseline_n_trades}, "
+                    f"ratio={self._min_trades_ratio:.0%} → relative={relative_floor})"
+                )
+            self._min_active_trades = new_floor
 
         # Diagnostic logging
         n_from_default = sum(1 for v in baseline_source.values() if v == "default")
@@ -570,26 +614,32 @@ class CWSampler(BaseSampler):
         worst_loss = max(losses)
         loss_range = worst_loss - best_loss if worst_loss != best_loss else 1.0
 
-        # Activity floor: penalise grid points whose trial fired < min_active_trades.
-        # Trade count is only available if record_trial_metrics() was called by the
-        # hyperopt host (freqtrade). When absent, the penalty is skipped (all trials
-        # treated as fully active).
-        activity_penalties = []
-        for tnum in trials_sorted:
+        # Activity floor: HARD-EXCLUDE grid points whose trial fired below the floor.
+        # The floor is baseline-relative (set in _finalize_init after baseline trial
+        # completes — typically 70% of baseline's trade count). Excluded grid points
+        # can never be picked as the robust optimum, regardless of how flat their
+        # local loss landscape is. If ALL grid points are excluded, we fall back to
+        # baseline for this parameter (preserves v1's known-good regime).
+        eligible_indices = []
+        for i, tnum in enumerate(trials_sorted):
             n_trades = self._trial_n_trades.get(tnum)
-            if n_trades is None:
-                activity_penalties.append(1.0)
-            elif n_trades >= self._min_active_trades:
-                activity_penalties.append(1.0)
-            else:
-                # Linear penalty: 0 trades → 0.0, half threshold → 0.5, full → 1.0
-                activity_penalties.append(n_trades / self._min_active_trades)
+            if n_trades is None or n_trades >= self._min_active_trades:
+                eligible_indices.append(i)
+
+        if not eligible_indices:
+            n_excluded = len(values)
+            logger.warning(
+                f"  {pname}: all {n_excluded} scan points produced < {self._min_active_trades} "
+                f"trades (baseline-relative floor). Falling back to baseline="
+                f"{self._baseline.get(pname)}."
+            )
+            self._best_robustness_scores[pname] = 0.0
+            return self._baseline.get(pname, results_sorted[0][0])
 
         best_combined = -1.0
-        best_idx = 0
-        for i in range(len(values)):
-            performance_raw = 1.0 - (losses[i] - best_loss) / loss_range
-            performance = performance_raw * activity_penalties[i]
+        best_idx = eligible_indices[0]
+        for i in eligible_indices:
+            performance = 1.0 - (losses[i] - best_loss) / loss_range
             combined = (
                 self._performance_weight * performance
                 + self._robustness_weight * robustness_scores[i]
@@ -598,18 +648,24 @@ class CWSampler(BaseSampler):
                 best_combined = combined
                 best_idx = i
 
+        n_excluded = len(values) - len(eligible_indices)
+
         chosen_val = results_sorted[best_idx][0]
         chosen_robustness = robustness_scores[best_idx]
-        chosen_activity = activity_penalties[best_idx]
         n_trades_chosen = self._trial_n_trades.get(trials_sorted[best_idx])
 
         activity_str = (
-            f", n_trades={n_trades_chosen}" if n_trades_chosen is not None else ""
+            f", n_trades={n_trades_chosen}/{self._min_active_trades}min"
+            if n_trades_chosen is not None else ""
+        )
+        excl_str = (
+            f", {n_excluded}/{len(values)} grid pts excluded (< {self._min_active_trades} trades)"
+            if n_excluded > 0 else ""
         )
         logger.info(
             f"  {pname}: chosen={chosen_val} (loss={losses[best_idx]:.4f}, "
-            f"robustness={chosen_robustness:.2f}, activity_factor={chosen_activity:.2f}"
-            f"{activity_str}, baseline={self._baseline.get(pname)})"
+            f"robustness={chosen_robustness:.2f}{activity_str}"
+            f"{excl_str}, baseline={self._baseline.get(pname)})"
         )
 
         if chosen_robustness < PLATEAU_MIN_RATIO:
