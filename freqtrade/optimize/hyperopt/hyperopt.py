@@ -478,8 +478,8 @@ class Hyperopt:
             print("No epochs evaluated yet, no best result.")
 
     def _is_cwsampler(self) -> bool:
-        """Check if the current hyperopt uses CWSampler."""
-        return self.config.get("hyperopt_sampler") == "CWSampler"
+        """Check if the current hyperopt uses PlateauSampler (or alias CWSampler)."""
+        return self.config.get("hyperopt_sampler") in ("CWSampler", "PlateauSampler")
 
     def _get_cwsampler(self):
         """Get the CWSampler instance from the Optuna study."""
@@ -507,6 +507,33 @@ class Hyperopt:
                 "Falling back to standard best-epoch export."
             )
             return False
+
+        # CWSampler v6: final export = best-loss trial across baseline + scan +
+        # assembly that passes the activity floor. The baseline (v1) is always in
+        # the candidate pool, so if no v2 candidate beats it, v1 is exported
+        # unchanged — no special hard-fallback logic required.
+        if self.opt is not None:
+            try:
+                best_params, src_trial, best_loss, best_n_trades = sampler.select_best_export(
+                    self.opt
+                )
+                sampler._best_robust_export = best_params  # consumed by _build_robust_params_dict
+                if src_trial == 0:
+                    logger.info(
+                        f"CWSampler: best trial = baseline (#0) — v1 is preserved "
+                        f"(loss={best_loss:.4f}, n_trades={best_n_trades}). "
+                        f"No v2 improvement found."
+                    )
+                else:
+                    logger.info(
+                        f"CWSampler: best trial = #{src_trial} "
+                        f"(loss={best_loss:.4f}, n_trades={best_n_trades})"
+                    )
+            except Exception as exc:  # never crash export over a safeguard
+                logger.warning(
+                    f"CWSampler: select_best_export failed, using unrefined "
+                    f"robust_optima: {exc}"
+                )
 
         strategy_name = self.hyperopter.get_strategy_name()
         n_fallback = sampler.get_n_baseline_fallback()

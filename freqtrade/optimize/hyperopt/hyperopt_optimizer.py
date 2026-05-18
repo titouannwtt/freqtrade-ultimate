@@ -52,7 +52,7 @@ INITIAL_POINTS = 30
 
 MAX_LOSS = 100000  # just a big enough number to be bad result in loss optimization
 
-from freqtrade.optimize.hyperopt.cw_sampler import CWSampler
+from freqtrade.optimize.hyperopt.cw_sampler import CWSampler, PlateauSampler
 
 optuna_samplers_dict = {
     "TPESampler": optuna.samplers.TPESampler,
@@ -61,7 +61,8 @@ optuna_samplers_dict = {
     "NSGAIISampler": optuna.samplers.NSGAIISampler,
     "NSGAIIISampler": optuna.samplers.NSGAIIISampler,
     "QMCSampler": optuna.samplers.QMCSampler,
-    "CWSampler": CWSampler,
+    "PlateauSampler": PlateauSampler,
+    "CWSampler": CWSampler,  # alias for backward compat (v6/v7 name)
 }
 
 log_queue: Any
@@ -480,7 +481,7 @@ class HyperOptimizer:
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state, n_startup_trials=INITIAL_POINTS
                     )
-                elif o_sampler == "CWSampler":
+                elif o_sampler in ("CWSampler", "PlateauSampler"):
                     # CWSampler needs the epoch budget and hand-tuned defaults to:
                     #  - self-adjust points_per_param to fit scan + assembly
                     #  - use defaults as baseline anchor (vs midpoint fallback)

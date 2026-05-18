@@ -313,8 +313,10 @@ AVAILABLE_CLI_OPTIONS = {
             "parameter spaces. GPSampler: Gaussian process — "
             "thorough but slow with >10 params. "
             "QMCSampler: pure exploration, no learning. "
-            "CWSampler: coordinate-wise (Lefort method) — optimizes "
-            "one param at a time, selects plateaus over peaks."
+            "PlateauSampler (v8): adaptive scan around defaults + plateau "
+            "detection + restricted bayesian assembly. Designed for "
+            "robustness; pair with WalkForwardLoss. (CWSampler = legacy "
+            "alias for the same class.)"
         ),
         choices=[
             "NSGAIIISampler",
@@ -323,7 +325,8 @@ AVAILABLE_CLI_OPTIONS = {
             "CmaEsSampler",
             "GPSampler",
             "QMCSampler",
-            "CWSampler",
+            "PlateauSampler",
+            "CWSampler",  # alias for backward compat
         ],
         metavar="NAME",
     ),
