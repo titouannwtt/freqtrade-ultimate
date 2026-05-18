@@ -1,4 +1,4 @@
-"""Tests for CWSampler v6 (Coordinate-Wise Sampler).
+"""Tests for PlateauSampler (Coordinate-Wise Sampler).
 
 Covers:
   - Init / constructor signatures
@@ -6,11 +6,11 @@ Covers:
   - Scan slot building (offset alternation + range clipping)
   - Adaptive tolerance computation (floor / fraction / ceiling)
   - Plateau membership (loss + trades multi-criteria)
-  - Param classification (ACTIVE_PLATEAU / FROZEN_BOWL / FROZEN_MONOTONIC / FROZEN_CATEGORICAL)
+  - Param classification (ACTIVE_PLATEAU / FROZEN_BOWL / FROZEN_CATEGORICAL)
   - Adaptive early-stop (skip slots past boundary)
   - Activity floor (relative to baseline)
-  - Assembly TPE subspace construction
-  - select_best_export logic (best-loss + floor + baseline fallback)
+  - Assembly subspace construction (random sampling in plateau bounds)
+  - select_best_export with Occam-regularised top-K selection
   - JSON output schema
   - Categorical warning
   - End-to-end on synthetic loss surface
@@ -26,7 +26,7 @@ from optuna.distributions import CategoricalDistribution, FloatDistribution, Int
 
 from freqtrade.optimize.hyperopt.cw_sampler import (
     PLATEAU_INITIAL_SCAN_K,
-    CWSampler,
+    PlateauSampler,
     ParamProfile,
     ScanMeasure,
 )
@@ -55,23 +55,23 @@ def _make_study_with_trials(trials):
 
 class TestInit:
     def test_init_defaults(self):
-        s = CWSampler(seed=123)
+        s = PlateauSampler(seed=123)
         assert s._seed == 123
         assert s._phase == "init"
         assert s._min_active_trades_abs == 10
         assert s._min_trades_ratio == 0.7
 
     def test_init_with_defaults_dict(self):
-        s = CWSampler(seed=0, defaults={"a": 5, "b": 0.3})
+        s = PlateauSampler(seed=0, defaults={"a": 5, "b": 0.3})
         assert s._user_defaults == {"a": 5, "b": 0.3}
 
     def test_init_invalid_trades_ratio(self):
         with pytest.raises(ValueError):
-            CWSampler(seed=0, min_trades_ratio=2.5)
+            PlateauSampler(seed=0, min_trades_ratio=2.5)
 
     def test_init_tolerates_legacy_kwargs(self):
         # The old API had points_per_param, assembly_mode, etc. — should be silently absorbed
-        s = CWSampler(
+        s = PlateauSampler(
             seed=0, points_per_param=20, assembly_mode="mixing",
             performance_weight=0.5,  # not in new API
         )
@@ -82,25 +82,25 @@ class TestInit:
 
 class TestSamplingStep:
     def test_int_step_one(self):
-        s = CWSampler()
+        s = PlateauSampler()
         step = s._compute_sampling_step(IntDistribution(0, 10))
         # range = 10, divisor = 30 → max(1, 0) = 1
         assert step == 1.0
 
     def test_int_wide_range(self):
-        s = CWSampler()
+        s = PlateauSampler()
         step = s._compute_sampling_step(IntDistribution(0, 300))
         # range = 300, divisor = 30 → max(1, 10) = 10
         assert step == 10.0
 
     def test_float_with_step(self):
-        s = CWSampler()
+        s = PlateauSampler()
         step = s._compute_sampling_step(FloatDistribution(0.0, 0.10, step=0.001))
         # range = 0.10, divisor = 30 → 0.00333.., snapped to multiple of 0.001 = 0.003
         assert step == pytest.approx(0.003, abs=1e-6)
 
     def test_float_without_step(self):
-        s = CWSampler()
+        s = PlateauSampler()
         step = s._compute_sampling_step(FloatDistribution(0.0, 1.0))
         # native = 0.001 (range/1000), adaptive = max(0.001, 1/30=0.033)
         # snapped to multiple of 0.001 = 0.033
@@ -111,7 +111,7 @@ class TestSamplingStep:
 
 class TestScanSlots:
     def test_int_alternating_offsets(self):
-        s = CWSampler(max_scan_steps_per_dir=3)
+        s = PlateauSampler(max_scan_steps_per_dir=3)
         slots = s._build_scan_slots("x", IntDistribution(0, 100), default=50, step=1)
         # Expect (+1, 51), (-1, 49), (+2, 52), (-2, 48), (+3, 53), (-3, 47)
         offsets = [o for o, v in slots]
@@ -120,7 +120,7 @@ class TestScanSlots:
         assert values == [51, 49, 52, 48, 53, 47]
 
     def test_int_clips_at_boundary(self):
-        s = CWSampler(max_scan_steps_per_dir=5)
+        s = PlateauSampler(max_scan_steps_per_dir=5)
         # Default near lower bound: slots below should be dropped
         slots = s._build_scan_slots("x", IntDistribution(0, 100), default=2, step=1)
         # Below: -1 → 1, -2 → 0; -3..-5 → dropped (would be negative)
@@ -129,7 +129,7 @@ class TestScanSlots:
         assert len(values_below) == 2  # only -1, -2
 
     def test_categorical_one_slot_per_alternative(self):
-        s = CWSampler()
+        s = PlateauSampler()
         slots = s._build_scan_slots(
             "x", CategoricalDistribution(["a", "b", "c"]), default="b", step=1
         )
@@ -138,7 +138,7 @@ class TestScanSlots:
         assert "b" not in values  # default excluded
 
     def test_float_with_step_snapped(self):
-        s = CWSampler(max_scan_steps_per_dir=3)
+        s = PlateauSampler(max_scan_steps_per_dir=3)
         dist = FloatDistribution(0.0, 1.0, step=0.1)
         slots = s._build_scan_slots("x", dist, default=0.5, step=0.1)
         values = sorted({v for o, v in slots})
@@ -150,7 +150,7 @@ class TestScanSlots:
 
 class TestTolerance:
     def _make(self, baseline_loss=-1.0, scan_losses=None):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline_loss = baseline_loss
         if scan_losses is not None:
             s._scan_completed["x"] = [
@@ -186,13 +186,13 @@ class TestTolerance:
 
 class TestPlateauMembership:
     def test_loss_within_tolerance(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline_loss = -1.0
         assert s._is_in_plateau_loss(-1.05, tolerance=0.1)  # |0.05| < 0.1
         assert not s._is_in_plateau_loss(-1.2, tolerance=0.1)  # |0.2| > 0.1
 
     def test_activity_floor_passes(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._min_active_trades = 70
         assert s._passes_activity_floor(100)
         assert s._passes_activity_floor(70)
@@ -200,7 +200,7 @@ class TestPlateauMembership:
 
     def test_activity_floor_none_is_permissive(self):
         # If n_trades not recorded, fallback to "pass" so degradation is graceful
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._min_active_trades = 70
         assert s._passes_activity_floor(None)
 
@@ -209,7 +209,7 @@ class TestPlateauMembership:
 
 class TestClassification:
     def _make_primed_sampler(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline_loss = -1.0
         s._baseline_n_trades = 100
         s._min_active_trades = 70
@@ -317,7 +317,7 @@ class TestClassification:
 
 class TestCategoricalClassification:
     def test_categorical_picks_best_loss(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline_loss = -1.0
         s._baseline_n_trades = 100
         s._min_active_trades = 70
@@ -338,7 +338,7 @@ class TestCategoricalClassification:
 
 class TestAdaptiveEarlyStop:
     def _make_primed(self):
-        s = CWSampler(seed=0, plateau_initial_scan=2)
+        s = PlateauSampler(seed=0, plateau_initial_scan=2)
         s._baseline_loss = -1.0
         s._baseline_n_trades = 100
         s._min_active_trades = 70
@@ -387,7 +387,7 @@ class TestAdaptiveEarlyStop:
 
 class TestAssemblySubspace:
     def test_active_plateau_builds_subdistribution(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._param_distributions = {"x": IntDistribution(0, 100)}
         s._param_names = ["x"]
         s._baseline = {"x": 50}
@@ -406,7 +406,7 @@ class TestAssemblySubspace:
         assert "x" not in s._frozen_values
 
     def test_frozen_param_goes_to_frozen_values(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._param_distributions = {"x": IntDistribution(0, 100)}
         s._param_names = ["x"]
         s._baseline = {"x": 50}
@@ -422,7 +422,7 @@ class TestAssemblySubspace:
         assert "x" not in s._tpe_sub_distributions
 
     def test_degenerate_subspace_freezes(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._param_distributions = {"x": IntDistribution(0, 100)}
         s._param_names = ["x"]
         s._baseline = {"x": 50}
@@ -443,7 +443,7 @@ class TestAssemblySubspace:
 
 class TestSelectBestExport:
     def _make_primed(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline = {"x": 5}
         s._baseline_loss = -1.0
         s._baseline_n_trades = 100
@@ -499,7 +499,7 @@ class TestV7OccamRegularization:
     """Tests for v7 Occam-regularized export policy."""
 
     def _make_primed(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline = {"x": 5, "y": 10}
         s._baseline_loss = -1.0
         s._baseline_n_trades = 100
@@ -568,7 +568,7 @@ class TestV7OccamRegularization:
         assert n == 0
 
     def test_count_param_changes_categorical(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline = {"mode": "fast"}
         s._param_distributions = {"mode": CategoricalDistribution(["fast", "slow"])}
         s._param_names = ["mode"]
@@ -592,7 +592,7 @@ class TestV7OccamRegularization:
 
 class TestExportJsonSchema:
     def test_meta_has_required_fields(self):
-        s = CWSampler(seed=0, strategy_name="Foo")
+        s = PlateauSampler(seed=0, strategy_name="Foo")
         s._baseline = {"x": 5}
         s._baseline_loss = -1.0
         s._param_profiles = {
@@ -623,7 +623,7 @@ class TestExportJsonSchema:
 
 class TestCategoricalWarning:
     def test_numeric_categorical_warns(self, caplog):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._param_distributions = {
             "n": CategoricalDistribution([10, 15, 20, 25, 30])
         }
@@ -634,7 +634,7 @@ class TestCategoricalWarning:
                    for r in caplog.records)
 
     def test_string_categorical_no_warning(self, caplog):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._param_distributions = {
             "mode": CategoricalDistribution(["fast", "slow"])
         }
@@ -657,7 +657,7 @@ class TestEndToEnd:
         distributions = {"x": IntDistribution(0, 15)}
         defaults = {"x": 7}
         # 1 baseline + ~30 scan + ~30 assembly = 60 trials minimum
-        sampler = CWSampler(seed=42, total_epochs=80, defaults=defaults)
+        sampler = PlateauSampler(seed=42, total_epochs=80, defaults=defaults)
         study = optuna.create_study(sampler=sampler, direction="minimize")
         for _ in range(80):
             trial = study.ask(distributions)
@@ -680,7 +680,7 @@ class TestEndToEnd:
 
         distributions = {"x": IntDistribution(0, 10)}
         defaults = {"x": 5}
-        sampler = CWSampler(seed=42, total_epochs=60, defaults=defaults)
+        sampler = PlateauSampler(seed=42, total_epochs=60, defaults=defaults)
         study = optuna.create_study(sampler=sampler, direction="minimize")
         for _ in range(60):
             trial = study.ask(distributions)
@@ -699,20 +699,20 @@ class TestEndToEnd:
 class TestRegistration:
     def test_sampler_in_dict(self):
         from freqtrade.optimize.hyperopt.hyperopt_optimizer import optuna_samplers_dict
-        assert "CWSampler" in optuna_samplers_dict
+        assert "PlateauSampler" in optuna_samplers_dict
 
     def test_sampler_instantiation_via_dict(self):
         from freqtrade.optimize.hyperopt.hyperopt_optimizer import optuna_samplers_dict
-        cls = optuna_samplers_dict["CWSampler"]
+        cls = optuna_samplers_dict["PlateauSampler"]
         sampler = cls(seed=42)
-        assert isinstance(sampler, CWSampler)
+        assert isinstance(sampler, PlateauSampler)
 
 
 # ── Plateau classification edge cases ────────────────────────────────
 
 class TestClassificationEdgeCases:
     def test_no_scan_data_freezes(self):
-        s = CWSampler(seed=0)
+        s = PlateauSampler(seed=0)
         s._baseline_loss = -1.0
         s._param_names = ["x"]
         s._param_distributions = {"x": IntDistribution(0, 10)}
@@ -726,7 +726,7 @@ class TestClassificationEdgeCases:
 
     def test_initial_scan_k_respected(self):
         """Until K initial scan trials are completed, no early-stop happens."""
-        s = CWSampler(seed=0, plateau_initial_scan=PLATEAU_INITIAL_SCAN_K)
+        s = PlateauSampler(seed=0, plateau_initial_scan=PLATEAU_INITIAL_SCAN_K)
         s._baseline_loss = -1.0
         s._param_names = ["x"]
         s._param_distributions = {"x": IntDistribution(0, 100)}

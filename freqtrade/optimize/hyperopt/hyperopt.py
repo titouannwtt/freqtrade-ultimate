@@ -249,7 +249,7 @@ class Hyperopt:
         """If the active sampler exposes a record_trial_metrics() hook, push
         per-trial metrics into it.
 
-        Currently used by CWSampler to feed the activity floor: trials with too
+        Currently used by PlateauSampler to feed the activity floor: trials with too
         few trades have their plateau-detection performance score reduced
         proportionally, preventing inactive "do nothing" plateaus from winning.
 
@@ -326,7 +326,7 @@ class Hyperopt:
         val["current_epoch"] = current
         val["is_initial_point"] = current <= INITIAL_POINTS
 
-        # Annotate with CWSampler phase if applicable
+        # Annotate with PlateauSampler phase if applicable
         if self._is_cwsampler():
             sampler = self._get_cwsampler()
             if sampler:
@@ -446,10 +446,10 @@ class Hyperopt:
         self._save_run_end_metadata()
 
         if self.current_best_epoch:
-            # When CWSampler is used, the "best result" is NOT the lowest-loss
+            # When PlateauSampler is used, the "best result" is NOT the lowest-loss
             # epoch (which is often a scan trial with only 1 param changed).
             # Instead, export the robust_optima (plateau-anchored params) directly
-            # to the strategy file — this is the actual CWSampler output.
+            # to the strategy file — this is the actual PlateauSampler output.
             if self._is_cwsampler() and self._export_cwsampler_robust():
                 if not self.config.get("wfa_silent"):
                     self._show_cwsampler_result()
@@ -478,20 +478,20 @@ class Hyperopt:
             print("No epochs evaluated yet, no best result.")
 
     def _is_cwsampler(self) -> bool:
-        """Check if the current hyperopt uses PlateauSampler (or alias CWSampler)."""
-        return self.config.get("hyperopt_sampler") in ("CWSampler", "PlateauSampler")
+        """Check if the current hyperopt uses PlateauSampler (or its backward-compat alias CWSampler)."""
+        return self.config.get("hyperopt_sampler") in ("PlateauSampler", "CWSampler")
 
     def _get_cwsampler(self):
-        """Get the CWSampler instance from the Optuna study."""
-        from freqtrade.optimize.hyperopt.cw_sampler import CWSampler
+        """Get the PlateauSampler instance from the Optuna study."""
+        from freqtrade.optimize.hyperopt.cw_sampler import PlateauSampler
         if self.opt and hasattr(self.opt, "sampler"):
             sampler = self.opt.sampler
-            if isinstance(sampler, CWSampler):
+            if isinstance(sampler, PlateauSampler):
                 return sampler
         return None
 
     def _export_cwsampler_robust(self) -> bool:
-        """Export CWSampler's robust_optima directly to the strategy file.
+        """Export PlateauSampler's robust_optima directly to the strategy file.
 
         Returns True if robust params were successfully exported, False otherwise
         (falls back to standard best-epoch export).
@@ -503,12 +503,12 @@ class Hyperopt:
         robust = sampler.get_robust_optima()
         if not robust:
             logger.warning(
-                "CWSampler: no robust_optima available (scan may not have completed). "
+                "PlateauSampler: no robust_optima available (scan may not have completed). "
                 "Falling back to standard best-epoch export."
             )
             return False
 
-        # CWSampler v6: final export = best-loss trial across baseline + scan +
+        # PlateauSampler: final export = best-loss trial across baseline + scan +
         # assembly that passes the activity floor. The baseline (v1) is always in
         # the candidate pool, so if no v2 candidate beats it, v1 is exported
         # unchanged — no special hard-fallback logic required.
@@ -520,18 +520,18 @@ class Hyperopt:
                 sampler._best_robust_export = best_params  # consumed by _build_robust_params_dict
                 if src_trial == 0:
                     logger.info(
-                        f"CWSampler: best trial = baseline (#0) — v1 is preserved "
+                        f"PlateauSampler: best trial = baseline (#0) — v1 is preserved "
                         f"(loss={best_loss:.4f}, n_trades={best_n_trades}). "
                         f"No v2 improvement found."
                     )
                 else:
                     logger.info(
-                        f"CWSampler: best trial = #{src_trial} "
+                        f"PlateauSampler: best trial = #{src_trial} "
                         f"(loss={best_loss:.4f}, n_trades={best_n_trades})"
                     )
             except Exception as exc:  # never crash export over a safeguard
                 logger.warning(
-                    f"CWSampler: select_best_export failed, using unrefined "
+                    f"PlateauSampler: select_best_export failed, using unrefined "
                     f"robust_optima: {exc}"
                 )
 
@@ -547,7 +547,7 @@ class Hyperopt:
             import json as json_mod
             out_path.write_text(json_mod.dumps(data, indent=2, default=str))
             logger.info(
-                f"CWSampler: robust params exported to {out_path} "
+                f"PlateauSampler: robust params exported to {out_path} "
                 f"(auto-loaded on next backtest/live run)"
             )
         else:
@@ -556,7 +556,7 @@ class Hyperopt:
         return True
 
     def _show_cwsampler_result(self) -> None:
-        """Display CWSampler's robust result instead of the standard best-epoch."""
+        """Display PlateauSampler's robust result instead of the standard best-epoch."""
         sampler = self._get_cwsampler()
         if not sampler:
             return
@@ -567,7 +567,7 @@ class Hyperopt:
         n_plateaus = n_params - n_fallback
 
         print(f"\n{'='*70}")
-        print(f"CWSampler — Robust parameters (plateau-anchored)")
+        print(f"PlateauSampler — Robust parameters (plateau-anchored)")
         print(f"{'='*70}")
         print(f"\n  {n_plateaus}/{n_params} params found stable plateaus"
               f"{f', {n_fallback} fell back to baseline' if n_fallback else ''}\n")
@@ -581,7 +581,7 @@ class Hyperopt:
         )
         print(
             "  They replace the standard 'Best result' which is NOT meaningful "
-            "for CWSampler."
+            "for PlateauSampler."
         )
         print(f"{'='*70}\n")
 

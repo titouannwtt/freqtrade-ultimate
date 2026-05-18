@@ -313,10 +313,10 @@ AVAILABLE_CLI_OPTIONS = {
             "parameter spaces. GPSampler: Gaussian process — "
             "thorough but slow with >10 params. "
             "QMCSampler: pure exploration, no learning. "
-            "PlateauSampler (v8): adaptive scan around defaults + plateau "
-            "detection + restricted bayesian assembly. Designed for "
-            "robustness; pair with WalkForwardLoss. (CWSampler = legacy "
-            "alias for the same class.)"
+            "PlateauSampler: adaptive scan around defaults + plateau "
+            "detection + restricted random assembly + Occam-regularized "
+            "export. Designed for robustness; pair with WalkForwardLoss. "
+            "(CWSampler = legacy alias for the same class.)"
         ),
         choices=[
             "NSGAIIISampler",

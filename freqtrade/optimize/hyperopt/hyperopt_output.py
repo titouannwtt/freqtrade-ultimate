@@ -58,7 +58,7 @@ class HyperoptOutput:
     ) -> None:
         """Format one or multiple rows and add them"""
         stake_currency = config["stake_currency"]
-        # Detect CWSampler phase column on first result that has it
+        # Detect PlateauSampler phase column on first result that has it
         if not self._has_cw_phase and any(r.get("cw_phase") for r in results):
             self._has_cw_phase = True
         self._results.extend(results)
@@ -92,7 +92,7 @@ class HyperoptOutput:
                 # "Epoch":
                 f"{r['current_epoch']}/{total_epochs}",
             ]
-            # CWSampler phase column (only if detected)
+            # PlateauSampler phase column (only if detected)
             if self._has_cw_phase:
                 phase = r.get("cw_phase", "")
                 phase_styles = {

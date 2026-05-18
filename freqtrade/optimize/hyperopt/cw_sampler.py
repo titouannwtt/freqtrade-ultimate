@@ -1,5 +1,5 @@
 """
-PlateauSampler v8 — Coordinate-Wise Sampler for Freqtrade Hyperopt
+PlateauSampler — Coordinate-Wise Sampler for Freqtrade Hyperopt
 
 Inspired by Eric Lefort's approach to strategy parameter tuning, refined with
 techniques from:
@@ -30,24 +30,24 @@ Phases:
                   volatility (see _compute_tolerance).
 
   3. CLASSIFY   — Each parameter is classified as:
-                    ACTIVE_PLATEAU  — has a plateau around the default; explore
-                                      in [low, high] during assembly
-                    FROZEN_BOWL     — default is a local minimum (all neighbors
-                                      worse); fix at default
-                    FROZEN_MONOTONIC — loss decreases monotonically toward one
-                                      end of the range; fix at best value found
+                    ACTIVE_PLATEAU      — has a plateau around the default;
+                                          explore in [low, high] during assembly
+                    FROZEN_BOWL         — default is a local minimum (all
+                                          neighbors worse); fix at default
+                    FROZEN_CATEGORICAL  — for categorical params with no plateau
+                                          ordering; pick best loss observed
 
-  4. ASSEMBLY   — Restricted bayesian optimization. ACTIVE_PLATEAU params are
-                  sampled inside their detected plateau region using Optuna's
-                  TPESampler. FROZEN_* params are hardcoded at their fixed
-                  values. Begins with a random warmup (configurable) before
-                  switching to bayesian exploitation.
+  4. ASSEMBLY   — Uniform random sampling within the plateau bounds for
+                  ACTIVE_PLATEAU params; FROZEN_* params are hardcoded at
+                  their fixed values. Random (not TPE) because TPE converges
+                  to peaks within the plateau, which still overfits.
 
-  5. EXPORT     — The best loss across ALL completed trials (baseline + scan +
-                  assembly) that passes the activity floor is exported. If the
-                  baseline is the best (no improvement found), v1 is exported
-                  unchanged — no special hard-fallback logic needed because
-                  the baseline trial is always in the candidate pool.
+  5. EXPORT     — Occam-regularized selection: from the top-K trials by loss
+                  (within EXPORT_TOP_K_TOLERANCE of the absolute best), pick
+                  the one with the fewest params changed from baseline. If
+                  the baseline is the best (no improvement found), v1 is
+                  exported unchanged — the baseline trial is always in the
+                  candidate pool.
 
 A "plateau" requires BOTH:
   - |loss(n) - loss(baseline)| < adaptive_tolerance
@@ -58,20 +58,21 @@ values that fire far fewer trades than the baseline — a known over-fitting
 failure mode where the "plateau" is in fact a region of inactivity.
 
 Usage:
-  freqtrade hyperopt --sampler CWSampler [--epochs N] ...
+  freqtrade hyperopt --sampler PlateauSampler [--epochs N] ...
 
-Empirical limits this design addresses (validated 2026-05-17):
+Empirical limits this design addresses:
   - When v1 is near a Pareto front, no single-param perturbation helps.
-    Previously the sampler would pick degraded plateau-anchored values.
-    Now: ALL params can classify as FROZEN_BOWL → v1 is exported unchanged.
+    ALL params can classify as FROZEN_BOWL → v1 is exported unchanged
+    (the baseline trial is always in the candidate pool).
   - The activity floor enforces trade-count preservation on TRAIN. OOS
-    regime drift can still break this; deploy must include the manual
+    regime drift can still break this; deployers should keep the manual
     "v2 trade count >= 70% v1 trade count on holdout" check (see
     docs/hyperopt-cwsampler.md).
   - Loss-function alignment between v1 and v2 hyperopt remains critical:
     the plateau is anchored on the loss function the user passed. Using a
     different loss than what selected v1 produces plateaus optimized for a
-    different objective and rarely carries over.
+    different objective and rarely carries over. Pairing PlateauSampler
+    with WalkForwardLoss is the recommended default to mitigate this.
 """
 
 import json
@@ -140,19 +141,19 @@ MAX_SCAN_STEPS_PER_DIR = 10
 MIN_POINTS_PER_PARAM = 4
 
 # ── Assembly — random uniform sampling in plateau regions ────────────────
-# v7 change: replaced TPE (which converges to best-loss = overfit edge of plateau)
-# with random UNIFORM sampling within plateau bounds. Rationale: TPE's
-# convergence behavior is harmful in finance because the "best loss in train"
-# is almost always a peak that does not generalize. Random sampling produces
-# a spread of trials in the plateau; the export logic (below) then picks the
-# best loss AMONG TRIALS WITH FEW PARAMS CHANGED (Occam regularization).
-ASSEMBLY_RANDOM_WARMUP = 30  # kept for backward compat, unused in v7
+# Assembly uses uniform random sampling within plateau bounds. Rationale:
+# TPE's convergence behavior is harmful in finance because the "best loss
+# in train" is almost always a peak that does not generalize. Random
+# sampling produces a spread of trials in the plateau; the export logic
+# (below) then picks the best loss AMONG TRIALS WITH FEW PARAMS CHANGED
+# (Occam regularization).
+ASSEMBLY_RANDOM_WARMUP = 30  # kept for compatibility, unused with RandomSampler
 # Default fraction of total epochs allocated to assembly (rest = baseline + scan).
 DEFAULT_SCAN_BUDGET_RATIO = 0.6  # → assembly gets 1 - this = 40%
 
-# ── v7 Export Policy — Occam-regularized top-K selection ─────────────────
+# ── Export Policy — Occam-regularized top-K selection ─────────────────
 # Standard "best-loss" export overfits in finance: the trial with the lowest
-# training loss is almost always a peak that doesn't generalize. v7 fix:
+# training loss is almost always a peak that doesn't generalize. The fix:
 # from the top K trials (lowest loss), pick the one with the FEWEST params
 # changed from baseline. This is Occam's razor: simple changes generalize
 # better than complex ones.
@@ -199,7 +200,7 @@ class ParamProfile:
 
 
 class PlateauSampler(BaseSampler):
-    """Coordinate-Wise Sampler v6 — adaptive scan + restricted bayesian assembly.
+    """Coordinate-Wise Sampler — adaptive scan + restricted bayesian assembly.
 
     See module docstring for the full algorithm. Key external API:
       - record_trial_metrics(trial_number, n_trades): called by freqtrade after
@@ -783,7 +784,7 @@ class PlateauSampler(BaseSampler):
         # → reclassify as ACTIVE_PLATEAU with bounds [min(default, best), max(default, best)].
         # Rationale: FREEZING at best_value combines individual improvements into a
         # never-tested-together config that overfits dramatically on OOS (verified
-        # empirically on ConfV2 v6: combined-frozen → -56% holdout vs -2% baseline).
+        # empirically: the naive combined-frozen export overfit dramatically on OOS).
         # Treating these as ACTIVE with default-to-best range lets TPE explore the
         # interpolation cube; baseline + scan + assembly trials all enter the
         # candidate pool and the best-loss WITH activity floor wins.
@@ -847,10 +848,10 @@ class PlateauSampler(BaseSampler):
             if all_numeric:
                 logger.warning(
                     f"PlateauSampler: parameter '{name}' is a CategoricalParameter with "
-                    f"numeric choices {choices}. This is sub-optimal — CWSampler "
+                    f"numeric choices {choices}. This is sub-optimal — PlateauSampler "
                     f"cannot detect plateaus on categoricals (no neighbour ordering). "
                     f"Recommended: convert to IntParameter or FloatParameter to enable "
-                    f"plateau detection. CWSampler will continue but will treat this "
+                    f"plateau detection. PlateauSampler will continue but will treat this "
                     f"param as FROZEN_CATEGORICAL (best choice by loss, no plateau)."
                 )
 
@@ -859,7 +860,7 @@ class PlateauSampler(BaseSampler):
     def _init_assembly(self) -> None:
         """Build the restricted sub-distribution for random sampling.
 
-        v7 change: replaced TPESampler with uniform random sampling within
+        Uses RandomSampler instead of TPESampler with uniform random sampling within
         plateau bounds. See ASSEMBLY_RANDOM_WARMUP constant docstring for
         rationale (TPE converges to overfit peaks, random sampling produces
         a diverse pool that the Occam-regularized export picks from).
@@ -880,7 +881,7 @@ class PlateauSampler(BaseSampler):
             else:
                 self._frozen_values[name] = profile.best_value
 
-        # v7: use Optuna's RandomSampler instead of TPESampler. Random produces
+        # Use Optuna's RandomSampler instead of TPESampler. Random produces
         # a diverse pool that doesn't converge to a peak; the export logic
         # then applies Occam regularization to pick a robust trial.
         from optuna.samplers import RandomSampler
@@ -968,7 +969,7 @@ class PlateauSampler(BaseSampler):
     # ── EXPORT (final selection) ──────────────────────────────────────
 
     def select_best_export(self, study: Study) -> tuple[dict[str, Any], int, float, int]:
-        """Pick the best params dict to export — v7 Occam-regularized policy.
+        """Pick the best params dict to export — Occam-regularized policy.
 
         Returns (params, source_trial_number, loss, n_trades).
 
@@ -1034,7 +1035,7 @@ class PlateauSampler(BaseSampler):
         # Logging: explain the selection
         if chosen["loss"] != best_loss_abs:
             logger.info(
-                f"PlateauSampler: v7 Occam regularization selected trial #{chosen['trial_number']} "
+                f"PlateauSampler: Occam regularization selected trial #{chosen['trial_number']} "
                 f"(loss={chosen['loss']:.4f}, n_changes={chosen['n_changes']}/{len(self._baseline)}) "
                 f"over absolute-best (loss={best_loss_abs:.4f}). "
                 f"Reason: fewer params changed = less overfitting risk."
@@ -1232,7 +1233,7 @@ class PlateauSampler(BaseSampler):
 
 
 # ── Backward-compat alias ─────────────────────────────────────────────
-# v8 renamed CWSampler → PlateauSampler. The old name remains as an alias
-# so existing `--sampler CWSampler` invocations keep working. Internally
-# both names refer to the same class.
+# The previous name CWSampler remains as an alias so existing
+# `--sampler CWSampler` invocations and `from ... import CWSampler` calls
+# keep working. Internally both names refer to the same class.
 CWSampler = PlateauSampler

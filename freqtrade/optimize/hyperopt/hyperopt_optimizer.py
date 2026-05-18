@@ -62,7 +62,7 @@ optuna_samplers_dict = {
     "NSGAIIISampler": optuna.samplers.NSGAIIISampler,
     "QMCSampler": optuna.samplers.QMCSampler,
     "PlateauSampler": PlateauSampler,
-    "CWSampler": CWSampler,  # alias for backward compat (v6/v7 name)
+    "CWSampler": CWSampler,  # backward-compat alias for the previous name
 }
 
 log_queue: Any
@@ -434,7 +434,7 @@ class HyperOptimizer:
     def _extract_strategy_defaults(self) -> dict:
         """Collect the default values of every IHyperOptParameter in the strategy.
 
-        Used by the CWSampler to anchor its baseline on hand-tuned defaults rather
+        Used by the PlateauSampler to anchor its baseline on hand-tuned defaults rather
         than the midpoint of each parameter's range. Returns {param_name: default_value}.
 
         Reads `param.value` AT INIT TIME — before the hyperopt mutates anything.
@@ -481,8 +481,8 @@ class HyperOptimizer:
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state, n_startup_trials=INITIAL_POINTS
                     )
-                elif o_sampler in ("CWSampler", "PlateauSampler"):
-                    # CWSampler needs the epoch budget and hand-tuned defaults to:
+                elif o_sampler in ("PlateauSampler", "CWSampler"):
+                    # PlateauSampler needs the epoch budget and hand-tuned defaults to:
                     #  - self-adjust points_per_param to fit scan + assembly
                     #  - use defaults as baseline anchor (vs midpoint fallback)
                     # Early-stop is INCOMPATIBLE with the coordinate-wise scan
@@ -490,7 +490,7 @@ class HyperOptimizer:
                     # before scan completes, plateau detection is skipped).
                     if self.es_epochs and self.es_epochs > 0:
                         raise OperationalException(
-                            "CWSampler is incompatible with --early-stop "
+                            "PlateauSampler is incompatible with --early-stop "
                             f"(currently set to {self.es_epochs}). Either omit "
                             "--early-stop or pass --early-stop 0. The sampler "
                             "manages its own scan/assembly schedule and needs the "
@@ -509,7 +509,7 @@ class HyperOptimizer:
                     if epochs_cw < min_budget:
                         recommended = max(min_budget * 2, 1 + n_params_cw * 20 * 17 // 10)
                         raise OperationalException(
-                            f"CWSampler: --epochs {epochs_cw} is below the minimum "
+                            f"PlateauSampler: --epochs {epochs_cw} is below the minimum "
                             f"viable budget for {n_params_cw} optimizable parameters. "
                             f"Minimum = 1 + {n_params_cw} × {CW_MIN_POINTS} = {min_budget} "
                             f"(just enough to scan all params at floor density). "
@@ -534,7 +534,7 @@ class HyperOptimizer:
                     )
                     if cw_defaults:
                         logger.info(
-                            f"CWSampler: passed {len(cw_defaults)} hand-tuned defaults "
+                            f"PlateauSampler: passed {len(cw_defaults)} hand-tuned defaults "
                             f"as baseline anchors"
                         )
                 else:
