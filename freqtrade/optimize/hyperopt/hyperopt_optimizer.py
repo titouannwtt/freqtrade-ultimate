@@ -52,7 +52,7 @@ INITIAL_POINTS = 30
 
 MAX_LOSS = 100000  # just a big enough number to be bad result in loss optimization
 
-from freqtrade.optimize.hyperopt.cw_sampler import CWSampler, PlateauSampler
+from freqtrade.optimize.hyperopt.plateau_sampler import PlateauSampler
 
 optuna_samplers_dict = {
     "TPESampler": optuna.samplers.TPESampler,
@@ -62,7 +62,6 @@ optuna_samplers_dict = {
     "NSGAIIISampler": optuna.samplers.NSGAIIISampler,
     "QMCSampler": optuna.samplers.QMCSampler,
     "PlateauSampler": PlateauSampler,
-    "CWSampler": CWSampler,  # backward-compat alias for the previous name
 }
 
 log_queue: Any
@@ -481,7 +480,7 @@ class HyperOptimizer:
                     sampler = optuna_samplers_dict[o_sampler](
                         seed=random_state, n_startup_trials=INITIAL_POINTS
                     )
-                elif o_sampler in ("PlateauSampler", "CWSampler"):
+                elif o_sampler == "PlateauSampler":
                     # PlateauSampler needs the epoch budget and hand-tuned defaults to:
                     #  - self-adjust points_per_param to fit scan + assembly
                     #  - use defaults as baseline anchor (vs midpoint fallback)
@@ -500,7 +499,7 @@ class HyperOptimizer:
                     # scan (1 baseline + n_params × MIN_POINTS_PER_PARAM=5). Below this,
                     # the sampler can't even cover all params with floor density and
                     # plateau detection is meaningless.
-                    from freqtrade.optimize.hyperopt.cw_sampler import (
+                    from freqtrade.optimize.hyperopt.plateau_sampler import (
                         MIN_POINTS_PER_PARAM as CW_MIN_POINTS,
                     )
                     n_params_cw = len(self.dimensions)
@@ -514,7 +513,7 @@ class HyperOptimizer:
                             f"Minimum = 1 + {n_params_cw} × {CW_MIN_POINTS} = {min_budget} "
                             f"(just enough to scan all params at floor density). "
                             f"Recommended = {recommended} (proper scan + assembly). "
-                            f"See docs/hyperopt-cwsampler.md for budget guidance."
+                            f"See docs/hyperopt-plateausampler.md for budget guidance."
                         )
                     cw_defaults = self._extract_strategy_defaults()
                     # Pass output_dir + strategy_name so the sampler auto-dumps

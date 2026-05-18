@@ -327,10 +327,10 @@ class Hyperopt:
         val["is_initial_point"] = current <= INITIAL_POINTS
 
         # Annotate with PlateauSampler phase if applicable
-        if self._is_cwsampler():
-            sampler = self._get_cwsampler()
+        if self._is_plateau_sampler():
+            sampler = self._get_plateau_sampler()
             if sampler:
-                val["cw_phase"] = sampler.get_phase()
+                val["plateau_phase"] = sampler.get_phase()
 
         logger.debug("Optimizer epoch evaluated: %s", val)
 
@@ -450,9 +450,9 @@ class Hyperopt:
             # epoch (which is often a scan trial with only 1 param changed).
             # Instead, export the robust_optima (plateau-anchored params) directly
             # to the strategy file — this is the actual PlateauSampler output.
-            if self._is_cwsampler() and self._export_cwsampler_robust():
+            if self._is_plateau_sampler() and self._export_plateausampler_robust():
                 if not self.config.get("wfa_silent"):
-                    self._show_cwsampler_result()
+                    self._show_plateau_sampler_result()
                     self._print_post_run_summary(self.current_best_epoch)
                     self._export_html_report()
             else:
@@ -477,26 +477,26 @@ class Hyperopt:
             # a chance to be evaluated.
             print("No epochs evaluated yet, no best result.")
 
-    def _is_cwsampler(self) -> bool:
-        """Check if the current hyperopt uses PlateauSampler (or its backward-compat alias CWSampler)."""
-        return self.config.get("hyperopt_sampler") in ("PlateauSampler", "CWSampler")
+    def _is_plateau_sampler(self) -> bool:
+        """Check if the current hyperopt uses PlateauSampler."""
+        return self.config.get("hyperopt_sampler") == "PlateauSampler"
 
-    def _get_cwsampler(self):
+    def _get_plateau_sampler(self):
         """Get the PlateauSampler instance from the Optuna study."""
-        from freqtrade.optimize.hyperopt.cw_sampler import PlateauSampler
+        from freqtrade.optimize.hyperopt.plateau_sampler import PlateauSampler
         if self.opt and hasattr(self.opt, "sampler"):
             sampler = self.opt.sampler
             if isinstance(sampler, PlateauSampler):
                 return sampler
         return None
 
-    def _export_cwsampler_robust(self) -> bool:
+    def _export_plateausampler_robust(self) -> bool:
         """Export PlateauSampler's robust_optima directly to the strategy file.
 
         Returns True if robust params were successfully exported, False otherwise
         (falls back to standard best-epoch export).
         """
-        sampler = self._get_cwsampler()
+        sampler = self._get_plateau_sampler()
         if not sampler:
             return False
 
@@ -555,9 +555,9 @@ class Hyperopt:
 
         return True
 
-    def _show_cwsampler_result(self) -> None:
+    def _show_plateau_sampler_result(self) -> None:
         """Display PlateauSampler's robust result instead of the standard best-epoch."""
-        sampler = self._get_cwsampler()
+        sampler = self._get_plateau_sampler()
         if not sampler:
             return
 

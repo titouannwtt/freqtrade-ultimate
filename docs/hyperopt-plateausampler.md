@@ -1,9 +1,5 @@
 # PlateauSampler — Coordinate-Wise Sampler for Robustness-First Hyperopt
 
-> **Naming note**: PlateauSampler was previously called `CWSampler`. The old name
-> is preserved as an alias — `--sampler CWSampler` and `from ... import CWSampler`
-> both still work. All new docs and logs use the `PlateauSampler` name.
-
 A custom Optuna sampler that prioritises **parameter robustness over peak performance**.
 Designed to attack the overfitting problem that plagues strategy hyperopt: instead of
 hunting for the single best epoch on training data, it searches for parameter values that
@@ -460,7 +456,7 @@ plateau detection. To make this trivially consumable, the sampler **automaticall
 dumps it to a freqtrade-loadable JSON** at the scan→assembly transition:
 
 ```
-user_data/hyperopt_results/cwsampler_robust_<strategy_name>.json
+user_data/hyperopt_results/plateausampler_robust_<strategy_name>.json
 ```
 
 Format (identical to freqtrade's `hyperopt-show` output schema):
@@ -480,7 +476,7 @@ Format (identical to freqtrade's `hyperopt-show` output schema):
   },
   "ft_stratparam_v": 1,
   "export_time": "2026-05-16T15:33:50.000+00:00",
-  "cwsampler_meta": {
+  "plateausampler_meta": {
     "n_params": 11,
     "n_plateaus": 9,
     "n_baseline_fallback": 2,
@@ -492,15 +488,15 @@ Format (identical to freqtrade's `hyperopt-show` output schema):
 The log line at scan→assembly transition tells you exactly where to find it:
 
 ```
-PlateauSampler: robust_optima dumped to user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json
+PlateauSampler: robust_optima dumped to user_data/hyperopt_results/plateausampler_robust_ExhaustionHunterV2.json
            — this is the canonical v2 params file. To deploy:
-           `cp user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json
+           `cp user_data/hyperopt_results/plateausampler_robust_ExhaustionHunterV2.json
               user_data/strategies/exhaustionhunterv2.json`
 ```
 
 ### Deploying the v2
 
-1. Read the dumped JSON to inspect `cwsampler_meta`. If `n_plateaus / n_params` is
+1. Read the dumped JSON to inspect `plateausampler_meta`. If `n_plateaus / n_params` is
    ≥ 0.7, the sampler has high confidence. If < 0.5, most params fell back to
    baseline — the PlateauSampler didn't find much room for improvement.
 2. **Backtest the v2 params on OOS** (the holdout window NOT used for hyperopt).
@@ -521,7 +517,7 @@ PlateauSampler: robust_optima dumped to user_data/hyperopt_results/cwsampler_rob
 6. To deploy, copy the dumped file as the strategy's co-located .json
    (filename = lowercase strategy class name):
    ```bash
-   cp user_data/hyperopt_results/cwsampler_robust_ExhaustionHunterV2.json \
+   cp user_data/hyperopt_results/plateausampler_robust_ExhaustionHunterV2.json \
       user_data/strategies/exhaustionhunterv2.json
    ```
    Freqtrade will auto-load these params on next run.
@@ -647,10 +643,10 @@ with the same total epoch budget.
 
 ## Implementation references
 
-- Sampler source : `freqtrade/optimize/hyperopt/cw_sampler.py`
+- Sampler source : `freqtrade/optimize/hyperopt/plateau_sampler.py`
 - Integration   : `freqtrade/optimize/hyperopt/hyperopt_optimizer.py` (function
   `get_optimizer`, branch `o_sampler == "PlateauSampler"`)
-- Final export hook : `freqtrade/optimize/hyperopt/hyperopt.py:_export_cwsampler_robust`
+- Final export hook : `freqtrade/optimize/hyperopt/hyperopt.py:_export_plateausampler_robust`
   (calls `PlateauSampler.select_best_export` to apply Occam-regularised selection
   before writing the v2 JSON)
 - Constants     :

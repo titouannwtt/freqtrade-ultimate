@@ -315,8 +315,7 @@ AVAILABLE_CLI_OPTIONS = {
             "QMCSampler: pure exploration, no learning. "
             "PlateauSampler: adaptive scan around defaults + plateau "
             "detection + restricted random assembly + Occam-regularized "
-            "export. Designed for robustness; pair with WalkForwardLoss. "
-            "(CWSampler = legacy alias for the same class.)"
+            "export. Designed for robustness; pair with WalkForwardLoss."
         ),
         choices=[
             "NSGAIIISampler",
@@ -326,7 +325,6 @@ AVAILABLE_CLI_OPTIONS = {
             "GPSampler",
             "QMCSampler",
             "PlateauSampler",
-            "CWSampler",  # alias for backward compat
         ],
         metavar="NAME",
     ),

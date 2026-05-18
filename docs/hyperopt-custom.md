@@ -229,7 +229,7 @@ When omitted, the fork defaults to `NSGAIIISampler`.
   then refines in an assembly phase. Use it as a **second pass** after TPE / NSGA-III
   found something interesting, to validate that the chosen parameters sit on a
   plateau rather than an isolated peak (overfitting indicator). Incompatible with
-  `--early-stop`. See [docs/hyperopt-cwsampler.md](hyperopt-cwsampler.md) for the
+  `--early-stop`. See [docs/hyperopt-plateausampler.md](hyperopt-plateausampler.md) for the
   full design and use-case guide.
 
 ---

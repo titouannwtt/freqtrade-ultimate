@@ -16,7 +16,7 @@ class HyperoptOutput:
     def __init__(self, streaming=False) -> None:
         self._results: list[Any] = []
         self._streaming = streaming
-        self._has_cw_phase = False
+        self._has_plateau_phase = False
         self.__init_table()
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
@@ -30,7 +30,7 @@ class HyperoptOutput:
         # Headers
         self.table.add_column("Best", justify="left")
         self.table.add_column("Epoch", justify="right")
-        if self._has_cw_phase:
+        if self._has_plateau_phase:
             self.table.add_column("Phase", justify="center")
         self.table.add_column("Trades", justify="right")
         self.table.add_column("Win  Draw  Loss  Win%", justify="right")
@@ -59,8 +59,8 @@ class HyperoptOutput:
         """Format one or multiple rows and add them"""
         stake_currency = config["stake_currency"]
         # Detect PlateauSampler phase column on first result that has it
-        if not self._has_cw_phase and any(r.get("cw_phase") for r in results):
-            self._has_cw_phase = True
+        if not self._has_plateau_phase and any(r.get("plateau_phase") for r in results):
+            self._has_plateau_phase = True
         self._results.extend(results)
 
         max_rows: int | None = None
@@ -93,8 +93,8 @@ class HyperoptOutput:
                 f"{r['current_epoch']}/{total_epochs}",
             ]
             # PlateauSampler phase column (only if detected)
-            if self._has_cw_phase:
-                phase = r.get("cw_phase", "")
+            if self._has_plateau_phase:
+                phase = r.get("plateau_phase", "")
                 phase_styles = {
                     "baseline": "[dim]BASE[/dim]",
                     "scan": "[cyan]SCAN[/cyan]",

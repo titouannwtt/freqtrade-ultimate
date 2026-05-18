@@ -24,7 +24,7 @@ import optuna
 import pytest
 from optuna.distributions import CategoricalDistribution, FloatDistribution, IntDistribution
 
-from freqtrade.optimize.hyperopt.cw_sampler import (
+from freqtrade.optimize.hyperopt.plateau_sampler import (
     PLATEAU_INITIAL_SCAN_K,
     PlateauSampler,
     ParamProfile,
@@ -607,7 +607,7 @@ class TestExportJsonSchema:
         assert data["strategy_name"] == "Foo"
         assert data["params"]["buy"] == {"x": 6}
         assert data["ft_stratparam_v"] == 1
-        meta = data["cwsampler_meta"]
+        meta = data["plateausampler_meta"]
         assert meta["version"] == 6
         assert meta["n_params"] == 1
         assert meta["n_active_plateau"] == 1

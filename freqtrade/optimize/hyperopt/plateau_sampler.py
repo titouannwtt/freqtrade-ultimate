@@ -67,7 +67,7 @@ Empirical limits this design addresses:
   - The activity floor enforces trade-count preservation on TRAIN. OOS
     regime drift can still break this; deployers should keep the manual
     "v2 trade count >= 70% v1 trade count on holdout" check (see
-    docs/hyperopt-cwsampler.md).
+    docs/hyperopt-plateausampler.md).
   - Loss-function alignment between v1 and v2 hyperopt remains critical:
     the plateau is anchored on the loss function the user passed. Using a
     different loss than what selected v1 produces plateaus optimized for a
@@ -1114,7 +1114,7 @@ class PlateauSampler(BaseSampler):
     def _build_robust_params_dict(self, n_fallback: int) -> dict:
         """Build the freqtrade-loadable JSON params dict.
 
-        Compatible with the old API: hyperopt.py:_export_cwsampler_robust calls
+        Compatible with the old API: hyperopt.py:_export_plateausampler_robust calls
         this to write the strategy .json file. The actual params come from
         select_best_export (called by hyperopt.py before this).
         """
@@ -1139,7 +1139,7 @@ class PlateauSampler(BaseSampler):
             },
             "ft_stratparam_v": 1,
             "export_time": datetime.now(UTC).isoformat(),
-            "cwsampler_meta": {
+            "plateausampler_meta": {
                 "version": 6,
                 "n_params": len(self._param_profiles),
                 "n_active_plateau": n_active,
@@ -1173,7 +1173,7 @@ class PlateauSampler(BaseSampler):
         try:
             data = self._build_robust_params_dict(n_fallback)
             self._output_dir.mkdir(parents=True, exist_ok=True)
-            archive_path = self._output_dir / f"cwsampler_robust_{self._strategy_name}.json"
+            archive_path = self._output_dir / f"plateausampler_robust_{self._strategy_name}.json"
             archive_path.write_text(json.dumps(data, indent=2, default=str))
             logger.info(f"PlateauSampler: robust_optima archived to {archive_path}")
         except Exception as exc:  # pragma: no cover
@@ -1230,10 +1230,3 @@ class PlateauSampler(BaseSampler):
         if isinstance(v, np.floating):
             return float(v)
         return v
-
-
-# ── Backward-compat alias ─────────────────────────────────────────────
-# The previous name CWSampler remains as an alias so existing
-# `--sampler CWSampler` invocations and `from ... import CWSampler` calls
-# keep working. Internally both names refer to the same class.
-CWSampler = PlateauSampler
