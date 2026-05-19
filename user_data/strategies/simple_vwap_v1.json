@@ -1,0 +1,45 @@
+{
+  "strategy_name": "simple_vwap_v1",
+  "params": {
+    "roi": {
+      "0": 100.0
+    },
+    "stoploss": {
+      "stoploss": -1.0
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": 0.0,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "buy": {
+      "cci_size": 160,
+      "cumulative_entry": 8,
+      "overbuy_factor": 1.0,
+      "partial_fill_compensation_scale": 0.4,
+      "use_custom_stake": true,
+      "use_volatility_stake": true,
+      "volatility_max_filter": 0.102,
+      "volatility_size": 15,
+      "vwap_size": 5,
+      "vwap_std": 1.05,
+      "ema_shift": 50,
+      "ema_size": 180,
+      "initial_safety_order_trigger": -0.012,
+      "max_so_multiplier_orig": 4,
+      "safety_order_step_scale": 3,
+      "safety_order_volume_scale": 1.8,
+      "tradable_balance_ratio": 0.35
+    },
+    "sell": {
+      "my_custom_stoploss": -0.37
+    },
+    "protection": {},
+    "max_open_trades": {
+      "max_open_trades": 40
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-06-18 15:22:33.788731+00:00"
+}

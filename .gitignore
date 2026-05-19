@@ -229,3 +229,19 @@ config.json
 
 # Large binary dumps (analysis artefacts)
 *.pkl
+
+# Showcase strategies (fork-specific public examples)
+!user_data/strategies/simple_vwap_v1.json
+!user_data/strategies/simple_vwap_v1_readme.md
+!user_data/strategies/simple_vwap_v1_analysis.md
+!user_data/strategies/kac_index_v1_readme.md
+!user_data/strategies/kac_index_v1_analysis.md
+!user_data/strategies/kac_index_v2.json
+!user_data/strategies/kac_index_v2_readme.md
+!user_data/strategies/kac_index_v2_analysis.md
+
+# Fork project metadata
+!CHANGELOG.md
+!CODE_OF_CONDUCT.md
+!CONTRIBUTING.md
+!.github/**/*.md

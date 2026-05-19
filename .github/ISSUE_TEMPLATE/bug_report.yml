@@ -1,0 +1,66 @@
+name: 🐛 Bug report
+description: Report a bug in fork-specific code (caching daemons, hyperopt extensions, Hyperliquid handling, REST API, etc.)
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. For bugs in upstream Freqtrade (not fork-specific), please report on [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) — those land in this fork on the next upstream merge.
+  - type: input
+    id: fork_commit
+    attributes:
+      label: Freqtrade Ultimate commit / version
+      description: Output of `git rev-parse --short HEAD` or release tag.
+      placeholder: "e.g. abc1234 or v1.0.0-ff"
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      placeholder: "e.g. 3.11.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: exchange
+    attributes:
+      label: Exchange
+      options:
+        - Hyperliquid
+        - Binance
+        - Bybit
+        - Kraken
+        - Other (specify in description)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal repro. Config snippet (redact API keys), command, error.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. Redact anything sensitive.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I confirmed this is fork-specific and not an upstream Freqtrade bug.
+          required: true
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true

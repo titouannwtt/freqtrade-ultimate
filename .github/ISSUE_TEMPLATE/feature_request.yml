@@ -1,0 +1,42 @@
+name: ✨ Feature request
+description: Propose a new feature or enhancement to fork-specific code
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening: if this feature would benefit all Freqtrade users (not just this fork's audience), consider proposing it on [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this feature solve? What's the friction today?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should it work? CLI flag? Config key? New API endpoint?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Multi-bot infrastructure (ftcache, ftpairlists, fleet)
+        - Hyperopt / validation
+        - Hyperliquid-specific
+        - Pairlists / risk
+        - Observability / REST API
+        - Strategy dev backend
+        - Documentation
+        - Other
+    validations:
+      required: true

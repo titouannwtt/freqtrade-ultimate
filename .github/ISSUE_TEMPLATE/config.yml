@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💎 Freqtrade France community
+    url: https://buymeacoffee.com/freqtrade_france
+    about: French-speaking algo trading community. Tutorials, member-only strategies, Discord.
+  - name: 🐦 Twitter / X
+    url: https://x.com/MoutonCrypto
+    about: Reach out on Twitter for quick questions or feedback.
+  - name: 📖 Upstream Freqtrade
+    url: https://github.com/freqtrade/freqtrade
+    about: For bugs in the upstream Freqtrade codebase (not fork-specific), please report there.
