@@ -175,6 +175,10 @@ user_data/strategies/*
 !backtest_configs/futures_hyperliquid_100.json
 !backtest_configs/futures_hyperliquid_173.json
 !backtest_configs/futures_hyperliquid_30.json
+!backtest_configs/futures_binance.json
+!backtest_configs/futures_binance_fix.json
+!backtest_configs/futures_bybit.json
+!backtest_configs/USDT_100_gateio.json
 database/
 
 # Hyperliquid OHLCV data (tracked for fork users — historical data beyond HL's 5000-candle limit)
