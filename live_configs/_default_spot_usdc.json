@@ -9,6 +9,10 @@
     "cancel_open_orders_on_exit": true,
     "trading_mode": "futures",
     "margin_mode": "isolated",
+    "position_coordination": {
+        "mode": "strict",
+        "exchange_check": "warn"
+    },
     "stake_amount_override_is_enabled": true,
     "process_only_new_candles": true,
     "unfilledtimeout": {
