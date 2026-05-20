@@ -5,9 +5,21 @@ Lets several bots that share the same wallet / dry-run group avoid stacking
 positions on the same pair, and lets them reconcile leverage when they do.
 
 Coordination source of truth is the *trade database of sibling bots* in the
-same environment (same exchange + same ``dry_run`` value). The exchange is only
-used as a non-blocking final cross-check (a spot balance does not necessarily
-map to an open trade, so it cannot be authoritative).
+same environment. The exchange is only used as a non-blocking final cross-check
+(a spot balance does not necessarily map to an open trade, so it cannot be
+authoritative).
+
+What counts as a sibling is controlled by ``position_coordination.scope``:
+
+* ``wallet``   — (default) only bots trading the *same wallet/account* on the
+                 exchange coordinate. Bots split across distinct wallets of the
+                 same exchange (separate API keys / wallet addresses,
+                 sub-accounts, or several accounts) stay independent. Wallet
+                 identity is auto-detected from the credentials already in the
+                 config (Hyperliquid wallet address or API key), or set
+                 explicitly with ``position_coordination.account``.
+* ``exchange`` — every bot on the exchange (same ``dry_run``) coordinates,
+                 regardless of wallet (fleet-wide "one position per coin").
 
 Three modes (config key ``position_coordination.mode``):
 
@@ -24,6 +36,7 @@ close (first to acquire the lock wins).
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
 import re
@@ -33,6 +46,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import rapidjson
 
 from freqtrade.misc import deep_merge_dicts
 
@@ -52,9 +67,24 @@ LEV_KEEP = "keep"
 LEV_BLOCK = "block"
 VALID_LEVERAGE_POLICIES = (LEV_LOWEST, LEV_HIGHEST, LEV_KEEP, LEV_BLOCK)
 
+# Coordination scope — which bots count as siblings on a given exchange.
+# ``wallet``   : only bots that trade the *same wallet/account* coordinate. Bots
+#                on distinct wallets of the same exchange (different API keys /
+#                wallet addresses, sub-accounts, or simply several accounts) are
+#                independent and never block one another.
+# ``exchange`` : every bot on the exchange coordinates regardless of wallet
+#                (fleet-wide "one position per coin" across wallets).
+SCOPE_WALLET = "wallet"
+SCOPE_EXCHANGE = "exchange"
+VALID_SCOPES = (SCOPE_WALLET, SCOPE_EXCHANGE)
+
 # Exchange cross-check behaviour
 EXCHANGE_WARN = "warn"
 EXCHANGE_BLOCK = "block"
+
+# Tolerant parse mode for sibling configs (freqtrade allows comments / trailing
+# commas; access files where the wallet identity lives often use them).
+_PARSE_MODE = rapidjson.PM_COMMENTS | rapidjson.PM_TRAILING_COMMAS
 
 # Intent markers older than this (seconds) are ignored / cleaned up. Covers the
 # window between "a sibling decided to open" and "its trade is committed to DB",
@@ -114,7 +144,8 @@ def _resolve_config_fields(path: Path, depth: int = 0) -> dict[str, Any]:
     if depth > 5:
         return {}
     try:
-        data = json.loads(path.read_text())
+        with path.open("r") as fh:
+            data = rapidjson.load(fh, parse_mode=_PARSE_MODE)
     except (OSError, ValueError):
         return {}
     merged: dict[str, Any] = {}
@@ -123,6 +154,28 @@ def _resolve_config_fields(path: Path, depth: int = 0) -> dict[str, Any]:
         deep_merge_dicts(_resolve_config_fields(parent / sub, depth + 1), merged)
     deep_merge_dicts(data, merged)
     return merged
+
+
+def _account_fingerprint(merged: dict[str, Any]) -> str:
+    """Stable, non-secret identifier of the wallet/account a bot trades on.
+
+    Two bots trading the *same* wallet share a fingerprint; bots on distinct
+    wallets of the same exchange get distinct ones. An explicit
+    ``position_coordination.account`` label wins; otherwise it is derived from the
+    credentials already in the (merged) config — the Hyperliquid wallet address or
+    the exchange API key — hashed so no secret is ever stored, logged, or written
+    to a lock/marker path.
+    """
+    coord = merged.get("position_coordination", {}) or {}
+    label = coord.get("account")
+    if label:
+        return "label:" + _safe_name(str(label))
+    ex = merged.get("exchange", {}) or {}
+    raw = ex.get("walletAddress") or ex.get("wallet_address") or ex.get("key") or ""
+    raw = str(raw).strip().lower()
+    if not raw:
+        return "default"
+    return "acct:" + hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class FleetRegistry:
@@ -140,6 +193,10 @@ class FleetRegistry:
         coord = config.get("position_coordination", {}) or {}
         self._registry_setting = coord.get("registry")
         self._exclude = set(coord.get("exclude", []) or [])
+        self._scope = coord.get("scope", SCOPE_WALLET)
+        if self._scope not in VALID_SCOPES:
+            self._scope = SCOPE_WALLET
+        self._self_account = _account_fingerprint(config)
 
         config_files = config.get("config_files") or []
         self._config_dir: Path | None = (
@@ -168,6 +225,9 @@ class FleetRegistry:
             exchange = str(merged.get("exchange", {}).get("name", "")).lower()
             dry_run = bool(merged.get("dry_run", False))
             if exchange != self._self_exchange or dry_run != self._self_dry_run:
+                continue
+            # Wallet scope: only bots on the *same* wallet/account are siblings.
+            if self._scope == SCOPE_WALLET and _account_fingerprint(merged) != self._self_account:
                 continue
             db_path = _db_url_to_path(merged.get("db_url", ""), self._config_dir)
             if db_path is None:
@@ -250,6 +310,10 @@ class PositionCoordinator:
                 self.leverage_policy,
             )
             self.leverage_policy = LEV_KEEP
+        self.scope = coord.get("scope", SCOPE_WALLET)
+        if self.scope not in VALID_SCOPES:
+            logger.warning("Coordination: invalid scope '%s', falling back to 'wallet'", self.scope)
+            self.scope = SCOPE_WALLET
         self.exchange_check = coord.get("exchange_check", EXCHANGE_WARN)
 
         self.enabled = self.mode != MODE_OFF
@@ -260,8 +324,13 @@ class PositionCoordinator:
 
         self._registry = FleetRegistry(config)
 
+        # Locks and intent markers are scoped to the same group as sibling
+        # discovery, so two bots on distinct wallets never share a lock or read
+        # each other's intent markers under ``wallet`` scope.
+        self._account = _account_fingerprint(config)
+        group_token = _safe_name(self._account) if self.scope == SCOPE_WALLET else "_exchange"
         user_dir = Path(config.get("user_data_dir", "user_data"))
-        self._coord_dir = user_dir / "coordination" / self._exchange_name / self._env
+        self._coord_dir = user_dir / "coordination" / self._exchange_name / self._env / group_token
         self._intent_dir = self._coord_dir / "intents"
         self._last_warn: dict[str, float] = {}
 

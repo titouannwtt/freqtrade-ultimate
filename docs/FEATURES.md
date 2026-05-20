@@ -239,11 +239,25 @@ trades are read straight from their sqlite DBs (read-only, WAL-safe). The live e
 used only as a non-blocking final cross-check, because a spot balance does not necessarily map
 to an open trade and therefore cannot be authoritative.
 
+**Same-wallet vs same-exchange (suggested by bigbroseur).** Not everyone runs one shared
+wallet. A common low-capital setup is several Hyperliquid accounts, each with its own wallet,
+and one bot per wallet — and across distinct wallets there is *no* stacking or netting to
+prevent, because the positions live on separate accounts. `scope` makes this explicit. Under
+the default `wallet` scope, only bots that trade the **same wallet** coordinate; bots on
+distinct wallets of the same exchange (separate API keys / wallet addresses, sub-accounts, or
+simply several accounts) are independent and never block one another. The wallet identity is
+auto-detected from the credentials already in the config — the Hyperliquid wallet address, or
+the exchange API key — hashed so no secret is ever stored or logged; set `account` to override
+it with an explicit label. Choose `exchange` scope to enforce a single position per coin
+across *every* wallet on the exchange.
+
 Configured per bot under `position_coordination`:
 
 | Key | Values | Meaning |
 |-----|--------|---------|
 | `mode` | `off` / `compat` / `strict` | `off`: no coordination. `compat`: a pair may be shared only on the **same side**; leverage is reconciled. `strict`: a pair already held by a sibling can **never** be entered. |
+| `scope` | `wallet` / `exchange` | `wallet` (default): only bots on the **same wallet/account** coordinate; bots on distinct wallets of the same exchange stay independent. `exchange`: every bot on the exchange coordinates regardless of wallet. |
+| `account` | label | Optional explicit wallet/account identifier for grouping under `wallet` scope. Defaults to a fingerprint auto-derived from the configured credentials (wallet address or API key). |
 | `leverage_policy` | `lowest` / `highest` / `keep` / `block` | Compat-mode reconciliation when sharing a pair: take the lowest/highest leverage, keep the one already on the coin, or block on any mismatch. |
 | `exchange_check` | `warn` / `block` | Behaviour of the final exchange cross-check on a mismatch. |
 | `registry` | path / list | Directory to auto-scan (default: the launched config's directory) or an explicit list of sibling sqlite paths. |
@@ -255,8 +269,10 @@ a sibling, the resolved leverage is pre-set on the exchange before the order. If
 is **blocked** rather than opened at a higher-than-intended leverage.
 
 **Anti-race lock.** All bots on a 15m timeframe evaluate entries at the same candle close, so
-two could pass the check on the same tick. A per-`(environment, exchange, pair)` `flock`
-serialises concurrent entries (first to acquire wins), and a short-lived *intent marker* keeps
+two could pass the check on the same tick. A per-`(exchange, environment, wallet group, pair)`
+`flock` serialises concurrent entries (first to acquire wins), and locks plus intent markers
+are scoped to the same wallet group as discovery, so two bots on distinct wallets never block
+each other. A short-lived *intent marker* keeps
 a just-decided trade visible to siblings during the brief window before it is committed to the
 DB. Markers expire after 180 s, so a crash mid-entry cannot wedge a pair.
 
@@ -271,9 +287,10 @@ Position coordination: BLOCKED entry for ETH/USDC:USDC — ETH/USDC:USDC held by
 'hyperliquid_hippo_dynv1_short_casino' on the OPPOSITE side (short) — netting risk
 ```
 
-**Limitations.** Coordination is scoped to one wallet and one environment: bots on separate
-wallets, on different exchanges, or with a different `dry_run` value do not coordinate. The
-exchange cross-check is advisory by default (`warn`).
+**Limitations.** Coordination never spans different exchanges or a different `dry_run` value.
+Across wallets it is opt-in: by default (`scope: wallet`) bots on separate wallets do not
+coordinate, which is what a multi-wallet operator wants; set `scope: exchange` to coordinate
+fleet-wide. The exchange cross-check is advisory by default (`warn`).
 
 ### 1.4 Fleet State Notifications and Auto-Restart
 

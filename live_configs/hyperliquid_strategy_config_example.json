@@ -1,7 +1,7 @@
 {
     "_doc": "Example Hyperliquid futures config. Copy this file, rename it, and fill in your values.",
     "_doc_hip3": "To trade TradFi/HIP-3 pairs (XYZ-AAPL, XYZ-GOLD, PARA-BTCD, etc.), keep hip3_dexes below. Remove it if you only trade crypto.",
-    "_doc_position_coordination": "Stops several bots sharing this wallet (same dry_run value) from stacking on the same pair. mode: off | compat (share only same-side, reconcile leverage via leverage_policy lowest/highest/keep/block) | strict (never share a pair held by a sibling). Siblings are auto-discovered from this config's directory.",
+    "_doc_position_coordination": "Stops several bots from stacking on the same pair. mode: off | compat (share only same-side, reconcile leverage via leverage_policy lowest/highest/keep/block) | strict (never share a pair held by a sibling). scope: wallet (default — only bots on THIS wallet coordinate; bots on distinct wallets of the same exchange stay independent) | exchange (coordinate across every wallet on the exchange). Wallet identity is auto-detected from the credentials; set account to override with a label. Siblings are auto-discovered from this config's directory.",
 
     "add_config_files": [
         "_default_spot_usdc.json",
@@ -10,6 +10,7 @@
 
     "position_coordination": {
         "mode": "strict",
+        "scope": "wallet",
         "leverage_policy": "lowest",
         "exchange_check": "warn"
     },

@@ -206,8 +206,9 @@ CONF_SCHEMA = {
         },
         "position_coordination": {
             "description": (
-                "Fork extension: coordinate positions across bots sharing the same "
-                "wallet / dry-run group so they do not stack on the same pair."
+                "Fork extension: coordinate positions across bots so they do not stack on "
+                "the same pair. Scope (wallet/exchange) controls whether coordination is "
+                "limited to bots sharing a wallet or spans every bot on the exchange."
             ),
             "type": "object",
             "properties": {
@@ -219,6 +220,26 @@ CONF_SCHEMA = {
                     "type": "string",
                     "enum": ["off", "compat", "strict"],
                     "default": "compat",
+                },
+                "scope": {
+                    "description": (
+                        "Which bots count as siblings. wallet = only bots on the same "
+                        "wallet/account coordinate (bots on distinct wallets of the same "
+                        "exchange stay independent); exchange = all bots on the exchange "
+                        "coordinate regardless of wallet."
+                    ),
+                    "type": "string",
+                    "enum": ["wallet", "exchange"],
+                    "default": "wallet",
+                },
+                "account": {
+                    "description": (
+                        "Optional label identifying the wallet/account this bot trades, used "
+                        "to group siblings under scope=wallet. Bots sharing a wallet should "
+                        "share this label. Defaults to a fingerprint auto-derived from the "
+                        "configured credentials (Hyperliquid wallet address or API key)."
+                    ),
+                    "type": "string",
                 },
                 "leverage_policy": {
                     "description": (

@@ -304,3 +304,95 @@ def test_registry_filters_by_environment(tmp_path):
     reg = FleetRegistry(config)
     names = {bot for bot, _ in reg.siblings()}
     assert names == {"peer"}
+
+
+# --------------------------------------------------------------------------- #
+# Wallet scope (bigbroseur): distinct wallets on one exchange stay independent
+# --------------------------------------------------------------------------- #
+def _write_wallet_cfg(directory, name, *, bot_name, db, wallet=None, scope=None, account=None):
+    cfg = {
+        "bot_name": bot_name,
+        "exchange": {"name": "hyperliquid"},
+        "dry_run": False,
+        "db_url": f"sqlite:///{db}",
+    }
+    if wallet is not None:
+        cfg["exchange"]["walletAddress"] = wallet
+    coord = {}
+    if scope is not None:
+        coord["scope"] = scope
+    if account is not None:
+        coord["account"] = account
+    if coord:
+        cfg["position_coordination"] = coord
+    (directory / name).write_text(json.dumps(cfg))
+
+
+def _wallet_config(cfgdir, *, scope=None, account=None, wallet="0xAAA"):
+    coord = {}
+    if scope is not None:
+        coord["scope"] = scope
+    if account is not None:
+        coord["account"] = account
+    return {
+        "bot_name": "me",
+        "exchange": {"name": "hyperliquid", "walletAddress": wallet},
+        "dry_run": False,
+        "config_files": [str(cfgdir / "me.json")],
+        "position_coordination": coord,
+    }
+
+
+def test_wallet_scope_excludes_other_wallet(tmp_path):
+    cfgdir = tmp_path / "live_configs"
+    cfgdir.mkdir()
+    _write_wallet_cfg(cfgdir, "me.json", bot_name="me", db="me.sq", wallet="0xAAA")
+    _write_wallet_cfg(cfgdir, "same.json", bot_name="same", db="same.sq", wallet="0xAAA")
+    _write_wallet_cfg(cfgdir, "other.json", bot_name="other", db="other.sq", wallet="0xBBB")
+
+    reg = FleetRegistry(_wallet_config(cfgdir, wallet="0xAAA"))  # scope defaults to wallet
+    names = {bot for bot, _ in reg.siblings()}
+    assert names == {"same"}  # the 0xBBB bot is on a different wallet -> independent
+
+
+def test_exchange_scope_includes_all_wallets(tmp_path):
+    cfgdir = tmp_path / "live_configs"
+    cfgdir.mkdir()
+    _write_wallet_cfg(cfgdir, "me.json", bot_name="me", db="me.sq", wallet="0xAAA")
+    _write_wallet_cfg(cfgdir, "same.json", bot_name="same", db="same.sq", wallet="0xAAA")
+    _write_wallet_cfg(cfgdir, "other.json", bot_name="other", db="other.sq", wallet="0xBBB")
+
+    reg = FleetRegistry(_wallet_config(cfgdir, scope="exchange", wallet="0xAAA"))
+    names = {bot for bot, _ in reg.siblings()}
+    assert names == {"same", "other"}  # wallet ignored under exchange scope
+
+
+def test_account_label_groups_distinct_wallets(tmp_path):
+    cfgdir = tmp_path / "live_configs"
+    cfgdir.mkdir()
+    # Different wallet addresses but the same explicit account label -> siblings.
+    _write_wallet_cfg(cfgdir, "me.json", bot_name="me", db="me.sq", wallet="0xAAA", account="grp")
+    _write_wallet_cfg(cfgdir, "peer.json", bot_name="peer", db="peer.sq", wallet="0xZZZ",
+                      account="grp")
+    _write_wallet_cfg(cfgdir, "lone.json", bot_name="lone", db="lone.sq", wallet="0xCCC")
+
+    reg = FleetRegistry(_wallet_config(cfgdir, account="grp", wallet="0xAAA"))
+    names = {bot for bot, _ in reg.siblings()}
+    assert names == {"peer"}
+
+
+def test_wallet_scope_isolates_intent_markers(tmp_path):
+    # Two bots on distinct wallets must not see each other's intent markers.
+    cfg_a = _cfg(tmp_path, mode="strict", bot_name="A")
+    cfg_a["exchange"]["walletAddress"] = "0xAAA"
+    cfg_b = _cfg(tmp_path, mode="strict", bot_name="B")
+    cfg_b["exchange"]["walletAddress"] = "0xBBB"
+
+    PositionCoordinator(cfg_a).mark_intent(PAIR, is_short=False, leverage=3.0)
+    # B is on another wallet -> A's intent is invisible, entry allowed.
+    assert PositionCoordinator(cfg_b).evaluate(PAIR, is_short=False, my_leverage=3.0).allow
+
+    # Same wallet as A -> A's intent is visible, entry blocked.
+    cfg_c = _cfg(tmp_path, mode="strict", bot_name="C")
+    cfg_c["exchange"]["walletAddress"] = "0xAAA"
+    assert not PositionCoordinator(cfg_c).evaluate(PAIR, is_short=False, my_leverage=3.0).allow
