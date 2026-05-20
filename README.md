@@ -17,15 +17,141 @@
 </p>
 
 <p align="center">
+  <a href="#-already-running-freqtrade-switch-to-ultimate-without-losing-anything">Migrate from upstream</a> ·
+  <a href="#-new-to-freqtrade-start-here">Start fresh</a> ·
   <a href="#-what-is-freqtrade-ultimate">About</a> ·
   <a href="#-feature-highlights">Features</a> ·
   <a href="#-showcase-strategies">Strategies</a> ·
-  <a href="#-installation">Install</a> ·
   <a href="#-learn-algorithmic-trading">Learn</a> ·
   <a href="docs/FEATURES.md">Full feature list</a>
 </p>
 
 ---
+
+## 🔄 Already running freqtrade? Switch to Ultimate without losing anything
+
+**Freqtrade Ultimate is a drop-in superset of upstream freqtrade.** Same `freqtrade` command, same configuration schema, same database format — it just adds features. Your bot *is* its `user_data/` folder (strategies, configs, hyperopt and backtest results, downloaded data) plus its trade database. Switching forks means pointing a Freqtrade Ultimate install at those same files. **Nothing about a running bot changes**: same open trades, same config, same strategy — it simply resumes with extra capabilities available.
+
+<details>
+<summary><b>Before you start (30-second checklist)</b></summary>
+
+- **Stop the bot cleanly first** — let it finish its cycle (`Ctrl+C` in its screen/tmux, or `systemctl stop`). Don't migrate a bot mid-trade.
+- **Back up your trade database and config** — `cp tradesv3.sqlite tradesv3.sqlite.bak`. Cheap insurance.
+- **Database migrations are forward-only and automatic.** Ultimate tracks the current upstream version, so your DB upgrades itself on first start. (Only relevant edge case: don't point Ultimate at a DB written by a *newer* upstream `develop` than this fork — downgrading a DB is unsupported by freqtrade itself.)
+- You don't need to uninstall your current freqtrade. The cleanest migrations below keep your old setup intact as an instant rollback.
+
+</details>
+
+### 🖥️ Native install (source / venv — no Docker)
+
+The safest path is **non-destructive**: install the fork in a *new* folder and run your existing bot from it. Your old install is never touched, so rollback is "just start the old one again".
+
+```bash
+# 1. Stop your current bot cleanly (Ctrl+C in its screen/tmux, or `systemctl stop`).
+
+# 2. Back up your trade database (cheap insurance).
+cp /path/to/tradesv3.sqlite /path/to/tradesv3.sqlite.bak
+
+# 3. Clone Freqtrade Ultimate into a NEW folder — your old install stays as rollback.
+git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+cd freqtrade-ultimate
+
+# 4. Install it (creates its own .venv; your old environment is untouched).
+./setup.sh -i
+
+# 5. Activate and confirm you're on the fork.
+source .venv/bin/activate
+freqtrade --version
+
+# 6. Run YOUR bot with YOUR existing files — nothing copied, nothing lost.
+freqtrade trade \
+  --config   /path/to/your/config.json \
+  --strategy YourStrategy \
+  --userdir  /path/to/your/user_data \
+  --db-url   sqlite:////absolute/path/to/your/tradesv3.sqlite
+```
+
+> **Prefer one tidy folder?** Instead of pointing at old paths, copy your data into the clone:
+> `cp -a /path/to/your/user_data/. ./user_data/` then place your `config.json` and `*.sqlite` where you normally keep them, and launch as usual.
+
+### 🐳 Docker
+
+There is **no public Ultimate image — you build it yourself from source** (the repo's `.dockerignore` excludes the bundled data, so the build stays small and fast). Recommended path: keep your working `docker-compose.yml`, volumes and DB exactly as they are, and **swap only the image**.
+
+```bash
+# 1. Stop your current stack.
+docker compose down
+
+# 2. Build the Freqtrade Ultimate image from source.
+git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+cd freqtrade-ultimate
+docker build -t freqtrade-ultimate:latest .
+cd -
+
+# 3. In your EXISTING docker-compose.yml, change the image line:
+#       image: freqtradeorg/freqtrade:stable
+#    to:
+#       image: freqtrade-ultimate:latest
+
+# 4. Bring the bot back up — same mounted user_data, same DB, same trades.
+docker compose up -d
+```
+
+> Your `user_data/` volume and database are never rewritten by this — only the code inside the container changes. **Rollback:** set the image line back to `freqtradeorg/freqtrade:stable` and `docker compose up -d`.
+> **Update the fork later:** `git pull` in the clone → `docker build -t freqtrade-ultimate:latest .` → `docker compose up -d`.
+
+<details>
+<summary><b>Windows users</b></summary>
+
+`setup.sh` is for macOS/Linux. On Windows, use the **Docker** path above, or install inside **WSL2** and follow the native path there.
+
+</details>
+
+<details>
+<summary><b>Staying in sync with upstream</b></summary>
+
+This fork keeps the official project as its `upstream` remote and merges upstream releases in, so you keep getting upstream fixes on top of the Ultimate features. To pull the latest fork code: `git pull` (native) or `git pull` + rebuild (Docker), then restart your bot.
+
+</details>
+
+## 🌱 New to freqtrade? Start here
+
+You don't need to install upstream freqtrade first — Freqtrade Ultimate is a complete, ready-to-run installation on its own.
+
+> 🇫🇷 **Francophone ?** La communauté **Freqtrade France** propose un guide écrit pas-à-pas (installation, configuration, premier bot) : **[Freqtrade — le guide complet du bot de trading open source](https://buymeacoffee.com/freqtrade_france/freqtrade-le-guide-complet-du-bot-de-trading-open-source-installation-et-config)**. *(French only / en français uniquement.)*
+
+### 🖥️ Native install (source / venv)
+
+```bash
+git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+cd freqtrade-ultimate
+./setup.sh -i
+
+source .venv/bin/activate
+freqtrade create-userdir --userdir user_data
+freqtrade new-config --config user_data/config.json
+```
+
+### 🐳 Docker
+
+The bundled `docker-compose.yml` builds the Ultimate image for you (tagged `freqtrade-ultimate:latest`):
+
+```bash
+git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+cd freqtrade-ultimate
+
+# Build the image from source.
+docker compose build
+
+# Create your user_data folder and a starter config:
+docker compose run --rm freqtrade create-userdir --userdir user_data
+docker compose run --rm freqtrade new-config --config user_data/config.json
+
+# Edit user_data/config.json (exchange, stake, pairs), then launch:
+docker compose up -d
+```
+
+**Next steps:** edit `user_data/config.json` (exchange, stake, pairs), drop a strategy into `user_data/strategies/`, then launch with `freqtrade trade` (native) or `docker compose up -d`. The full [Freqtrade documentation](https://www.freqtrade.io/) applies unchanged; see the [Learn](#-learn-algorithmic-trading) section below and [docs/FEATURES.md](docs/FEATURES.md) for what this fork adds.
 
 ## 🎯 What is Freqtrade Ultimate?
 
@@ -87,17 +213,9 @@ This repository ships with public showcase strategies directly inside [`user_dat
 
 These strategies are intentionally simple and **honest about their limits**. They demonstrate the methodology (anti-overfitting, walk-forward, real drawdowns), not maximum profitability. **More advanced and live-tested strategies are reserved for [Freqtrade France](https://buymeacoffee.com/freqtrade_france) members** along with full live PnL screenshots and reproducible parameters.
 
-## 🚀 Installation
+## 🎛️ Companion dashboard (FreqUI)
 
-```bash
-git clone https://github.com/titouannwtt/freqtrade-ultimate.git
-cd freqtrade-ultimate
-./setup.sh -i
-```
-
-Then follow the standard [Freqtrade documentation](https://www.freqtrade.io/) — this fork is a drop-in replacement and all upstream commands work unchanged. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
-
-### Companion: the dashboard
+Installation is covered above — [migrate from upstream](#-already-running-freqtrade-switch-to-ultimate-without-losing-anything) or [start fresh](#-new-to-freqtrade-start-here). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
 
 For the multi-bot UI optimized for this fork (50+ enhanced components, fleet comparison, market context):
 

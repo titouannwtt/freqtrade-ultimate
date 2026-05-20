@@ -1,10 +1,17 @@
 ---
 services:
   freqtrade:
-    image: freqtradeorg/freqtrade:stable
-    # image: freqtradeorg/freqtrade:develop
-    # Use plotting image
-    # image: freqtradeorg/freqtrade:develop_plot
+    # Freqtrade Ultimate ships no public image — it is built from this repo.
+    # `docker compose up -d --build` builds it and tags it as `freqtrade-ultimate:latest`.
+    image: freqtrade-ultimate:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # To run the upstream image instead, comment out the `build:` block above
+    # and replace the `image:` line with one of:
+    #   image: freqtradeorg/freqtrade:stable
+    #   image: freqtradeorg/freqtrade:develop
+    #   image: freqtradeorg/freqtrade:develop_plot   # plotting image
     # # Enable GPU Image and GPU Resources (only relevant for freqAI)
     # # Make sure to uncomment the whole deploy section
     # deploy:
@@ -14,10 +21,6 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
-    # Build step - only needed when additional dependencies are needed
-    # build:
-    #   context: .
-    #   dockerfile: "./docker/Dockerfile.custom"
     restart: unless-stopped
     container_name: freqtrade
     volumes:
