@@ -45,6 +45,7 @@ from freqtrade.exchange import (
     timeframe_to_seconds,
 )
 from freqtrade.exchange.exchange_types import CcxtOrder, CcxtPosition
+from freqtrade.fleet_coordination import PositionCoordinator
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
@@ -214,7 +215,8 @@ class FreqtradeBot(LoggingMixin):
             initial_state = self.config.get("initial_state")
             self.state = State[initial_state.upper()] if initial_state else State.STOPPED
 
-            self._position_guard_last_warn: dict[str, float] = {}
+            # Fleet position coordination (fork extension)
+            self._coordinator = PositionCoordinator(self.config)
 
             # Protect exit-logic from forcesell and vice versa
             self._exit_lock = RLock()
@@ -491,69 +493,101 @@ class FreqtradeBot(LoggingMixin):
                     )
                 )
 
-    def _check_position_guard(
-        self, pair: str, is_short: bool, leverage: float
+    def _coordinate_initial_entry(
+        self, pair: str, is_short: bool, leverage: float, side: BuySell
+    ) -> tuple[bool, float]:
+        """
+        Run fleet coordination for a new entry under the per-pair lock.
+        Returns (allowed, resolved_leverage). On block, the second value is irrelevant.
+        """
+        with self._coordinator.entry_lock(pair):
+            decision = self._coordinator.evaluate(pair, is_short, leverage)
+            if not decision.allow:
+                self._coordinator.warn_throttled(
+                    pair, "Position coordination: BLOCKED entry for %s — %s", pair, decision.reason
+                )
+                return False, leverage
+            if (
+                decision.leverage_changed
+                and not self.config["dry_run"]
+                and self.trading_mode == TradingMode.FUTURES
+                and not self._coordination_apply_leverage(pair, decision.leverage, side)
+            ):
+                return False, leverage
+            resolved = decision.leverage
+            if not self._coordination_exchange_check(pair, is_short, resolved):
+                return False, resolved
+            self._coordinator.mark_intent(pair, is_short, resolved)
+            return True, resolved
+
+    def _coordination_apply_leverage(
+        self, pair: str, target_leverage: float, side: BuySell
     ) -> bool:
         """
-        Check exchange positions before opening a trade.
-        If a position already exists on this pair with a different side or leverage,
-        deny entry. Returns True if entry is allowed, False otherwise.
-        Only active in FUTURES mode on live (non dry-run) exchanges.
+        Pre-flight the reconciled leverage on the exchange before opening (futures, live).
+        If the exchange refuses to *lower* the leverage of an already-open position
+        (insufficient margin), the entry is blocked rather than opened at a higher
+        leverage than intended. Returns True if entry may proceed.
         """
-        if self.trading_mode != TradingMode.FUTURES or self.config["dry_run"]:
-            return True
-
         try:
-            positions: list[CcxtPosition] = self.exchange.fetch_positions(pair)
-        except Exception as e:
+            self.exchange.set_margin_mode(
+                pair, self.margin_mode, params={"leverage": int(target_leverage)}
+            )
+            return True
+        except ExchangeError as e:
+            emsg = str(e).lower()
+            if "insufficient margin" in emsg or "decrease leverage" in emsg:
+                self._coordinator.warn_throttled(
+                    pair,
+                    "Position coordination: BLOCKED entry for %s — exchange refused to set "
+                    "leverage to %dx on the open position (%s). Not opening to avoid a higher "
+                    "leverage than intended.",
+                    pair, int(target_leverage), e,
+                )
+                return False
             logger.warning(
-                "Position guard: could not fetch positions for %s (%s) "
-                "— allowing entry as fallback.",
+                "Position coordination: leverage pre-set for %s failed (%s) — proceeding.",
                 pair, e,
             )
             return True
 
+    def _coordination_exchange_check(self, pair: str, is_short: bool, leverage: float) -> bool:
+        """
+        Non-DB final cross-check against the exchange. With exchange_check='warn' (default)
+        a mismatch is only logged; with 'block' the entry is denied. Futures live only.
+        """
+        if self.config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+            return True
+        try:
+            positions: list[CcxtPosition] = self.exchange.fetch_positions(pair)
+        except Exception as e:
+            logger.debug("Coordination: exchange cross-check fetch failed for %s (%s)", pair, e)
+            return True
+
+        wanted_side = "short" if is_short else "long"
         for pos in positions:
             if pos.get("side") is None or pos.get("collateral", 0) == 0.0:
                 continue
-            if pos["symbol"] != pair:
+            if pos.get("symbol") != pair:
                 continue
-
-            pos_side = pos["side"]
+            mismatches = []
+            if pos["side"] != wanted_side:
+                mismatches.append(f"side {pos['side']} vs intended {wanted_side}")
             pos_leverage = pos.get("leverage", 1.0)
-            wanted_side = "short" if is_short else "long"
-
-            if pos_side != wanted_side:
-                self._guard_warn_throttled(
-                    pair,
-                    "Position guard: BLOCKED entry %s %s %.1fx — "
-                    "existing %s position on %s at %.1fx. "
-                    "Cannot open opposite side on same wallet.",
-                    wanted_side.upper(), pair, leverage,
-                    pos_side.upper(), pair, pos_leverage,
-                )
-                return False
-
             if int(pos_leverage) != int(leverage):
-                self._guard_warn_throttled(
-                    pair,
-                    "Position guard: BLOCKED entry %s %s %.1fx — "
-                    "existing position at %.1fx (leverage mismatch). "
-                    "Align leverage across bots sharing this wallet.",
-                    wanted_side.upper(), pair, leverage,
-                    pos_leverage,
-                )
+                mismatches.append(f"leverage {pos_leverage:g}x vs intended {leverage:g}x")
+            if not mismatches:
+                continue
+            block = self._coordinator.exchange_check == "block"
+            self._coordinator.warn_throttled(
+                pair,
+                "Position coordination: exchange shows a position on %s not matching the "
+                "DB-based decision (%s) [%s].",
+                pair, ", ".join(mismatches), "BLOCKED" if block else "allowed, warn-only",
+            )
+            if block:
                 return False
-
         return True
-
-    def _guard_warn_throttled(self, pair: str, msg: str, *args: object) -> None:
-        import time
-        now = time.monotonic()
-        last = self._position_guard_last_warn.get(pair, 0.0)
-        if now - last >= 900:
-            logger.warning(msg, *args)
-            self._position_guard_last_warn[pair] = now
 
     def sync_leverage_from_exchange(self) -> None:
         """
@@ -1346,8 +1380,11 @@ class FreqtradeBot(LoggingMixin):
             logger.info(f"User denied entry for {pair}.")
             return False
 
-        if not self._check_position_guard(pair, is_short, leverage):
-            return False
+        if mode == "initial":
+            allowed, leverage = self._coordinate_initial_entry(pair, is_short, leverage, side)
+            if not allowed:
+                return False
+            amount = (stake_amount / enter_limit_requested) * leverage
 
         if trade and self.handle_similar_open_order(trade, enter_limit_requested, amount, side):
             return False
@@ -1381,6 +1418,7 @@ class FreqtradeBot(LoggingMixin):
                     f"for {pair} is {order_status} by {self.exchange.name}."
                     " zero amount is fulfilled."
                 )
+                self._coordinator.clear_intent(pair)
                 return False
             else:
                 # the order is partially fulfilled
@@ -1463,6 +1501,9 @@ class FreqtradeBot(LoggingMixin):
         trade.recalc_trade_from_orders()
         Trade.session.add(trade)
         Trade.commit()
+
+        # Trade is now persisted and visible to sibling bots; drop the intent marker (if any).
+        self._coordinator.clear_intent(pair)
 
         # Updating wallets
         self.wallets.update()

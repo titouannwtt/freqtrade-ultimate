@@ -14,7 +14,7 @@ what `freqtrade-ultimate` adds over `freqtrade/freqtrade`.
 - [1. Multi-Bot Infrastructure](#1-multi-bot-infrastructure)
   - [1.1 OHLCV Cache Daemon (`ftcache`)](#11-ohlcv-cache-daemon-ftcache)
   - [1.2 Pairlist Cache Daemon (`ftpairlists`)](#12-pairlist-cache-daemon-ftpairlists)
-  - [1.3 Position Guard and Leverage Sync](#13-position-guard-and-leverage-sync)
+  - [1.3 Position Coordination and Leverage Sync](#13-position-coordination-and-leverage-sync)
   - [1.4 Fleet State Notifications and Auto-Restart](#14-fleet-state-notifications-and-auto-restart)
 - [2. Hyperopt and Validation](#2-hyperopt-and-validation)
   - [2.1 PlateauSampler](#21-plateausampler)
@@ -90,7 +90,7 @@ backend endpoint.
 
 The fork is grouped along the following axes:
 
-- **Infrastructure**: shared OHLCV cache daemon, shared pairlist cache daemon, position guard,
+- **Infrastructure**: shared OHLCV cache daemon, shared pairlist cache daemon, position coordination,
   leverage sync, fleet orchestration, auto-restart.
 - **Validation**: PlateauSampler, walk-forward analysis (rolling / anchored / CPCV),
   custom loss functions tuned for mean-reversion and momentum.
@@ -221,37 +221,59 @@ runs exactly once instead of 14 times.
 - Currently only `VolumePairList` and `VolatilityFilter` are wired in. Custom pairlist
   handlers can opt in by importing `pairlist_cache.client.PairlistCacheClient`.
 
-### 1.3 Position Guard and Leverage Sync
+### 1.3 Position Coordination and Leverage Sync
 
-**Where upstream falls short.** Upstream assumes one bot per account. If two bots open
-opposing positions on the same pair, or if one bot changes the leverage on a pair the other
-is trading, the result is a corrupted DB and unexpected liquidation profile.
+**Where upstream falls short.** Upstream assumes one bot per account. When several bots share
+one wallet (the normal fork setup), two of them can independently open the *same* pair. On a
+netting venue like Hyperliquid those orders merge into a single, **doubled** exchange position
+on one underlying asset — great when it wins, destructive when it loses, and well outside the
+risk profile the operator signed up for. Opposite-side entries are even worse: they silently
+net against each other.
 
-**How the fork solves it.**
+**How the fork solves it.** `freqtrade/fleet_coordination.py` adds a `PositionCoordinator`
+that is consulted inside `execute_entry()` before any order is sent. The source of truth is
+the **trade database of sibling bots in the same environment** — same exchange and same
+`dry_run` value. Siblings are auto-discovered from the directory of config files the bot was
+launched with (the configs *are* the registry — nothing extra to maintain), and their open
+trades are read straight from their sqlite DBs (read-only, WAL-safe). The live exchange is
+used only as a non-blocking final cross-check, because a spot balance does not necessarily map
+to an open trade and therefore cannot be authoritative.
 
-`_check_position_guard()` in `freqtradebot.py` (+70 lines) is called inside `execute_entry()`
-before any order is sent:
+Configured per bot under `position_coordination`:
 
-- Blocks entry if a position on the **opposite side** already exists on the pair (same
-  wallet, different bot).
-- Blocks entry if the **leverage of the existing position** differs from what this bot would
-  use.
-- Warnings are **throttled to one per pair per 15 minutes** to keep the log readable.
+| Key | Values | Meaning |
+|-----|--------|---------|
+| `mode` | `off` / `compat` / `strict` | `off`: no coordination. `compat`: a pair may be shared only on the **same side**; leverage is reconciled. `strict`: a pair already held by a sibling can **never** be entered. |
+| `leverage_policy` | `lowest` / `highest` / `keep` / `block` | Compat-mode reconciliation when sharing a pair: take the lowest/highest leverage, keep the one already on the coin, or block on any mismatch. |
+| `exchange_check` | `warn` / `block` | Behaviour of the final exchange cross-check on a mismatch. |
+| `registry` | path / list | Directory to auto-scan (default: the launched config's directory) or an explicit list of sibling sqlite paths. |
+| `exclude` | list | Config filenames or bot names to ignore. |
 
-`sync_leverage_from_exchange()` runs at startup and on every process cycle. It compares the
-leverage stored in the local SQLAlchemy DB with the exchange-reported leverage. If a peer
-bot has changed leverage on the same position, the local DB is updated and
-`trade.recalc_trade_from_orders()` is called.
+**Leverage reconciliation (futures).** In `compat` mode, when this bot would share a pair with
+a sibling, the resolved leverage is pre-set on the exchange before the order. If the venue
+**refuses to lower** the leverage of an already-open position (insufficient margin), the entry
+is **blocked** rather than opened at a higher-than-intended leverage.
+
+**Anti-race lock.** All bots on a 15m timeframe evaluate entries at the same candle close, so
+two could pass the check on the same tick. A per-`(environment, exchange, pair)` `flock`
+serialises concurrent entries (first to acquire wins), and a short-lived *intent marker* keeps
+a just-decided trade visible to siblings during the brief window before it is committed to the
+DB. Markers expire after 180 s, so a crash mid-entry cannot wedge a pair.
+
+`sync_leverage_from_exchange()` still runs at startup and on every process cycle: it compares
+the leverage stored in the local DB with the exchange-reported leverage and, if a peer bot
+changed it, updates the local DB and calls `trade.recalc_trade_from_orders()`.
 
 **Example log line.**
 
 ```text
-Position guard: skipping ENTER for ETH/USDC:USDC long, opposite-side
-position open by bot 'short_mean_rev_1' (leverage 5x)
+Position coordination: BLOCKED entry for ETH/USDC:USDC — ETH/USDC:USDC held by sibling
+'hyperliquid_hippo_dynv1_short_casino' on the OPPOSITE side (short) — netting risk
 ```
 
-**Limitations.** The guard only protects against same-wallet conflicts. Two bots on
-separate wallets are still free to be on opposite sides.
+**Limitations.** Coordination is scoped to one wallet and one environment: bots on separate
+wallets, on different exchanges, or with a different `dry_run` value do not coordinate. The
+exchange cross-check is advisory by default (`warn`).
 
 ### 1.4 Fleet State Notifications and Auto-Restart
 

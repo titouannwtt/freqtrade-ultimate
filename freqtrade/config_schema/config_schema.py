@@ -204,6 +204,56 @@ CONF_SCHEMA = {
             "type": "string",
             "enum": MARGIN_MODES,
         },
+        "position_coordination": {
+            "description": (
+                "Fork extension: coordinate positions across bots sharing the same "
+                "wallet / dry-run group so they do not stack on the same pair."
+            ),
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "description": (
+                        "off = no coordination; compat = share a pair only on the same side "
+                        "(reconcile leverage); strict = never share a pair held by a sibling."
+                    ),
+                    "type": "string",
+                    "enum": ["off", "compat", "strict"],
+                    "default": "compat",
+                },
+                "leverage_policy": {
+                    "description": (
+                        "When sharing a pair in compat mode: lowest/highest leverage wins, "
+                        "keep the existing one, or block on any mismatch."
+                    ),
+                    "type": "string",
+                    "enum": ["lowest", "highest", "keep", "block"],
+                    "default": "keep",
+                },
+                "exchange_check": {
+                    "description": (
+                        "Final non-DB cross-check against the exchange before opening: "
+                        "warn (log only) or block."
+                    ),
+                    "type": "string",
+                    "enum": ["warn", "block"],
+                    "default": "warn",
+                },
+                "registry": {
+                    "description": (
+                        "Directory of bot configs to auto-discover the fleet (defaults to the "
+                        "loaded config's directory), or an explicit list of sibling sqlite paths."
+                    ),
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                },
+                "exclude": {
+                    "description": "Config filenames or bot names to ignore during discovery.",
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                },
+            },
+        },
         "reduce_df_footprint": {
             "description": "Reduce DataFrame footprint by casting columns to float32/int32.",
             "type": "boolean",
