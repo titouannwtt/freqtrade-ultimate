@@ -74,6 +74,48 @@ strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 2. **Liquidation detection** (`exchange/hyperliquid.py:fetch_liquidation_fills`) — Checks `liquidationMarkPx` field in user trades.
 3. **TrendRegularityFilter** (`plugins/pairlist/TrendRegularityFilter.py`) — Excludes pairs with strong linear uptrends (high R²). Useful for short-only strategies. Registered in `constants.py`.
 
+## Exporting strategies (`user_data/export_strategies.py`)
+
+Self-contained CLI that scans a folder of bot configs, classifies each as **live** or **dry-run**, and exports per strategy: the **sanitized config** (api keys / wallet keys / passwords / tokens redacted, `add_config_files` dropped), the **strategy `.py`**, its **hyperopt `.json`** (if any), and — optionally — a **6-month backtest**. Output: `live/<Strategy>/…` and `dry/<Strategy>/…` inside one timestamped `.zip`, plus `MANIFEST.json` + `README.txt`.
+
+It is exchange-/market-agnostic (works on any freqtrade fork) and resolves `add_config_files` exactly like freqtrade, so `dry_run` is read correctly even when it lives in an included file. Every step is guarded: a bad config or a failed backtest is logged and recorded, never aborting the run. A final scan **aborts the export** if a suspected secret (e.g. `0x…` key) survived sanitization.
+
+```bash
+# all strategies in live_configs/ → user_data/strategies_export_<timestamp>.zip
+python user_data/export_strategies.py --config-dir live_configs
+
+# preview what would be exported, write nothing
+python user_data/export_strategies.py --config-dir live_configs --list-only
+
+# include a 6-month backtest per strategy (slow; needs local OHLCV data)
+python user_data/export_strategies.py --config-dir live_configs --with-backtest
+```
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `-d, --config-dir` | *(required)* | Folder of bot config JSON files to scan (e.g. `live_configs`) |
+| `-o, --output` | `<userdir>/strategies_export_<ts>.zip` | Output archive path |
+| `--output-stem` | timestamped | Name of the top-level folder inside the zip |
+| `--userdir` | `user_data` | freqtrade user dir (data lookup + passed as `--userdir` to backtests) |
+| `--strategy-dir` | `<userdir>/strategies` | Strategy `.py` lookup dir (repeatable) |
+| `--datadir` | `<userdir>/data` | OHLCV data dir for backtests |
+| `--config-mode` | `merged` | `merged` = self-contained config (includes resolved); `raw` = literal bot file only |
+| `--recursive` | off | Recurse into sub-folders of `--config-dir` |
+| `--ignore` | `_*`, `*example*`, `.*` | Filename globs to skip (repeatable; leading-`_` files are includes by convention) |
+| `--with-backtest` | off | Run + bundle a backtest per strategy |
+| `--backtest-days` | `180` | Backtest lookback window (~6 months) |
+| `--backtest-timerange` | — | Explicit timerange (e.g. `20250101-20250701`), overrides `--backtest-days` |
+| `--backtest-pairs` | from data | Explicit static pairlist (skips data-based discovery) |
+| `--backtest-max-pairs` | `100` | Cap on auto-discovered backtest pairs (runtime control) |
+| `--backtest-timeout` | `1800` | Per-backtest timeout (seconds) |
+| `--data-format` | `feather` | OHLCV storage format for backtest discovery + loading |
+| `--freqtrade-bin` | `freqtrade` | freqtrade executable used for backtests |
+| `--list-only` | off | Print the export tree and exit without writing |
+| `--allow-suspected-secrets` | off | Do not abort if the final scan flags a suspected secret |
+| `-v, --verbose` | off | Debug logging |
+
+**Backtest caveat:** the live pairlist is usually dynamic (`VolumePairList` + filters) and cannot be replayed offline, so backtests run on a **StaticPairList rebuilt from locally downloaded data** (with the config's blacklist applied). They are an *approximate sanity check*, not a faithful replay of live behaviour — and the bundled config is the one that ships, not the dynamic live setup. Generated `.zip` archives are gitignored and must never be committed.
+
 ## File layout
 
 | Path | Purpose |
@@ -81,6 +123,7 @@ strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 | `live_configs/` | **Live-only** bot JSON configs (one per bot instance) — never use for hyperopt/backtest |
 | `backtest_configs/` | Configs for hyperopt and backtesting (pair lists, MOT variants) |
 | `user_data/strategies/` | Strategies (.py) + hyperopt params (.json) |
+| `user_data/export_strategies.py` | Strategy export tool — bundles live/dry configs + code + params (+ optional backtest) into a sanitized `.zip`. See "Exporting strategies" below |
 | `database/` | SQLite trade databases (one per bot) |
 | `launch_bot.sh` | Bot launcher with auto-restart loop |
 | `freqtrade/freqtradebot.py` | Core bot logic (+ `_handle_external_close`) |
