@@ -325,10 +325,20 @@ def validate_content(req: ValidateRequest):
             return ValidationResult(valid=False, errors=errors)
 
         try:
-            from freqtrade.config_schema.config_schema import CONF_SCHEMA
             import jsonschema
+
+            from freqtrade.config_schema.config_schema import CONF_SCHEMA
+            # A config that pulls in `add_config_files` is a *partial* config: required
+            # keys (exchange.name, the api_server block, …) are supplied by the inherited
+            # files when freqtrade merges them at load time. Validating the entry file
+            # standalone would wrongly flag those as missing, so drop 'required'
+            # diagnostics whenever the config inherits. Value checks (type/enum/range) on
+            # keys actually present are still surfaced.
+            inherits = bool(isinstance(parsed, dict) and parsed.get("add_config_files"))
             validator = jsonschema.Draft7Validator(CONF_SCHEMA)
             for err in validator.iter_errors(parsed):
+                if inherits and err.validator == "required":
+                    continue
                 path_str = ".".join(str(p) for p in err.absolute_path) or "(root)"
                 errors.append(DiagnosticItem(
                     line=_find_key_line(req.content, err.absolute_path),
