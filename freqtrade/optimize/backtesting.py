@@ -397,15 +397,26 @@ class Backtesting:
             # Combine data to avoid combining the data per trade.
             unavailable_pairs = []
             uses_leverage_tiers = self.exchange.get_option("uses_leverage_tiers", True)
+            missing_data_pairs: list[str] = []
             for pair in self.pairlists.whitelist:
                 if uses_leverage_tiers and pair not in self.exchange._leverage_tiers:
                     unavailable_pairs.append(pair)
+                    continue
+
+                if pair not in funding_rates_dict or pair not in mark_rates_dict:
+                    missing_data_pairs.append(pair)
                     continue
 
                 self.futures_data[pair] = self.exchange.combine_funding_and_mark(
                     funding_rates=funding_rates_dict[pair],
                     mark_rates=mark_rates_dict[pair],
                     futures_funding_rate=self.config.get("futures_funding_rate", None),
+                )
+
+            if missing_data_pairs:
+                logger.warning(
+                    f"Pairs {', '.join(missing_data_pairs)} have no funding/mark rate "
+                    f"data for this timerange — excluded from backtest."
                 )
 
             if unavailable_pairs:
