@@ -69,6 +69,12 @@ what `freqtrade-ultimate` adds over `freqtrade/freqtrade`.
   - [12.3 Enhanced CLI Help](#123-enhanced-cli-help)
   - [12.4 Deploy UI URL Change](#124-deploy-ui-url-change)
 - [13. Critical Bug Fixes](#13-critical-bug-fixes)
+- [14. Dry-Run Replay](#14-dry-run-replay)
+  - [14.1 Replay Engine](#141-replay-engine)
+  - [14.2 Config Auto-Launch](#142-config-auto-launch)
+  - [14.3 FreqUI Integration](#143-frequi-integration)
+  - [14.4 Coordinator Daemon](#144-coordinator-daemon)
+  - [14.5 REST API](#145-rest-api)
 - [Configuration Schema Additions](#configuration-schema-additions)
 - [Migration Notes](#migration-notes)
 - [Compatibility](#compatibility)
@@ -1063,6 +1069,80 @@ in live trading.
 
 ---
 
+## 14. Dry-Run Replay
+
+Validate a strategy in hours instead of months by replaying historical data through the
+**real bot engine** (`FreqtradeBot.process()`), not the simplified backtester.
+
+Full standalone documentation: [**dry-run-replay.md**](dry-run-replay.md).
+
+### 14.1 Replay Engine
+
+**Files:** `freqtrade/replay/runner.py`, `freqtrade/replay/exchange.py`,
+`freqtrade/replay/data_store.py`, `freqtrade/replay/clock.py`.
+
+The replay drives `FreqtradeBot.process()` — the exact same code path as live and dry-run
+trading — candle-by-candle over historical OHLCV data. A `VirtualClock` advances time, a
+`ReplayExchangeMixin` intercepts API calls and serves synthetic responses from local Feather
+files, and a `ReplayDataStore` provides time-windowed data slices.
+
+- **1-minute resolution** (configurable to 5m / 15m). Stoploss, ROI, and signals are checked
+  every virtual minute — equivalent to permanent `--timeframe-detail 1m` on the real engine.
+- **Real funding rate.** Funding is computed from local 1h funding-rate Feather files.
+- **Seed mode.** Replay writes trades directly into the bot's dry-run SQLite DB. When the
+  replay finishes, the bot transitions to normal dry-run with the replay history in place.
+- **DB integrity.** Backup before start, `PRAGMA quick_check` on completion, auto-restore on
+  corruption. Real trades always win over replay trades.
+- **Safety.** Quadruple-guarded: `dry_run=true` check, blanked credentials, DB namespacing.
+
+### 14.2 Config Auto-Launch
+
+**Files:** `freqtrade/replay/lifecycle.py`.
+
+Add a `dry_run_replay` block to the bot config:
+
+```json
+{
+  "dry_run_replay": {
+    "automatic_launch": true,
+    "start_date": "01/01/2026",
+    "end_date": "today",
+    "resolution": "1m",
+    "reset_db": false
+  }
+}
+```
+
+At startup, the bot detects this block, runs the replay candle-by-candle, then transitions to
+normal dry-run. With `reset_db: false`, the replay is idempotent — it skips if the DB is
+already seeded.
+
+### 14.3 FreqUI Integration
+
+Each dry-run bot in [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate) has a
+**"Simulate dry-run (replay)"** button with start/end date, resolution, and reset-DB options.
+The replay runs with a visible progress bar and transitions to normal dry-run on completion.
+
+### 14.4 Coordinator Daemon
+
+**Files:** `freqtrade/replay/coordinator.py`, `freqtrade/replay/coordinator_client.py`.
+
+Concurrent replays are capped to `nproc - 2 - hyperopt_cores` with a priority queue and
+SIGSTOP/SIGCONT pause/resume. The daemon is auto-spawned on first replay.
+
+### 14.5 REST API
+
+**Files:** `freqtrade/rpc/api_server/api_replay.py`.
+
+- `GET /api/v1/replay` — Current replay status (progress, date, state).
+- `POST /api/v1/replay` — Start a replay.
+- `DELETE /api/v1/replay` — Cancel a running replay.
+- `GET /api/v1/replay/queue` — Coordinator queue status.
+- `POST /api/v1/replay/restore` — Restore DB from pre-replay backup.
+- `GET /api/v1/replay/seeded` — Check if DB has been seeded by a replay.
+
+---
+
 ## Configuration Schema Additions
 
 `freqtrade/config_schema.py` and `freqtrade/configuration.py` introduce the following new
@@ -1079,7 +1159,15 @@ top-level config fields. All are optional; defaults are listed below.
 
   "backtest_lock_wallet": false,
 
-  "hyperopt_sampler": "TPE"
+  "hyperopt_sampler": "TPE",
+
+  "dry_run_replay": {
+    "automatic_launch": true,
+    "start_date": "01/01/2026",
+    "end_date": "today",
+    "resolution": "1m",
+    "reset_db": false
+  }
 }
 ```
 
@@ -1094,6 +1182,10 @@ top-level config fields. All are optional; defaults are listed below.
 - **`hyperopt_sampler`** (string, default `"TPE"`) — Optuna sampler key. Accepts
   `TPE`, `NSGA-II`, `NSGA-III`, `CMA-ES`, `GP`, `QMC`, `PlateauSampler`. Override on the
   CLI with `--sampler`.
+- **`dry_run_replay`** (object, optional) — Auto-launch replay configuration. See
+  [section 14.2](#142-config-auto-launch) for field details. Fields: `automatic_launch`
+  (bool, required), `start_date` (string, required), `end_date` (string, default `"today"`),
+  `resolution` (string, default `"1m"`), `reset_db` (bool, default `false`).
 
 Walk-forward analysis adds **no config schema entries** — every walk-forward parameter is a
 CLI flag (`--wf-*`, see [section 2.3](#23-walk-forward-analysis-freqtrade-walk-forward)).
@@ -1120,10 +1212,13 @@ minimum-change path:
 6. **Walk-forward**. Replace your manual train/test splits with
    `freqtrade walk-forward ...` — see the example in
    [section 2.3](#23-walk-forward-analysis-freqtrade-walk-forward).
-7. **launch scripts**. Replace `freqtrade trade --config ...` with
+7. **Dry-run replay.** Add a `dry_run_replay` block to your dry-run bot configs to
+   auto-seed a 5-month replay on first start. See
+   [section 14](#14-dry-run-replay) and [dry-run-replay.md](dry-run-replay.md).
+8. **launch scripts**. Replace `freqtrade trade --config ...` with
    `./launch_bot.sh path/to/config.json` to get auto-restart, candle-boundary jitter and
    fleet stagger for free.
-8. **FreqUI**. Run `freqtrade deploy-ui` to fetch the [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)
+9. **FreqUI**. Run `freqtrade deploy-ui` to fetch the [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)
    build — the upstream FreqUI build does not know about the new endpoints
    (`/cache_status`, `/rate_metrics`, `/fleet/*`, `/volume_history`, `/signal_summary`,
    `/stratdev/*`) and will not render the corresponding widgets.
@@ -1166,6 +1261,8 @@ No DB migration is required; the SQLAlchemy schema is unchanged. The pool sizing
 - [Walk-Forward Analysis guide](walk-forward-analysis.md) — 461-line user-facing guide.
 - [Custom hyperopt loss reference](hyperopt-custom.md) — 447-line documentation of
   `MoutonMeanRevLoss`, `MoutonMomentumLoss`, and `MyProfitDrawdownLoss`.
+- [Dry-Run Replay guide](dry-run-replay.md) — dedicated documentation for the replay
+  harness (architecture, CLI, config auto-launch, REST API).
 - [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate) — companion dashboard
   with 21 draggable widgets, the Strategy Dev panel, multi-currency conversion, and 14
   alert types.

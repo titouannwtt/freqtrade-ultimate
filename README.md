@@ -155,7 +155,7 @@ docker compose up -d
 
 ## 🎯 What is Freqtrade Ultimate?
 
-A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream.
+A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **35+ features** not present upstream.
 
 **Why this fork exists.** Running multiple Freqtrade bots in production on Hyperliquid surfaces real-world problems upstream wasn't designed for — rate-limit cascades when four bots refresh OHLCV simultaneously, ADL and liquidation handling on a DEX without traditional liquidation events, multi-bot pairlist deduplication, and statistically valid hyperopt without curve-fitting. This fork solves those.
 
@@ -192,6 +192,12 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **`ExchangeMetrics`** — Ring-buffered API-call metrics, 429 tracking, live token-bucket state.
 - **REST API enriched** — `/cache_status`, `/rate_metrics`, `/fleet/status`, `/fleet/events`, `/volume_history`, `/signal_summary`, `/stratdev/*` (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
 - **Enhanced Telegram** — `LIQUIDATION` and `external_close` exit reasons; withdrawal-aware `/profit`.
+
+### Dry-run replay
+- **Replay engine** — Drives `FreqtradeBot.process()` (the real live code path) candle-by-candle over historical data via a virtual clock and fake exchange overlay. **Validate a strategy in hours instead of months.**
+- **1-minute resolution, real funding** — Stoploss/ROI/signals checked every virtual minute; funding computed from local Feather files. Equivalent to permanent `--timeframe-detail 1m` on the real engine.
+- **Config auto-launch** — Add a `dry_run_replay` block to your bot config and the bot auto-seeds a 5-month replay on first start, then transitions to normal dry-run. Zero manual action.
+- **Coordinator daemon** — Caps concurrent replays to `nproc - 2 - hyperopt_cores` with SIGSTOP/SIGCONT priority queue. Auto-spawned.
 
 ### Developer experience
 - **Strategy Dev Backend** — Reader, jobs runner, strategy editor APIs (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
