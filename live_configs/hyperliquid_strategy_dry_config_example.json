@@ -1,0 +1,61 @@
+{
+    "_doc": "Example Hyperliquid DRY-RUN config with a config-driven dry-run replay. Copy this file, rename it, and fill in your values. Same as hyperliquid_strategy_config_example.json plus the dry_run_replay block below.",
+    "_doc_hip3": "To trade TradFi/HIP-3 pairs (XYZ-AAPL, XYZ-GOLD, PARA-BTCD, etc.), keep hip3_dexes below. Remove it if you only trade crypto.",
+    "_doc_position_coordination": "Stops several bots from stacking on the same pair. mode: off | compat (share only same-side, reconcile leverage via leverage_policy lowest/highest/keep/block) | strict (never share a pair held by a sibling). scope: wallet (default — only bots on THIS wallet coordinate; bots on distinct wallets of the same exchange stay independent) | exchange (coordinate across every wallet on the exchange). Wallet identity is auto-detected from the credentials; set account to override with a label. Siblings are auto-discovered from this config's directory.",
+    "_doc_dry_run_replay": "Optional, DRY-RUN ONLY. Auto-seeds this bot's history on startup via a dry-run replay (simulate as if it had run since start_date). Runs once (idempotent — a seeded DB is skipped). automatic_launch + start_date are REQUIRED; end_date defaults to 'today'; resolution is 1m | 5m | 15m (default 1m, finer = slower but more faithful); reset_db false (default) = keep existing trades and stop the replay at the first real trade, true = wipe the dry DB first. Dates are DD/MM/YYYY. A machine-wide coordinator caps concurrent replays to (cores - 2 - hyperopt cores).",
+
+    "add_config_files": [
+        "_default_spot_usdc.json",
+        "_hyperliquid_freqtrade_access_example.json"
+    ],
+
+    "position_coordination": {
+        "mode": "strict",
+        "scope": "wallet",
+        "leverage_policy": "lowest",
+        "exchange_check": "warn"
+    },
+
+    "max_open_trades": 5,
+    "available_capital": 1000,
+    "tradable_balance_ratio": 0.99,
+    "stake_amount": "unlimited",
+    "process_throttle_secs": 60,
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+
+    "dry_run_replay": {
+        "automatic_launch": true,
+        "start_date": "01/01/2026",
+        "end_date": "today",
+        "resolution": "1m",
+        "reset_db": false
+    },
+
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "stake_currency": "USDC",
+
+    "bot_name": "my_dry_bot_name",
+    "strategy": "MyStrategyName",
+    "db_url": "sqlite:///database/my_dry_bot_name.sqlite",
+
+    "exchange": {
+        "hip3_dexes": ["xyz", "para"],
+        "pair_blacklist": [
+            "PAXG/USDC:USDC",
+            "EUR/.*",
+            "USDT/.*"
+        ]
+    },
+
+    "pairlists": [
+        {
+            "method": "VolumePairList",
+            "number_assets": 40,
+            "sort_key": "quoteVolume",
+            "min_value": 0,
+            "refresh_period": 86400
+        }
+    ]
+}
