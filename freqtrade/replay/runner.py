@@ -232,7 +232,7 @@ def run_replay(
         if seed:
             summary = _finalize_seed(
                 config, db_file, pairs, start_dt, end_dt, summary,
-                sub_step=sub_step, duration_s=duration_s, reset_db=reset_db,
+                bot=bot, sub_step=sub_step, duration_s=duration_s, reset_db=reset_db,
                 pre_existing_ids=pre_existing_ids,
             )
         _print_summary(summary)
@@ -664,12 +664,13 @@ def _sqlite_file(db_url: str | None) -> Path | None:
 
 def _finalize_seed(
     config, db_file, pairs, start_dt, end_dt, summary, *,
-    sub_step, duration_s, reset_db, pre_existing_ids,
+    bot, sub_step, duration_s, reset_db, pre_existing_ids,
 ):
-    """Post-seed: reconcile open trades, tag, write the marker, guarantee DB integrity."""
-    # Real trades win: close any replay-left-open trade that collides with a real open
-    # trade (same pair) or pushes the bot over max_open_trades.
-    truncated = _reconcile_open_trades(int(config.get("max_open_trades") or 0), pre_existing_ids)
+    """Post-seed: flatten replay open trades, tag, write the marker, guarantee DB integrity."""
+    # Hand the live bot a FLAT book: close every replay-created open trade at the last
+    # simulated price. A simulated position left open would be marked against the *current*
+    # live market on resume and display nonsensical profit — never carry one across.
+    truncated = _flatten_replay_open_trades(bot, pre_existing_ids)
     _tag_replay_trades(exclude_ids=pre_existing_ids)
     summary = _build_summary(config["db_url"])  # refresh after reconciliation
     _write_seed_marker(
@@ -916,11 +917,14 @@ def _tag_replay_trades(exclude_ids: set[int] | None = None) -> None:
         logger.warning("[dry-run replay] could not tag replay trades: %s", exc)
 
 
-def _reconcile_open_trades(max_open_trades: int, pre_existing_ids: set[int]) -> int:
+def _flatten_replay_open_trades(bot, pre_existing_ids: set[int]) -> int:
     """
-    Real trades win. Close (at entry price, ``exit_reason='replay_truncated'``) any replay
-    open trade that collides with a real open trade's pair, or that pushes the total over
-    ``max_open_trades`` — keeping the real positions intact. Returns the count truncated.
+    A seed must hand the live bot a FLAT book. Close *every* replay-created open trade at the
+    last simulated price (``exit_reason='replay_seed_end'``); real (pre-existing) trades are
+    left untouched. Carrying a simulated open position across the sim→live boundary would mark
+    it against the *current* live market on resume and display nonsensical profit (e.g.
+    +387000%), and could trigger DCA/exits on a position the bot never really held — so we
+    never leave one open. Returns the count closed.
     """
     from freqtrade.persistence import Trade
 
@@ -928,30 +932,26 @@ def _reconcile_open_trades(max_open_trades: int, pre_existing_ids: set[int]) -> 
         open_trades = Trade.get_open_trades()
     except Exception:
         return 0
-    real = [t for t in open_trades if t.id in pre_existing_ids]
     replay = [t for t in open_trades if t.id not in pre_existing_ids]
-    if not replay:
-        return 0
-    real_pairs = {t.pair for t in real}
-    to_close = [t for t in replay if t.pair in real_pairs]
-    remaining = [t for t in replay if t not in to_close]
-    if max_open_trades and max_open_trades > 0:
-        allowed = max(0, max_open_trades - len(real))
-        if len(remaining) > allowed:
-            remaining.sort(key=lambda t: t.open_date)  # cut the oldest first
-            to_close.extend(remaining[: len(remaining) - allowed])
-    for trade in to_close:
+    closed = 0
+    for trade in replay:
+        rate = None
         try:
-            trade.close(trade.open_rate)  # neutral close at entry price (truncated)
-            trade.exit_reason = "replay_truncated"
+            rate = bot.exchange.fetch_ticker(trade.pair).get("last")
+        except Exception:
+            rate = None
+        if not rate or rate <= 0:
+            rate = trade.open_rate  # last resort: neutral close (price unavailable)
+        try:
+            trade.close(rate)
+            trade.exit_reason = "replay_seed_end"
+            closed += 1
         except Exception as exc:
-            logger.warning("[dry-run replay] could not truncate replay trade %s: %s", trade.id, exc)
-    if to_close:
+            logger.warning("[dry-run replay] could not flatten replay trade %s: %s", trade.id, exc)
+    if closed:
         Trade.commit()
-        logger.info(
-            "[dry-run replay] truncated %d replay open trade(s) for real positions", len(to_close)
-        )
-    return len(to_close)
+        logger.info("[dry-run replay] flattened %d replay open trade(s) at seed end", closed)
+    return closed
 
 
 def _write_seed_marker(

@@ -114,8 +114,27 @@ class TestSqliteHelpers:
             )
 
 
-class TestReconciliation:
-    """_reconcile_open_trades via the real Trade ORM (in-memory DB)."""
+class _FakeBot:
+    """Minimal stand-in exposing ``exchange.fetch_ticker(pair)['last']`` for flatten."""
+
+    def __init__(self, prices: dict | None = None):
+        self._prices = prices or {}
+
+        class _Ex:
+            def fetch_ticker(_self, pair):
+                if pair not in self._prices:
+                    raise KeyError(pair)
+                return {"last": self._prices[pair]}
+
+        self.exchange = _Ex()
+
+
+class TestFlattenReplayOpenTrades:
+    """_flatten_replay_open_trades via the real Trade ORM (in-memory DB).
+
+    A seed must hand the live bot a FLAT book: every replay open trade is closed at the
+    last simulated price; real (pre-existing) trades are untouched.
+    """
 
     def _setup_trades(self, tmp_path, specs):
         """specs: list of (pair, enter_tag, open_min) → returns created Trade list."""
@@ -123,7 +142,7 @@ class TestReconciliation:
 
         init_db(f"sqlite:///{tmp_path / 'recon.sqlite'}")
         created = []
-        for i, (pair, tag, minute) in enumerate(specs, start=1):
+        for pair, tag, minute in specs:
             t = Trade(
                 pair=pair, stake_amount=10.0, amount=1.0, open_rate=100.0,
                 open_date=datetime(2026, 1, 1, 0, minute, tzinfo=UTC),
@@ -134,48 +153,36 @@ class TestReconciliation:
         Trade.commit()
         return created
 
-    def test_real_pair_conflict_closes_replay(self, tmp_path):
-        # real BTC (id1), replay BTC (id2, same pair), replay ETH (id3)
-        t = self._setup_trades(tmp_path, [
-            ("BTC/USDC:USDC", "real", 0),
-            ("BTC/USDC:USDC", None, 5),     # replay, conflicts with real BTC
-            ("ETH/USDC:USDC", None, 10),    # replay, no conflict
-        ])
-        pre_existing = {t[0].id}
-        closed = runner._reconcile_open_trades(10, pre_existing)
-        assert closed == 1
-        assert t[0].is_open is True   # real kept
-        assert t[1].is_open is False  # replay BTC truncated
-        assert t[1].exit_reason == "replay_truncated"
-        assert t[2].is_open is True   # non-conflicting replay kept
-
-    def test_max_open_trades_cuts_excess_replay(self, tmp_path):
-        # 1 real + 3 replay (different pairs), MOT=2 → keep real + 1 replay, cut 2
+    def test_flattens_all_replay_keeps_real(self, tmp_path):
+        # real BTC (id1) + 2 replay (ETH, SOL) — all replay opens must close, real stays open
         t = self._setup_trades(tmp_path, [
             ("BTC/USDC:USDC", "real", 0),
             ("ETH/USDC:USDC", None, 5),
             ("SOL/USDC:USDC", None, 6),
-            ("XRP/USDC:USDC", None, 7),
         ])
-        pre_existing = {t[0].id}
-        closed = runner._reconcile_open_trades(2, pre_existing)
-        assert closed == 2  # 1 real + 3 replay, allowed=1 replay → cut 2 (oldest)
+        bot = _FakeBot({"ETH/USDC:USDC": 110.0, "SOL/USDC:USDC": 90.0})
+        closed = runner._flatten_replay_open_trades(bot, {t[0].id})
+        assert closed == 2
+        assert t[0].is_open is True            # real untouched
+        assert t[1].is_open is False and t[1].exit_reason == "replay_seed_end"
+        assert t[2].is_open is False and t[2].exit_reason == "replay_seed_end"
+
+    def test_closes_at_last_simulated_price(self, tmp_path):
+        t = self._setup_trades(tmp_path, [("ETH/USDC:USDC", None, 5)])
+        bot = _FakeBot({"ETH/USDC:USDC": 110.0})
+        runner._flatten_replay_open_trades(bot, set())
+        assert t[0].close_rate == 110.0       # last sim price, not entry
+
+    def test_price_unavailable_falls_back_to_open_rate(self, tmp_path):
+        t = self._setup_trades(tmp_path, [("XRP/USDC:USDC", None, 5)])
+        bot = _FakeBot({})                    # fetch_ticker raises → neutral close
+        closed = runner._flatten_replay_open_trades(bot, set())
+        assert closed == 1
+        assert t[0].is_open is False
+        assert t[0].close_rate == t[0].open_rate
+
+    def test_no_replay_trades_returns_zero(self, tmp_path):
+        t = self._setup_trades(tmp_path, [("BTC/USDC:USDC", "real", 0)])
+        closed = runner._flatten_replay_open_trades(_FakeBot(), {t[0].id})
+        assert closed == 0
         assert t[0].is_open is True
-        open_replay = [tr for tr in t[1:] if tr.is_open]
-        assert len(open_replay) == 1
-        assert open_replay[0].pair == "XRP/USDC:USDC"  # newest kept (oldest cut)
-
-    def test_no_real_trades_keeps_all_replay_within_mot(self, tmp_path):
-        t = self._setup_trades(tmp_path, [
-            ("BTC/USDC:USDC", None, 0),
-            ("ETH/USDC:USDC", None, 5),
-        ])
-        closed = runner._reconcile_open_trades(5, set())  # no pre-existing
-        assert closed == 0
-        assert all(tr.is_open for tr in t)
-
-    def test_mot_zero_means_unlimited(self, tmp_path):
-        t = self._setup_trades(tmp_path, [("BTC/USDC:USDC", None, 0), ("ETH/USDC:USDC", None, 5)])
-        closed = runner._reconcile_open_trades(0, set())  # 0 = unlimited
-        assert closed == 0
-        assert all(tr.is_open for tr in t)

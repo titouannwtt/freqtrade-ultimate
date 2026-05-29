@@ -146,9 +146,10 @@ The bot's **real** trades are sacred; replay trades yield. Guarantees:
 
 - **`reset_db=false`** (default) — existing trades preserved; the replay window is
   **capped at the first real (non-`[replay]`) trade**, so it never overlaps real ones.
-  Post-seed reconciliation closes replay-left-open trades that collide with a real open
-  trade's pair, or exceed `max_open_trades`, at their entry price
-  (`exit_reason="replay_truncated"`, kept in history) — real positions untouched.
+- **Flat book on resume** — at seed end *every* replay open trade is closed at the last
+  simulated price (`exit_reason="replay_seed_end"`, kept in history); real positions are
+  untouched. A simulated position is never carried across the sim→live boundary, where it
+  would be marked against the current live market and show nonsensical profit.
 - **`reset_db=true`** — wipes trade rows via `DELETE` (**not** unlinking the file the bot
   holds open).
 - Always: **full DB backup before** (`<db>.pre-replay.bak`) + **`PRAGMA quick_check`
