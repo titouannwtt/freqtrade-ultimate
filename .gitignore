@@ -142,6 +142,7 @@ user_data/strategies/*
 !live_configs/_binance_freqtrade_access_example.json
 !live_configs/_hyperliquid_freqtrade_access_example.json
 !live_configs/hyperliquid_strategy_config_example.json
+!live_configs/hyperliquid_strategy_dry_config_example.json
 !user_data/strategies/.gitkeep
 !user_data/strategies/simple_vwap_v1.py
 !user_data/strategies/kac_index_v1.py

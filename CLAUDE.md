@@ -1,3 +1,5 @@
+> **Référence transverse** — appliquer aussi les principes de https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md
+
 # CLAUDE.md
 
 ## What is this repo
@@ -73,6 +75,7 @@ strategy:   DCA orders = custom_stake * safety_order_volume_scale^(n-1)
 1. **External close handler** (`freqtradebot.py:_handle_external_close`) — Detects positions closed externally (Hyperliquid ADL, manual close). Closes trade at market with `exit_reason="external_close"`.
 2. **Liquidation detection** (`exchange/hyperliquid.py:fetch_liquidation_fills`) — Checks `liquidationMarkPx` field in user trades.
 3. **TrendRegularityFilter** (`plugins/pairlist/TrendRegularityFilter.py`) — Excludes pairs with strong linear uptrends (high R²). Useful for short-only strategies. Registered in `constants.py`.
+4. **Dry-run replay harness** (`freqtrade/replay/` + `rpc/api_server/api_replay.py`) — Drives the real live bot loop (`FreqtradeBot.process()`) candle-by-candle over historical data via a virtual clock + fake exchange, producing a FreqUI-compatible SQLite DB. Dry-run-only (structurally enforced, quadruple-guarded), Hyperliquid-native, funding-aware. **It is a live-behaviour validation / dry-run-seeding tool, NOT a strategy-selection backtester** — see `.claude-tips/replay.md`. Used from FreqUI as a **per-bot action** ("Simulate dry-run (replay)", dry bots only) that seeds the bot's own dry DB, or via CLI `python -m freqtrade.replay [--seed --sub-step --reset-db …]`, or **auto-launched** by a `dry_run_replay` config block. A **coordinator daemon** (`coordinator.py`, auto-spawned) caps concurrent replays to `nproc-2-hyperopt_cores` with a priority queue + SIGSTOP/SIGCONT pause/resume. DB-integrity is guaranteed (backup + `PRAGMA quick_check` + auto-restore; real trades win over replay trades). Requires `pip install -e ".[replay]"`. Tests: `tests/replay/` (~104). Deploy rule: `runner.py`/`exchange.py`/`coordinator*.py` changes run in a subprocess (no bot restart); `api_replay.py`/`lifecycle.py`/`freqtradebot.py` changes need a dry-bot restart.
 
 ## Exporting strategies (`user_data/export_strategies.py`)
 
@@ -202,3 +205,4 @@ These `.claude-tips/` files contain in-depth reference for specific topics. **Do
 | `machine_learning.md` | ML / FreqAI reference |
 | `trend_following.md` | Momentum / trend strategies |
 | `strategy_bugs_reference.md` | Known strategy bugs: generated_strategy* template issues, trailing stop, future-looking, startup_candle_count |
+| `replay.md` | Dry-run replay harness (`freqtrade/replay`): when to use it (live-behaviour validation, NOT strategy selection), guardrails, known divergences |
