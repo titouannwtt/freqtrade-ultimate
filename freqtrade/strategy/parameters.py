@@ -279,6 +279,10 @@ class DecimalParameter(NumericParameter):
         Create optimization space.
         :param name: A name of parameter field.
         """
+        if "step" in self._space_params:
+            return SKDecimal(
+                low=self.low, high=self.high, name=name, **self._space_params
+            )
         return SKDecimal(
             low=self.low, high=self.high, decimals=self.decimals, name=name, **self._space_params
         )

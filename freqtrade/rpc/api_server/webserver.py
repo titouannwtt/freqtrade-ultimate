@@ -214,6 +214,7 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_download_data import router as api_download_data
         from freqtrade.rpc.api_server.api_pair_history import router as api_pair_history
         from freqtrade.rpc.api_server.api_pairlists import router as api_pairlists
+        from freqtrade.rpc.api_server.api_replay import router as api_replay
         from freqtrade.rpc.api_server.api_stratdev import router as api_stratdev
         from freqtrade.rpc.api_server.api_stratdev_editor import router as api_stratdev_editor
         from freqtrade.rpc.api_server.api_stratdev_jobs import router as api_stratdev_jobs
@@ -250,6 +251,15 @@ class ApiServer(RPCHandler):
             prefix="/api/v1",
             tags=["Backtest"],
             dependencies=[Depends(http_basic_or_jwt_token), Depends(is_webserver_mode)],
+        )
+        # Replay runs in an isolated subprocess (it freezes the clock), so unlike
+        # in-process backtesting it does NOT block the trade loop — expose it on
+        # any bot (trade / dry-run / webserver), not just webserver mode.
+        app.include_router(
+            api_replay,
+            prefix="/api/v1",
+            tags=["Replay"],
+            dependencies=[Depends(http_basic_or_jwt_token)],
         )
         app.include_router(
             api_bg_tasks,

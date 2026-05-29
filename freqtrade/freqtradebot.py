@@ -334,6 +334,23 @@ class FreqtradeBot(LoggingMixin):
         otherwise a new trade is created.
         :return: True if one or more trades has been created or closed, False otherwise
         """
+        # Fork-specific: while a dry-run replay is seeding this bot's DB, skip the whole
+        # trading cycle (the replay subprocess must be the sole DB writer). Reloads to
+        # resume once the replay finishes. No-op when no replay is pending.
+        try:
+            from freqtrade.replay.lifecycle import (
+                maybe_autolaunch_replay,
+                on_replay_tick,
+                replay_pending,
+            )
+
+            maybe_autolaunch_replay(self)  # one-shot: config-driven seed at startup
+            if replay_pending():
+                on_replay_tick(self)
+                return
+        except Exception as exc:  # never let the replay hook break the trading loop
+            logger.debug("replay lifecycle tick failed: %s", exc)
+
         _cycle_t0 = time_module.monotonic()
         _cycle_phases: list[tuple[str, float]] = []
 
@@ -1714,6 +1731,11 @@ class FreqtradeBot(LoggingMixin):
         """
         Sends rpc notification when a entry order cancel occurred.
         """
+        # Mute notifications for replay-seeded trades: after a dry-run replay seed, the bot
+        # reconciles many stale limit orders from simulated history and the resulting cancel /
+        # replace cycles would flood the UI with noise (it's bookkeeping, not live signal).
+        if trade.enter_tag and trade.enter_tag.startswith("[replay]"):
+            return
         current_rate = self.exchange.get_rate(
             trade.pair, side="entry", is_short=trade.is_short, refresh=False
         )
@@ -2708,6 +2730,11 @@ class FreqtradeBot(LoggingMixin):
         """
         Sends rpc notification when a sell cancel occurred.
         """
+        # Mute notifications for replay-seeded trades: after a dry-run replay seed, the bot
+        # reconciles many stale limit orders from simulated history and the resulting cancel /
+        # replace cycles would flood the UI with noise (it's bookkeeping, not live signal).
+        if trade.enter_tag and trade.enter_tag.startswith("[replay]"):
+            return
         if trade.exit_order_status == reason:
             return
         else:

@@ -700,6 +700,38 @@ class BacktestResponse(BaseModel):
     backtest_result: dict[str, Any] | None = None
 
 
+class ReplayRequest(BaseModel):
+    """Inputs to start a dry-run replay (fork-specific)."""
+
+    strategy: str
+    timerange: str  # YYYYMMDD-YYYYMMDD
+    pairs: list[str]
+    wallet: float = 1000.0
+    slippage: float = 0.0005
+    sub_step: int = 60  # intra-candle resolution in seconds (60=1m, 300=5m, 900=15m)
+    reset_db: bool = False  # wipe the dry DB first (else preserve existing trades)
+    priority: int = 0  # coordinator scheduling priority (higher = sooner)
+
+
+class ReplayReprioritizeRequest(BaseModel):
+    """Bump a (possibly different) bot's queued/running replay up the coordinator queue."""
+
+    bot_id: str
+    priority: int
+
+
+class ReplayResponse(BaseModel):
+    status: str  # not_started | queued | running | paused | done | error
+    running: bool
+    status_msg: str
+    progress: float = 0.0
+    step: str = ""
+    db_url: str | None = None
+    result: dict[str, Any] | None = None
+    elapsed_s: float | None = None  # wall-clock seconds elapsed
+    eta_s: float | None = None  # estimated wall-clock seconds remaining
+
+
 # TODO: This is a copy of BacktestHistoryEntryType
 class BacktestHistoryEntry(BaseModel):
     filename: str

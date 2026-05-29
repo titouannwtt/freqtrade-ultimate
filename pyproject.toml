@@ -123,8 +123,11 @@ jupyter = [
   "nbconvert",
   "nbstripout",
 ]
+# Fork-specific: dry-run replay harness (freqtrade/replay). freezegun freezes
+# the process-wide clock so the live bot loop believes it lives in the past.
+replay = ["freezegun>=1.2"]
 all = [
-  "freqtrade[plot,hyperopt,freqai,freqai_rl,jupyter]",
+  "freqtrade[plot,hyperopt,freqai,freqai_rl,jupyter,replay]",
 ]
 dev = [
   "freqtrade[all,develop]",

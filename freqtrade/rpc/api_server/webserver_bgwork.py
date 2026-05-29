@@ -35,6 +35,17 @@ class ApiBG:
     # Exchange - only available in webserver mode.
     exchanges: dict[str, Exchange] = {}
 
+    # Dry-run replay (fork-specific). The replay runs in an isolated subprocess
+    # because it freezes the process-wide clock (freezegun) — which must not
+    # affect the always-on webserver. State here just tracks that subprocess.
+    replay: dict[str, Any] = {
+        "proc": None,  # subprocess.Popen | None
+        "progress_file": None,  # path to the JSON progress/result file
+        "db_url": None,  # the *.replay.sqlite produced
+        "error": None,
+    }
+    replay_running: bool = False
+
     # Generic background jobs
 
     # TODO: Change this to FtTTLCache -> must be more intelligent than FtTTLCache - as we can't

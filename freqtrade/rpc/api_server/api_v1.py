@@ -72,7 +72,8 @@ logger = logging.getLogger(__name__)
 # 2.46: Add prepend_data to download-data endpoint
 # 2.47: Add Strategy parameters
 # 2.48: add /backtest/history/wallets endpoint
-API_VERSION = 2.48
+# 2.49: add /replay endpoints (fork-specific dry-run replay)
+API_VERSION = 2.49
 
 # Public API, requires no auth.
 router_public = APIRouter()
