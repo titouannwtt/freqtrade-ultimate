@@ -26,7 +26,6 @@
       "use_exit_cci_shift": true,
       "use_exit_cci_value": false
     },
-    "protection": {},
     "roi": {
       "0": 4.05,
       "6000": 3.42,
