@@ -19,7 +19,7 @@ from optuna.trial import FrozenTrial, Trial, TrialState
 from freqtrade.constants import FTHYPT_FILEVERSION, LAST_BT_RESULT_FN, Config
 from freqtrade.enums import HyperoptState
 from freqtrade.misc import file_dump_json, plural
-from freqtrade.optimize.hyperopt.hyperopt_optimizer import INITIAL_POINTS, HyperOptimizer
+from freqtrade.optimize.hyperopt.hyperopt_optimizer import INITIAL_POINTS, MAX_LOSS, HyperOptimizer
 from freqtrade.optimize.hyperopt.hyperopt_output import HyperoptOutput
 from freqtrade.optimize.hyperopt_tools import (
     HyperoptStateContainer,
@@ -404,10 +404,41 @@ class Hyperopt:
                             n_points=current_jobs, dimensions=self.hyperopter.o_dimensions
                         )
 
-                        f_val = self.run_optimizer_parallel(
-                            parallel,
-                            [asked1.params for asked1 in asked],
-                        )
+                        try:
+                            f_val = self.run_optimizer_parallel(
+                                parallel,
+                                [asked1.params for asked1 in asked],
+                            )
+                        except Exception:
+                            logger.warning(
+                                f"Parallel batch crashed (batch {i + 1}/{evals}), "
+                                "recording MAX_LOSS for all points in this batch."
+                            )
+                            f_val = [
+                                {
+                                    "loss": MAX_LOSS,
+                                    "params_dict": {},
+                                    "params_details": {},
+                                    "params_not_optimized": {},
+                                    "results_metrics": {
+                                        "trade_count": 0,
+                                        "total_trades": 0,
+                                        "profit_total": 0.0,
+                                        "profit_mean": 0.0,
+                                        "wins": 0,
+                                        "losses": 0,
+                                        "draws": 0,
+                                        "max_drawdown_account": 0.0,
+                                    },
+                                    "results_explanation": "Batch crash → MAX_LOSS",
+                                    "total_profit": 0.0,
+                                    "current_epoch": i * jobs + j_idx + 1 + start,
+                                    "is_initial_point": False,
+                                    "is_random": True,
+                                    "is_best": False,
+                                }
+                                for j_idx in range(current_jobs)
+                            ]
 
                         f_val_loss = [v["loss"] for v in f_val]
                         for o_ask, v, full_result in zip(asked, f_val_loss, f_val, strict=False):
