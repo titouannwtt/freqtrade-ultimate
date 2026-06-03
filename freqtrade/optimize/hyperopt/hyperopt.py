@@ -409,10 +409,11 @@ class Hyperopt:
                                 parallel,
                                 [asked1.params for asked1 in asked],
                             )
-                        except Exception:
+                        except Exception as exc:
                             logger.warning(
                                 f"Parallel batch crashed (batch {i + 1}/{evals}), "
-                                "recording MAX_LOSS for all points in this batch."
+                                f"recording MAX_LOSS for all points in this batch. "
+                                f"Error: {exc!r}"
                             )
                             f_val = [
                                 {
@@ -437,7 +438,7 @@ class Hyperopt:
                                     "is_random": True,
                                     "is_best": False,
                                 }
-                                for j_idx in range(current_jobs)
+                                for j_idx in range(len(asked))
                             ]
 
                         f_val_loss = [v["loss"] for v in f_val]
@@ -448,8 +449,8 @@ class Hyperopt:
                         for j, val in enumerate(f_val):
                             # Use human-friendly indexes here (starting from 1)
                             current = i * jobs + j + 1 + start
-
-                            self.evaluate_result(val, current, is_random[j])
+                            rand = is_random[j] if j < len(is_random) else True
+                            self.evaluate_result(val, current, rand)
                             pbar.update(task, advance=1)
                         self.hyperopter.handle_mp_logging()
                         gc.collect()
