@@ -152,6 +152,16 @@ user_data/strategies/*
 !backtest_configs/BTC_kraken_31.json
 !backtest_configs/BTC_kucoin_87.json
 !backtest_configs/USDC_hyperliquid_118.json
+!backtest_configs/hl_120pairs_mot2.json
+!backtest_configs/hl_120pairs_mot3.json
+!backtest_configs/hl_120pairs_mot4.json
+!backtest_configs/hl_120pairs_mot5.json
+!backtest_configs/hl_120pairs_mot6.json
+!backtest_configs/hl_120pairs_mot6_dual.json
+!backtest_configs/hl_120pairs_mot8.json
+!backtest_configs/hl_120pairs_mot12.json
+!backtest_configs/hl_120pairs_mot20.json
+!backtest_configs/hl_272pairs_mot3.json
 !backtest_configs/USDT_binance_1.json
 !backtest_configs/USDT_binance_20.json
 !backtest_configs/USDT_binance_408.json
