@@ -112,8 +112,7 @@ target/
 .vscode
 .claude/
 
-.pytest_cache/
-.mypy_cache/
+.*_cache/
 
 #exceptions
 !*.gitkeep
