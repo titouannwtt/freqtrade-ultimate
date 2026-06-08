@@ -2213,6 +2213,16 @@ class Exchange:
             }
             params = {"type": market_types.get(market_type, market_type)} if market_type else {}
             tickers = self._api.fetch_tickers(symbols, params)
+            # Defensive normalization: some CCXT adapters (observed on Hyperliquid)
+            # occasionally return a list of ticker dicts instead of the documented
+            # {symbol: ticker} mapping. Re-key by `symbol` so all downstream callers
+            # (`get_conversion_rate`, etc.) can safely use `.get(pair, None)`.
+            if isinstance(tickers, list):
+                tickers = {
+                    t["symbol"]: t
+                    for t in tickers
+                    if isinstance(t, dict) and t.get("symbol")
+                }
             with self._cache_lock:
                 self._fetch_tickers_cache[cache_key] = tickers
             return tickers
