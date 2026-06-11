@@ -578,12 +578,22 @@ class ExchangeFetcher:
         capital: float = 0.0,
     ) -> list[list]:
         client = await self._ensure_client()
+        is_funding = candle_type == "funding_rate"
         params: dict[str, Any] = {}
-        if candle_type and candle_type not in ("spot", "futures"):
+        if candle_type and not is_funding and candle_type not in ("spot", "futures"):
             params["price"] = candle_type
-        ohlcv_weight = self._weight_map.get("fetch", 1.0)
+        weight_key = "funding_history" if is_funding else "fetch"
+        ohlcv_weight = self._weight_map.get(weight_key, self._weight_map.get("fetch", 1.0))
         await self.budget.acquire(ohlcv_weight, priority=priority, capital=capital)
         try:
+            if is_funding:
+                # ccxt has no funding-rate OHLCV; mirror
+                # Exchange._fetch_funding_rate_history's candle conversion.
+                raw = await asyncio.wait_for(
+                    client.fetch_funding_rate_history(pair, since=since_ms, limit=limit),
+                    timeout=self._FETCH_TIMEOUT_S,
+                )
+                return [[x["timestamp"], x["fundingRate"], 0, 0, 0, 0] for x in raw]
             data = await asyncio.wait_for(
                 client.fetch_ohlcv(
                     pair,

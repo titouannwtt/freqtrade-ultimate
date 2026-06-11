@@ -67,6 +67,7 @@ GLOBAL_DEFAULTS: dict = {
 # Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits
 HL_WEIGHT_MAP: dict[str, float] = {
     "fetch": 4.0,  # candleSnapshot
+    "funding_history": 4.0,  # fundingHistory
     "tickers": 20.0,  # info (allMids + meta)
     "positions_get": 2.0,  # clearinghouseState
     "positions_put": 0.0,  # local cache write, no API call

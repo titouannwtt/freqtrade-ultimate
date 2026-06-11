@@ -681,7 +681,9 @@ class CachedExchangeMixin:
 
     # -------------------------------------------------------------------- OHLCV
 
-    _CACHEABLE_CANDLE_TYPES = frozenset({CandleType.SPOT, CandleType.FUTURES})
+    _CACHEABLE_CANDLE_TYPES = frozenset(
+        {CandleType.SPOT, CandleType.FUTURES, CandleType.MARK, CandleType.FUNDING_RATE}
+    )
 
     async def _async_get_candle_history(
         self,
