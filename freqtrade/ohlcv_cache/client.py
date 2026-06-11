@@ -653,7 +653,7 @@ class OhlcvCacheClient:
     ) -> float:
         stagger_max = float(global_cfg.get("client_stagger_s", 30))
         try:
-            uptime = _sync_ping_daemon(client._socket_path)
+            uptime = _sync_ping_daemon(client.socket_path)
             if uptime is not None and uptime > 60:
                 logger.info(
                     "daemon warm (uptime=%.0fs) — skipping stagger",
