@@ -715,7 +715,10 @@ class CachedExchangeMixin:
                         await asyncio.wait_for(
                             client.acquire_rate_token(
                                 priority=OhlcvCacheClient.LOW,
-                                cost=4.0,
+                                # HL candleSnapshot: 20 base + 1/60 candles.
+                                # Offline fetches are often multi-hundred
+                                # candles, so charge a realistic average.
+                                cost=30.0,
                             ),
                             timeout=30.0,
                         )
@@ -757,7 +760,7 @@ class CachedExchangeMixin:
         if not self._ftcache_client:
             # Daemon unavailable in live mode — use local limiter
             limiter = self._ftcache_get_local_limiter()
-            await asyncio.to_thread(limiter.acquire, 4.0, None)
+            await asyncio.to_thread(limiter.acquire, 30.0, None)
             return await super()._async_get_candle_history(  # type: ignore[misc]
                 pair,
                 timeframe,

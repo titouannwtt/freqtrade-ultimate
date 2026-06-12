@@ -64,10 +64,19 @@ GLOBAL_DEFAULTS: dict = {
 # type.  Total budget is 1200 weight / minute / IP.  We convert to a
 # weight-per-second TokenBucket so the daemon never exceeds the limit.
 #
-# Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits
+# Info requests cost 20 unless whitelisted at 2 (clearinghouseState, allMids,
+# l2Book, ...).  candleSnapshot and fundingHistory additionally charge weight
+# per items returned (1 per 60 candles / 1 per 20 funding entries) — the
+# "*_per_items" entries below feed that surcharge (computed on the requested
+# limit).  A 5000-candle warmup chunk therefore really costs ~104, not 4;
+# underestimating this kept the daemon in permanent 429 backoff.
+#
+# Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits
 HL_WEIGHT_MAP: dict[str, float] = {
-    "fetch": 4.0,  # candleSnapshot
-    "funding_history": 4.0,  # fundingHistory
+    "fetch": 20.0,  # candleSnapshot (base)
+    "fetch_per_items": 60.0,  # +1 weight per 60 candles returned
+    "funding_history": 20.0,  # fundingHistory (base)
+    "funding_history_per_items": 20.0,  # +1 weight per 20 items returned
     "tickers": 20.0,  # info (allMids + meta)
     "positions_get": 2.0,  # clearinghouseState
     "positions_put": 0.0,  # local cache write, no API call
@@ -90,9 +99,11 @@ HL_EFFECTIVE_BUDGET_PER_MIN = int(HL_WEIGHT_BUDGET_PER_MIN * 0.95)
 # For others: flat token-based (1 unit = 1 request).
 EXCHANGE_DEFAULTS: dict[str, dict] = {
     "hyperliquid": {
-        # 1020 weight/min ÷ 60 = 17 weight/sec steady, burst 30
+        # 1140 weight/min ÷ 60 = 19 weight/sec steady.  Burst must exceed the
+        # largest single request cost (5000-candle chunk ≈ 104 weight) or the
+        # token bucket can never grant it (tokens are capped at burst).
         "rate_per_s": HL_EFFECTIVE_BUDGET_PER_MIN / 60.0,
-        "burst": 30.0,
+        "burst": 150.0,
         "weight_mode": True,
         "weight_budget_per_min": HL_EFFECTIVE_BUDGET_PER_MIN,
         "weight_map": HL_WEIGHT_MAP,

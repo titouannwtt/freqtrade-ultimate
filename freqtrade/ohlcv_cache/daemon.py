@@ -28,6 +28,7 @@ import fcntl
 import heapq
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -584,6 +585,14 @@ class ExchangeFetcher:
             params["price"] = candle_type
         weight_key = "funding_history" if is_funding else "fetch"
         ohlcv_weight = self._weight_map.get(weight_key, self._weight_map.get("fetch", 1.0))
+        # Response-size weight (Hyperliquid): candleSnapshot adds 1 weight per
+        # 60 candles returned, fundingHistory 1 per 20 items.  Charge on the
+        # requested limit (upper bound of items returned) before fetching.
+        per_items = self._weight_map.get(
+            "funding_history_per_items" if is_funding else "fetch_per_items", 0.0
+        )
+        if per_items and limit:
+            ohlcv_weight += math.ceil(limit / per_items)
         await self.budget.acquire(ohlcv_weight, priority=priority, capital=capital)
         try:
             if is_funding:
