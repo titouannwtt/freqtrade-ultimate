@@ -1160,8 +1160,10 @@ class CachedExchangeMixin:
         return balances
 
     def fetch_l2_order_book(self, pair: str, limit: int = 100) -> OrderBook:
-        if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
+        # Metered in dry-run too: unlike order endpoints, dry bots hit the
+        # REAL l2Book API for pricing and dry-order fill simulation.  The
+        # priority floor downgrades dry bots to LOW so they yield to live.
+        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
         return super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
 
     # -------------------------------------------------------------------- remaining REST calls
@@ -1321,8 +1323,8 @@ class CachedExchangeMixin:
         *,
         cached: bool = False,
     ) -> dict[str, Any]:
-        if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
+        # Metered in dry-run too — real API call (see fetch_l2_order_book).
+        self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
         return super().fetch_bids_asks(symbols=symbols, cached=cached)  # type: ignore[misc]
 
     def get_trades_for_order(
