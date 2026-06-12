@@ -282,6 +282,15 @@ class TokenBucket:
         priority: int = 2,
         capital: float = 0.0,
     ) -> None:
+        # Invariant: a cost above burst can never be granted (tokens are
+        # capped at burst), which deadlocks the whole queue behind it.
+        if cost > self.burst:
+            logger.warning(
+                "acquire cost %.0f exceeds burst %.0f — clamping (check weight model)",
+                cost,
+                self.burst,
+            )
+            cost = self.burst
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "acquire request: cost=%.1f priority=%d capital=%.0f "
@@ -592,7 +601,14 @@ class ExchangeFetcher:
             "funding_history_per_items" if is_funding else "fetch_per_items", 0.0
         )
         if per_items and limit:
-            ohlcv_weight += math.ceil(limit / per_items)
+            # The exchange caps response size regardless of the requested
+            # limit (HL: 500 funding entries / 5000 candles per call), so
+            # charge on what can actually be returned.
+            max_items = self._weight_map.get(
+                "funding_history_max_items" if is_funding else "fetch_max_items", 0.0
+            )
+            effective_items = min(limit, max_items) if max_items else limit
+            ohlcv_weight += math.ceil(effective_items / per_items)
         await self.budget.acquire(ohlcv_weight, priority=priority, capital=capital)
         try:
             if is_funding:

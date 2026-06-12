@@ -75,8 +75,13 @@ GLOBAL_DEFAULTS: dict = {
 HL_WEIGHT_MAP: dict[str, float] = {
     "fetch": 20.0,  # candleSnapshot (base)
     "fetch_per_items": 60.0,  # +1 weight per 60 candles returned
+    "fetch_max_items": 5000.0,  # candleSnapshot returns at most 5000 candles
     "funding_history": 20.0,  # fundingHistory (base)
     "funding_history_per_items": 20.0,  # +1 weight per 20 items returned
+    # fundingHistory returns at most 500 entries per call, no matter the
+    # requested limit.  Without this cap a limit=5000 warmup request was
+    # charged 270 weight — above burst (150), deadlocking the token bucket.
+    "funding_history_max_items": 500.0,
     "tickers": 20.0,  # info (allMids + meta)
     "positions_get": 2.0,  # clearinghouseState
     "positions_put": 0.0,  # local cache write, no API call
