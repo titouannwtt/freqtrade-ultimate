@@ -848,7 +848,9 @@ class CachedExchangeMixin:
             has_open = bool(self._ftcache_open_pairs & set(symbols))
             base_prio = OhlcvCacheClient.HIGH if has_open else OhlcvCacheClient.NORMAL
             prio_gt = self._ftcache_init_priority(base_prio)
-            self._ftcache_acquire_sync(priority=prio_gt)
+            # A direct fetch_tickers costs the full non-whitelisted info
+            # weight (HL: metaAndAssetCtxs = 20), not the default 1.
+            self._ftcache_acquire_sync(priority=prio_gt, cost=20.0)
             return super().get_tickers(  # type: ignore[misc]
                 symbols=symbols,
                 cached=cached,
@@ -882,7 +884,7 @@ class CachedExchangeMixin:
                     return {}
                 base_prio = OhlcvCacheClient.HIGH if has_open else OhlcvCacheClient.NORMAL
                 prio_gt = self._ftcache_init_priority(base_prio)
-                self._ftcache_acquire_sync(priority=prio_gt)
+                self._ftcache_acquire_sync(priority=prio_gt, cost=20.0)
                 return super().get_tickers(  # type: ignore[misc]
                     symbols=symbols,
                     cached=cached,
@@ -917,7 +919,7 @@ class CachedExchangeMixin:
                     self._STALE_TICKERS_MAX_AGE_S,
                     len(self._ftcache_open_pairs),
                 )
-                self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
+                self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=20.0)
                 return super().get_tickers(  # type: ignore[misc]
                     symbols=symbols,
                     cached=cached,
@@ -1277,13 +1279,16 @@ class CachedExchangeMixin:
             if stale and pair in stale:
                 logger.debug("fetch_ticker blocked during backoff — stale for %s", pair)
                 return stale[pair]
-            if is_open_pair and self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH):
+            # ccxt fetchTicker on HL resolves to fetchTickers (weight 20).
+            if is_open_pair and self._ftcache_acquire_sync(
+                priority=OhlcvCacheClient.HIGH, cost=20.0
+            ):
                 return super().fetch_ticker(pair)  # type: ignore[misc]
             raise DDosProtection(
                 f"fetch_ticker blocked for {pair} during backoff (no stale data)"
             )
         prio_tick = self._ftcache_init_priority(base_prio)
-        if not self._ftcache_acquire_sync(priority=prio_tick):
+        if not self._ftcache_acquire_sync(priority=prio_tick, cost=20.0):
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
                 stale = self._fetch_tickers_cache.get(cache_key)  # type: ignore[attr-defined]

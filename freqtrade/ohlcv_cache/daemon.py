@@ -1284,6 +1284,11 @@ class Daemon:
         else:
             start_ms = (int(since_ms) // tf_ms) * tf_ms
             end_ms = start_ms + limit * tf_ms
+            # Clamp to the current candle boundary: a large limit on a big
+            # timeframe (e.g. 5000 x 1d) otherwise yields a far-future end,
+            # and the exchange 500s on future ranges (retried every cycle).
+            now_end_ms = ((int(time.time() * 1000) // tf_ms) + 1) * tf_ms
+            end_ms = min(end_ms, now_end_ms)
 
         # Fast-path for live: if we refreshed within the current tf window
         # AND the cache fully covers the requested range, just serve it.

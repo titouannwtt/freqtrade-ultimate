@@ -618,7 +618,9 @@ class TestInterceptorPriorities:
             CachedExchangeMixin.fetch_ticker(mixin, "BTC/USDC")
         except (AttributeError, TypeError):
             pass
-        mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.NORMAL)
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.NORMAL, cost=20.0
+        )
 
     def test_fetch_funding_rate_normal(self):
         mixin = self._make_interceptor_mixin()
@@ -1226,6 +1228,7 @@ class TestFallbackRateLimiting:
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(
             priority=OhlcvCacheClient.NORMAL,
+            cost=20.0,
         )
 
     def test_get_tickers_loop_running_falls_back_to_ccxt(self):
