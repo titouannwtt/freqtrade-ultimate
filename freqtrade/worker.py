@@ -17,7 +17,7 @@ from freqtrade.configuration import Configuration
 from freqtrade.constants import PROCESS_THROTTLE_SECS, RETRY_TIMEOUT, Config
 from freqtrade.enums import RPCMessageType, State
 from freqtrade.exceptions import OperationalException, TemporaryError
-from freqtrade.exchange import timeframe_to_next_date
+from freqtrade.exchange import timeframe_to_next_date, timeframe_to_seconds
 from freqtrade.freqtradebot import FreqtradeBot
 
 
@@ -70,7 +70,13 @@ class Worker:
         hash_val = int(hashlib.md5(bot_name.encode()).hexdigest()[:8], 16)
         is_dry_run = self._config.get("dry_run", False)
         if is_dry_run:
-            self._candle_jitter_s = 5.0 + (hash_val % 100) / 10.0  # 5.0 to 14.9s
+            # Spread dry bots across a wide post-close window. They don't trade
+            # real money, so a late refresh is harmless, and spreading the whole
+            # dry fleet over ~2 min (vs 10s) drops arrival density ~10x and keeps
+            # them from flooding the shared-IP budget at the candle boundary.
+            tf_secs = timeframe_to_seconds(self._config.get("timeframe") or "15m")
+            spread = min(max(tf_secs * 0.3, 30.0), 120.0)  # 30..120s
+            self._candle_jitter_s = 5.0 + (hash_val % 1000) / 1000.0 * spread
         else:
             self._candle_jitter_s = (hash_val % 50) / 10.0  # 0.0 to 4.9s
         logger.info(
