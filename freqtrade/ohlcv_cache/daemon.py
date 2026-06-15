@@ -1157,6 +1157,17 @@ class Daemon:
             or "Service Unavailable" in msg
         )
 
+    @staticmethod
+    def _is_rate_limit(exc: Exception) -> bool:
+        """Return True if the exception is a 429 / rate-limit rejection."""
+        msg = str(exc)
+        return (
+            "429" in msg
+            or "Too Many Requests" in msg
+            or "RateLimitExceeded" in msg
+            or "DDoSProtection" in msg
+        )
+
     async def _fetch_chunk(
         self,
         series: CandleSeries,
@@ -1207,6 +1218,16 @@ class Daemon:
                     )
                     await asyncio.sleep(delay)
                     continue
+                # A 429 here means the token bucket let through more weight
+                # than the IP budget allows (the weight model can under-count).
+                # Feed it back into the adaptive backoff so the whole fleet
+                # throttles, otherwise these leaked 429s never slow anything.
+                if self._is_rate_limit(e):
+                    self._get_budget(series.exchange).trigger_backoff(
+                        2.0,
+                        event_log=self.event_log,
+                        exchange=series.exchange,
+                    )
                 # Non-retryable error or last attempt exhausted
                 self.stats.fetch_errors += 1
                 logger.warning(

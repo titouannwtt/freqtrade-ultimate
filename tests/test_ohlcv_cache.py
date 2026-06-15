@@ -3077,3 +3077,68 @@ class TestOrderReporting:
             action="cancel",
             order_id="c1",
         )
+
+
+# -------------------------------------------------------------------- gap computation
+
+HOUR_MS = 3_600_000
+
+
+class TestComputeGapsSubCandle:
+    """compute_gaps must never emit a sub-candle gap (poison loop)."""
+
+    def test_unaligned_cached_start_no_prefix_gap(self):
+        """A listing candle off the grid must not create a perpetual gap."""
+        from freqtrade.ohlcv_cache.gaps import compute_gaps
+
+        # Cache starts 52ms past an hour boundary (listing candle), request
+        # starts exactly on the boundary just before it.
+        base = 1781071200000
+        gaps = compute_gaps(
+            requested_start_ms=base,
+            requested_end_ms=base + 10 * HOUR_MS,
+            cached_start_ms=base + 52,
+            cached_end_ms=base + 10 * HOUR_MS - HOUR_MS,
+            tf_ms=HOUR_MS,
+        )
+        # The 52ms prefix artifact must be gone; only real gaps remain.
+        for g in gaps:
+            assert g.end_ms - g.start_ms >= HOUR_MS
+
+    def test_aligned_cache_full_coverage_no_gap(self):
+        from freqtrade.ohlcv_cache.gaps import compute_gaps
+
+        base = 1781071200000
+        gaps = compute_gaps(
+            requested_start_ms=base,
+            requested_end_ms=base + 5 * HOUR_MS,
+            cached_start_ms=base,
+            cached_end_ms=base + 4 * HOUR_MS,
+            tf_ms=HOUR_MS,
+        )
+        assert gaps == []
+
+    def test_legit_suffix_gap_preserved(self):
+        from freqtrade.ohlcv_cache.gaps import compute_gaps
+
+        base = 1781071200000
+        gaps = compute_gaps(
+            requested_start_ms=base,
+            requested_end_ms=base + 6 * HOUR_MS,
+            cached_start_ms=base,
+            cached_end_ms=base + 4 * HOUR_MS,
+            tf_ms=HOUR_MS,
+        )
+        assert len(gaps) == 1
+        assert gaps[0].end_ms - gaps[0].start_ms >= HOUR_MS
+
+
+class TestChunkFetchRateLimitDetection:
+    """A 429 in a chunk fetch must be recognised so backoff can fire."""
+
+    def test_is_rate_limit_recognises_429(self):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        assert Daemon._is_rate_limit(Exception("hyperliquid 429 Too Many Requests"))
+        assert Daemon._is_rate_limit(Exception("RateLimitExceeded: ..."))
+        assert not Daemon._is_rate_limit(Exception("500 Internal Server Error"))

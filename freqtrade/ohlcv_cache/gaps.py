@@ -56,6 +56,14 @@ def compute_gaps(
     if cached_start_ms is None or cached_end_ms is None:
         return [Gap(requested_start_ms, requested_end_ms)]
 
+    # Cached boundaries can be off the timeframe grid when the exchange
+    # returns a listing candle at a non-aligned timestamp (e.g. a pair
+    # listed mid-candle). Align them down so we never compute a sub-candle
+    # gap from the misalignment — such a gap spans zero candles, can never
+    # be satisfied, and would be re-fetched on every cycle forever.
+    cached_start_ms = (cached_start_ms // tf_ms) * tf_ms
+    cached_end_ms = (cached_end_ms // tf_ms) * tf_ms
+
     cached_end_exclusive = cached_end_ms + tf_ms
     gaps: list[Gap] = []
 
@@ -76,7 +84,9 @@ def compute_gaps(
             suffix_start = cached_end_exclusive
         gaps.append(Gap(suffix_start, requested_end_ms))
 
-    return gaps
+    # Drop any gap that spans less than one full candle (defensive: a
+    # sub-candle gap has nothing to fetch and loops forever otherwise).
+    return [g for g in gaps if g.end_ms - g.start_ms >= tf_ms]
 
 
 def chunk_gap(gap: Gap, max_candles_per_chunk: int, tf_ms: int) -> list[Gap]:
