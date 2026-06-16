@@ -930,9 +930,13 @@ class RPC:
             "latest_trade_timestamp": dt_ts_def(last_date, 0),
             "avg_duration": str(timedelta(seconds=sum(durations) / num)).split(".")[0],
             "best_pair": best_pair[0] if best_pair else "",
-            "best_rate": round(best_pair[1] * 100, 2) if best_pair else 0,  # Deprecated
-            "best_pair_profit_ratio": best_pair[1] if best_pair else 0,
-            "best_pair_profit_abs": best_pair[2] if best_pair else 0,
+            # best_pair[1] (profit_ratio) is a SQL division that returns NULL when
+            # cost_per_pair is 0, so guard against None before arithmetic.
+            "best_rate": (
+                round(best_pair[1] * 100, 2) if best_pair and best_pair[1] is not None else 0
+            ),  # Deprecated
+            "best_pair_profit_ratio": best_pair[1] if best_pair and best_pair[1] is not None else 0,
+            "best_pair_profit_abs": best_pair[2] if best_pair and best_pair[2] is not None else 0,
             "winning_trades": winning_trades,
             "losing_trades": losing_trades,
             "profit_factor": profit_factor,
