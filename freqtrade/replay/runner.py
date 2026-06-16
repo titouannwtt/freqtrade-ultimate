@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from freqtrade.configuration import Configuration
-from freqtrade.enums import CandleType, State
+from freqtrade.enums import CandleType, ExitCheckTuple, ExitType, State
 from freqtrade.exchange import timeframe_to_seconds
 from freqtrade.freqtradebot import FreqtradeBot
 from freqtrade.persistence import Trade
@@ -226,6 +226,8 @@ def run_replay(
             wall_clock,
             sub_step=sub_step,
             progress_callback=progress_callback,
+            store=store,
+            candle_type=candle_type,
         )
         duration_s = wall_clock() - run_t0
         summary = _build_summary(config["db_url"])
@@ -252,6 +254,42 @@ def run_replay(
 # ---------------------------------------------------------------------------
 
 
+def _enforce_intracandle_sl(bot, store, clock, candle_type) -> None:
+    """Post-process stoploss check: exit trades whose stop_loss was breached by
+    the sub-step candle's high (shorts) or low (longs).
+
+    bot.process() only evaluates stoploss against the close price.  This misses
+    intra-candle breaches (e.g. a 5m candle whose high spikes through a short's
+    -5% SL but closes below it).  The backtester handles this via low=/high=
+    params to should_exit(); here we achieve the same by post-checking OHLC."""
+    now = clock.now()
+    for trade in Trade.get_open_trades():
+        if not trade.stop_loss or trade.stop_loss == 0:
+            continue
+        candle = None
+        for tf in ("1m", "5m", "15m"):
+            candle = store.get_candle_ohlc(trade.pair, tf, candle_type, now)
+            if candle is not None:
+                break
+        if candle is None:
+            continue
+        breached = False
+        if trade.is_short and candle["high"] >= trade.stop_loss:
+            breached = True
+        elif not trade.is_short and candle["low"] <= trade.stop_loss:
+            breached = True
+        if breached:
+            try:
+                exit_check = ExitCheckTuple(exit_type=ExitType.STOP_LOSS)
+                bot.execute_trade_exit(trade, trade.stop_loss, exit_check)
+                logger.info(
+                    "[replay-SL] %s intra-candle SL hit: stop=%.6f candle=[%.6f, %.6f] → exited",
+                    trade.pair, trade.stop_loss, candle["low"], candle["high"],
+                )
+            except Exception as exc:
+                logger.warning("[replay-SL] failed to exit %s: %s", trade.pair, exc)
+
+
 def _drive_loop(
     bot,
     clock,
@@ -261,6 +299,8 @@ def _drive_loop(
     wall_clock,
     sub_step=SUB_STEP_SECONDS,
     progress_callback=None,
+    store=None,
+    candle_type=None,
 ) -> None:
     current = start_dt
     processed = 0
@@ -280,6 +320,12 @@ def _drive_loop(
             # starts from a clean session instead of cascading the whole run.
             with suppress(Exception):
                 Trade.session.rollback()
+
+        if store is not None and candle_type is not None:
+            try:
+                _enforce_intracandle_sl(bot, store, clock, candle_type)
+            except Exception:
+                pass
 
         if current.timestamp() % tf_secs == 0:
             processed += 1

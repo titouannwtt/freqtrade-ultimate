@@ -298,7 +298,7 @@ def maybe_autolaunch_replay(freqtrade) -> bool:
         strategy=freqtrade.strategy.get_strategy_name(),
         timerange=params["timerange"],
         pairs=pairs,
-        wallet=1000.0,
+        wallet=freqtrade.config.get("dry_run_wallet", 1000.0),
         sub_step=params["resolution_s"],
         reset_db=params["reset_db"],
     )
