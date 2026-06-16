@@ -71,6 +71,15 @@ class _LocalRateLimiter:
         self._window: list[tuple[float, float]] = []  # (timestamp, cost)
         self._lock = threading.Lock()
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     def _purge(self, now: float) -> float:
         """Remove entries older than 60s, return current weight used."""
         cutoff = now - 60.0
@@ -586,14 +595,16 @@ class CachedExchangeMixin:
                 if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
                     self._ftcache_bump("acquire_skip_loop")
                     if is_offline:
-                        # Don't fall through — wait and retry
                         if time.monotonic() > deadline:
-                            raise TemporaryError(
-                                "rate token acquire failed after "
-                                f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
-                                " — live bots saturated the rate limit."
-                                " Try again later or reduce parallel backtests."
+                            logger.warning(
+                                "rate token acquire failed after %.0fs"
+                                " — falling back to local limiter",
+                                self._OFFLINE_ACQUIRE_MAX_S,
                             )
+                            self._ftcache_get_local_limiter().acquire(
+                                cost=cost, priority=priority,
+                            )
+                            return True
                         time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                         continue
                     return self._ftcache_local_backoff_check(priority)
@@ -614,11 +625,14 @@ class CachedExchangeMixin:
                 self._ftcache_bump("rate_limited")
                 if is_offline:
                     if time.monotonic() > deadline:
-                        raise TemporaryError(
-                            f"rate token shed after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s of retries"
-                            " — live bots saturated the rate limit. "
-                            "Try again later or reduce parallel backtests."
+                        logger.warning(
+                            "rate token shed after %.0fs — falling back to local limiter",
+                            self._OFFLINE_ACQUIRE_MAX_S,
                         )
+                        self._ftcache_get_local_limiter().acquire(
+                            cost=cost, priority=priority,
+                        )
+                        return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
                 # Live mode: shed = return False (caller decides)
@@ -628,11 +642,15 @@ class CachedExchangeMixin:
                 self._ftcache_bump("acquire_timeout")
                 if is_offline:
                     if time.monotonic() > deadline:
-                        raise TemporaryError(
-                            f"rate token acquire timed out after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
-                            " of retries — daemon may be overloaded. "
-                            "Try again later or reduce parallel backtests."
+                        logger.warning(
+                            "rate token acquire timed out after %.0fs"
+                            " — falling back to local limiter",
+                            self._OFFLINE_ACQUIRE_MAX_S,
                         )
+                        self._ftcache_get_local_limiter().acquire(
+                            cost=cost, priority=priority,
+                        )
+                        return True
                     logger.info(
                         "rate token acquire timed out — retrying (offline mode, %.0fs remaining)",
                         deadline - time.monotonic(),
@@ -653,10 +671,15 @@ class CachedExchangeMixin:
                 self._ftcache_bump("acquire_timeout")
                 if is_offline:
                     if time.monotonic() > deadline:
-                        raise TemporaryError(
-                            f"daemon unavailable after {self._OFFLINE_ACQUIRE_MAX_S:.0f}s"
-                            " of retries — is the daemon running?"
+                        logger.warning(
+                            "daemon unavailable after %.0fs"
+                            " — falling back to local limiter",
+                            self._OFFLINE_ACQUIRE_MAX_S,
                         )
+                        self._ftcache_get_local_limiter().acquire(
+                            cost=cost, priority=priority,
+                        )
+                        return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
                 self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
@@ -669,10 +692,15 @@ class CachedExchangeMixin:
                 if is_offline:
                     logger.warning("unexpected error acquiring rate token: %s — retrying", e)
                     if time.monotonic() > deadline:
-                        raise TemporaryError(
-                            f"rate token acquire failed after "
-                            f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s: {e}"
+                        logger.warning(
+                            "rate token acquire failed after %.0fs: %s"
+                            " — falling back to local limiter",
+                            self._OFFLINE_ACQUIRE_MAX_S, e,
                         )
+                        self._ftcache_get_local_limiter().acquire(
+                            cost=cost, priority=priority,
+                        )
+                        return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
                 logger.debug("rate token acquire failed (%s), using local limiter", e)
@@ -725,12 +753,16 @@ class CachedExchangeMixin:
                         break  # token granted
                     except (CacheUnavailable, CacheTimedOut, CacheRateLimited, TimeoutError):
                         if time.monotonic() > deadline:
-                            raise TemporaryError(
-                                f"OHLCV rate token for {pair} failed after "
-                                f"{self._OFFLINE_ACQUIRE_MAX_S:.0f}s of retries — "
-                                "live bots saturated the rate limit. "
-                                "Try again later or reduce parallel backtests."
+                            logger.warning(
+                                "OHLCV rate token for %s failed after %.0fs"
+                                " — falling back to local limiter",
+                                pair, self._OFFLINE_ACQUIRE_MAX_S,
                             )
+                            limiter = self._ftcache_get_local_limiter()
+                            await asyncio.to_thread(
+                                limiter.acquire, 4.0, OhlcvCacheClient.LOW,
+                            )
+                            break
                         now = time.monotonic()
                         if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
                             logger.info(

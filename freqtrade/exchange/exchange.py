@@ -856,8 +856,10 @@ class Exchange:
             return None
         logger.debug("Performing scheduled market reload..")
         try:
-            # on initial load, we retry 3 times to ensure we get the markets
-            retries: int = 3 if force else 0
+            from freqtrade.enums import RunMode
+            runmode = self._config.get("runmode", RunMode.OTHER)
+            is_offline = runmode in (RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.WALKFORWARD)
+            retries: int = (15 if is_offline else 3) if force else 0
             # Reload async markets, then assign them to sync api
             retrier(self._load_async_markets, retries=retries)(reload=True)
             self._markets = self._api_async.markets
