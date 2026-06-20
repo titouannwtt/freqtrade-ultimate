@@ -264,3 +264,16 @@ config.json
 !CODE_OF_CONDUCT.md
 !CONTRIBUTING.md
 !.github/**/*.md
+
+# User-specific ad-hoc scripts & result dumps (not part of the fork).
+# Keep launch_bot.sh / launch_dashboard.sh (documented tools) and upstream setup.sh.
+/run_*.sh
+/run_*.py
+/relaunch_*.sh
+/launch_dry_replay_batch.sh
+/launch_tier_sa_bots.sh
+/process_hyperopt_results.py
+/generate_v2_mirrors.py
+/v0_mirror_screening_results.json
+/frequi-config-*.json
+/scripts/weekly_backup.sh
