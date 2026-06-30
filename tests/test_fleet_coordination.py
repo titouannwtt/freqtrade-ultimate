@@ -187,6 +187,38 @@ def test_spot_compat_allows(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# opposite_side_sibling — shared netting wallet external-close guard
+# --------------------------------------------------------------------------- #
+def test_opposite_side_sibling_true_when_sibling_opposite(tmp_path):
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 0, 3.0, 1)])  # sibling LONG
+    coord = PositionCoordinator(_cfg(tmp_path, mode="compat", sibling_dbs=[db]))
+    # We are SHORT; a sibling LONG can net our position to zero on the wallet.
+    assert coord.opposite_side_sibling(PAIR, is_short=True) is True
+
+
+def test_opposite_side_sibling_false_when_same_side(tmp_path):
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 1, 3.0, 1)])  # sibling SHORT, same as us
+    coord = PositionCoordinator(_cfg(tmp_path, mode="compat", sibling_dbs=[db]))
+    assert coord.opposite_side_sibling(PAIR, is_short=True) is False
+
+
+def test_opposite_side_sibling_false_when_no_sibling(tmp_path):
+    coord = PositionCoordinator(_cfg(tmp_path, mode="compat"))
+    assert coord.opposite_side_sibling(PAIR, is_short=True) is False
+
+
+def test_opposite_side_sibling_detected_even_when_mode_off(tmp_path):
+    # Sibling discovery is independent of the open/block decision engine, so the
+    # netting guard must still see an offsetting sibling with coordination off.
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 0, 3.0, 1)])  # sibling LONG
+    coord = PositionCoordinator(_cfg(tmp_path, mode="off", sibling_dbs=[db]))
+    assert coord.opposite_side_sibling(PAIR, is_short=True) is True
+
+
+# --------------------------------------------------------------------------- #
 # Intent markers (pre-commit visibility)
 # --------------------------------------------------------------------------- #
 def test_intent_marker_blocks_other_bot(tmp_path):

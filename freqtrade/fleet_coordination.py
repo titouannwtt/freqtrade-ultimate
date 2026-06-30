@@ -344,6 +344,29 @@ class PositionCoordinator:
         positions.extend(self._read_intents(pair))
         return positions
 
+    def opposite_side_sibling(self, pair: str, is_short: bool) -> bool:
+        """
+        True if a sibling bot in this coordination group holds an OPEN position on
+        ``pair`` in the OPPOSITE direction to ``is_short``.
+
+        On a shared netting wallet (e.g. Hyperliquid), several bots share one
+        account and the exchange nets positions per coin. An opposite-side
+        sibling can therefore net the wallet's per-coin size toward zero, so a
+        local "position disappeared" reading must NOT be trusted as proof that
+        this bot's own position was closed externally. Read regardless of
+        coordination ``mode`` (sibling discovery is independent of the open/block
+        decision engine).
+        """
+        try:
+            for sp in self._sibling_positions(pair):
+                if sp.is_short != is_short:
+                    return True
+        except Exception:
+            logger.debug(
+                "Coordination: opposite-side sibling check failed for %s", pair, exc_info=True
+            )
+        return False
+
     def _read_intents(self, pair: str) -> list[SiblingPosition]:
         """Read other bots' fresh intent markers (covers the pre-commit window)."""
         out: list[SiblingPosition] = []

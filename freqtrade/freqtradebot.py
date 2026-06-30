@@ -889,6 +889,24 @@ class FreqtradeBot(LoggingMixin):
                                     "skipping external_close fallback to avoid misclassification."
                                 )
                                 return False
+                            # Shared netting wallet guard: when several bots share one
+                            # account, the exchange nets positions per coin, so a wallet
+                            # reading of 0 can simply mean a sibling bot's opposite
+                            # position offset ours, not that our position was closed.
+                            # Fabricating an external close here would mark the trade
+                            # closed while the real (netted) position lives on as an
+                            # orphan. Only proceed when no opposite-side sibling can
+                            # explain the zero reading.
+                            if self._coordinator.opposite_side_sibling(
+                                trade.pair, trade.is_short
+                            ):
+                                logger.warning(
+                                    f"{trade.pair}: wallet shows no position but a sibling "
+                                    "bot holds the opposite side on the shared wallet "
+                                    "(netting). Refusing to treat this as an external "
+                                    "close to avoid stranding the real position."
+                                )
+                                return False
                             if self._handle_external_close(trade):
                                 return False
 
@@ -922,6 +940,20 @@ class FreqtradeBot(LoggingMixin):
             logger.warning("Error finding onexchange order", exc_info=True)
             Trade.session.rollback()
         return False
+
+    def _ensure_close_profit(self, trade: Trade) -> None:
+        """
+        Backfill close profit for trades closed without a recorded exit order
+        (external close / ADL / liquidation). ``Trade.close()`` derives profit from
+        exit orders via ``recalc_trade_from_orders``; with no exit order those fields
+        stay NULL, which corrupts P&L reporting and crashes PerformanceFilter.
+        """
+        if trade.close_rate is None or trade.close_profit_abs is not None:
+            return
+        prof = trade.calculate_profit(trade.close_rate, trade.amount, trade.open_rate)
+        trade.close_profit = prof.profit_ratio
+        trade.close_profit_abs = prof.profit_abs
+        trade.realized_profit = prof.profit_abs
 
     def _handle_liquidation(self, trade: Trade) -> bool:
         """
@@ -957,6 +989,7 @@ class FreqtradeBot(LoggingMixin):
             trade.close(liq_price, show_msg=False)
             if liq_timestamp:
                 trade.close_date = dt_from_ts(liq_timestamp)
+            self._ensure_close_profit(trade)
             Trade.commit()
 
             # Send notification about the liquidation
@@ -1049,6 +1082,7 @@ class FreqtradeBot(LoggingMixin):
             # Close the trade
             trade.exit_reason = "external_close"
             trade.close(close_price, show_msg=False)
+            self._ensure_close_profit(trade)
             Trade.commit()
 
             # Send notification
