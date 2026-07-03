@@ -244,10 +244,12 @@ CONF_SCHEMA = {
                 "leverage_policy": {
                     "description": (
                         "When sharing a pair in compat mode: lowest/highest leverage wins, "
-                        "keep the existing one, or block on any mismatch."
+                        "keep the existing one, block on any mismatch, or cap (adopt the "
+                        "coin's leverage only when it is at or below what the bot wants, "
+                        "block when it sits higher)."
                     ),
                     "type": "string",
-                    "enum": ["lowest", "highest", "keep", "block"],
+                    "enum": ["lowest", "highest", "keep", "block", "cap"],
                     "default": "keep",
                 },
                 "exchange_check": {
