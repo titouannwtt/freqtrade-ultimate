@@ -165,6 +165,54 @@ def test_compat_block_policy_allows_on_match(tmp_path):
     assert coord.evaluate(PAIR, is_short=False, my_leverage=3.0).allow
 
 
+def test_compat_cap_policy_adopts_lower_coin_leverage(tmp_path):
+    # Coin sits at 1x, my strategy wants 3x -> open at the coin's 1x, no change.
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 0, 1.0, 1)])
+    coord = PositionCoordinator(
+        _cfg(tmp_path, mode="compat", leverage_policy="cap", sibling_dbs=[db])
+    )
+    d = coord.evaluate(PAIR, is_short=False, my_leverage=3.0)
+    assert d.allow
+    assert d.leverage == 1.0
+    assert d.leverage_changed is False
+
+
+def test_compat_cap_policy_blocks_when_coin_higher(tmp_path):
+    # Coin sits at 3x, my strategy wants 1x -> block (never inherit higher leverage).
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 0, 3.0, 1)])
+    coord = PositionCoordinator(
+        _cfg(tmp_path, mode="compat", leverage_policy="cap", sibling_dbs=[db])
+    )
+    d = coord.evaluate(PAIR, is_short=False, my_leverage=1.0)
+    assert not d.allow
+    assert "cap" in d.reason
+
+
+def test_compat_cap_policy_allows_on_equal(tmp_path):
+    db = tmp_path / "sib.sqlite"
+    _make_db(db, [(PAIR, 0, 2.0, 1)])
+    coord = PositionCoordinator(
+        _cfg(tmp_path, mode="compat", leverage_policy="cap", sibling_dbs=[db])
+    )
+    d = coord.evaluate(PAIR, is_short=False, my_leverage=2.0)
+    assert d.allow and d.leverage == 2.0 and d.leverage_changed is False
+
+
+def test_compat_cap_policy_blocks_when_any_sibling_higher(tmp_path):
+    # Two siblings on the coin (1x and 3x): the coin's real leverage is the max,
+    # so a 2x strategy must be blocked, not opened at 1x.
+    db1 = tmp_path / "sib1.sqlite"
+    db2 = tmp_path / "sib2.sqlite"
+    _make_db(db1, [(PAIR, 0, 1.0, 1)])
+    _make_db(db2, [(PAIR, 0, 3.0, 1)])
+    coord = PositionCoordinator(
+        _cfg(tmp_path, mode="compat", leverage_policy="cap", sibling_dbs=[db1, db2])
+    )
+    assert not coord.evaluate(PAIR, is_short=False, my_leverage=2.0).allow
+
+
 # --------------------------------------------------------------------------- #
 # Spot
 # --------------------------------------------------------------------------- #

@@ -25,7 +25,12 @@ Three modes (config key ``position_coordination.mode``):
 
 * ``off``    — no coordination (upstream behaviour).
 * ``compat`` — a pair may be shared only if the existing sibling position is on
-               the *same side*; leverage is reconciled per ``leverage_policy``.
+               the *same side*; leverage is reconciled per ``leverage_policy``
+               (``lowest`` / ``highest`` / ``keep`` / ``block`` / ``cap``). The
+               ``cap`` policy adopts the coin's leverage only when it is at most
+               what this bot asked for, and blocks the entry when the coin already
+               sits higher — so a low/no-leverage strategy can never inherit a
+               higher leverage from a more aggressive sibling on a shared wallet.
 * ``strict`` — a pair already held by a sibling can never be entered.
 
 An ``flock`` + short-lived *intent marker* serialises concurrent entries on the
@@ -65,7 +70,14 @@ LEV_LOWEST = "lowest"
 LEV_HIGHEST = "highest"
 LEV_KEEP = "keep"
 LEV_BLOCK = "block"
-VALID_LEVERAGE_POLICIES = (LEV_LOWEST, LEV_HIGHEST, LEV_KEEP, LEV_BLOCK)
+# ``cap``: never let this bot open above the leverage it asked for. If the coin
+# already sits at a leverage <= mine, adopt that (lower) leverage without ever
+# changing the coin (so a sibling's position is never disturbed and Hyperliquid
+# is never asked to lower an open position). If the coin already sits ABOVE what
+# this bot wants, block the entry — a low/no-leverage strategy must never inherit
+# a higher leverage than it was designed for.
+LEV_CAP = "cap"
+VALID_LEVERAGE_POLICIES = (LEV_LOWEST, LEV_HIGHEST, LEV_KEEP, LEV_BLOCK, LEV_CAP)
 
 # Coordination scope — which bots count as siblings on a given exchange.
 # ``wallet``   : only bots that trade the *same wallet/account* coordinate. Bots
@@ -432,8 +444,30 @@ class PositionCoordinator:
                     f"({'short' if s.is_short else 'long'}) — netting risk",
                 )
 
-        sib_levs = [s.leverage for s in siblings]
+        return self._reconcile_leverage(pair, my_leverage, [s.leverage for s in siblings])
+
+    def _reconcile_leverage(
+        self, pair: str, my_leverage: float, sib_levs: list[float]
+    ) -> Decision:
+        """Resolve the leverage of a same-side compat share per ``leverage_policy``."""
         existing = sib_levs[0]
+        if self.leverage_policy == LEV_CAP:
+            # Adopt the coin's current leverage, but never above what I asked for.
+            # ``coin_lev`` = the highest leverage any sibling holds on this coin
+            # (the coin's real per-wallet leverage is single-valued, so the max of
+            # the recorded slices is the conservative estimate of what an open
+            # would actually execute at).
+            coin_lev = max(sib_levs)
+            if int(coin_lev) > int(my_leverage):
+                return Decision(
+                    False, my_leverage,
+                    f"{pair} coin already at {coin_lev:g}x on the shared wallet, above my "
+                    f"{my_leverage:g}x (leverage_policy=cap) — not opening to avoid inheriting "
+                    f"a higher leverage than intended",
+                )
+            # coin_lev <= my_leverage: open at the coin's leverage without changing
+            # it (leverage_changed stays False, so the sibling is never disturbed).
+            return Decision(True, float(coin_lev), leverage_changed=False)
         if self.leverage_policy == LEV_BLOCK:
             if any(int(lv) != int(my_leverage) for lv in sib_levs):
                 return Decision(

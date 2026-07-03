@@ -264,7 +264,7 @@ Configured per bot under `position_coordination`:
 | `mode` | `off` / `compat` / `strict` | `off`: no coordination. `compat`: a pair may be shared only on the **same side**; leverage is reconciled. `strict`: a pair already held by a sibling can **never** be entered. |
 | `scope` | `wallet` / `exchange` | `wallet` (default): only bots on the **same wallet/account** coordinate; bots on distinct wallets of the same exchange stay independent. `exchange`: every bot on the exchange coordinates regardless of wallet. |
 | `account` | label | Optional explicit wallet/account identifier for grouping under `wallet` scope. Defaults to a fingerprint auto-derived from the configured credentials (wallet address or API key). |
-| `leverage_policy` | `lowest` / `highest` / `keep` / `block` | Compat-mode reconciliation when sharing a pair: take the lowest/highest leverage, keep the one already on the coin, or block on any mismatch. |
+| `leverage_policy` | `lowest` / `highest` / `keep` / `block` / `cap` | Compat-mode reconciliation when sharing a pair: `lowest`/`highest` take the min/max leverage, `keep` adopts the one already on the coin, `block` refuses on any mismatch, `cap` adopts the coin's leverage only when it is **≤** what this bot asked for and **blocks** when the coin already sits higher (so a low/no-leverage strategy can never inherit a higher leverage). |
 | `exchange_check` | `warn` / `block` | Behaviour of the final exchange cross-check on a mismatch. |
 | `registry` | path / list | Directory to auto-scan (default: the launched config's directory) or an explicit list of sibling sqlite paths. |
 | `exclude` | list | Config filenames or bot names to ignore. |
@@ -273,6 +273,15 @@ Configured per bot under `position_coordination`:
 a sibling, the resolved leverage is pre-set on the exchange before the order. If the venue
 **refuses to lower** the leverage of an already-open position (insufficient margin), the entry
 is **blocked** rather than opened at a higher-than-intended leverage.
+
+With `leverage_policy = cap` the coin's leverage is never changed at all: if the shared coin
+already sits at a leverage **≤** what this bot's strategy requested, the bot opens at that
+(possibly lower) coin leverage without touching it (so a sibling's open position is never
+disturbed and the venue is never asked to change leverage). If the coin already sits **above**
+the requested leverage, the entry is **blocked** — a strategy designed for low or no leverage
+can never be silently upgraded to a higher one by a more aggressive sibling on the shared
+netting wallet. This is the recommended policy for a fleet of mixed-leverage strategies on one
+Hyperliquid wallet, where leverage is a per-coin wallet property rather than a per-order one.
 
 **Anti-race lock.** All bots on a 15m timeframe evaluate entries at the same candle close, so
 two could pass the check on the same tick. A per-`(exchange, environment, wallet group, pair)`
