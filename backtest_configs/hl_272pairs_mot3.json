@@ -1,4 +1,5 @@
 {
+    "shared_ohlcv_cache": { "enabled": false },
     "trading_mode": "futures",
     "margin_mode": "isolated",
     "stake_currency": "USDC",
