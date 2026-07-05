@@ -2009,10 +2009,10 @@ class Trade(ModelBase, LocalTrade):
         return [
             {
                 "pair": pair,
-                "profit_ratio": profit,
-                "profit": round(profit * 100, 2),  # Compatibility mode
-                "profit_pct": round(profit * 100, 2),
-                "profit_abs": profit_abs,
+                "profit_ratio": profit or 0.0,
+                "profit": round((profit or 0.0) * 100, 2),  # Compatibility mode
+                "profit_pct": round((profit or 0.0) * 100, 2),
+                "profit_abs": profit_abs or 0.0,
                 "count": count,
             }
             for pair, profit, profit_abs, count in pair_rates
@@ -2036,9 +2036,9 @@ class Trade(ModelBase, LocalTrade):
         return [
             {
                 "enter_tag": enter_tag if enter_tag is not None else "Other",
-                "profit_ratio": profit,
-                "profit_pct": round(profit * 100, 2),
-                "profit_abs": profit_abs,
+                "profit_ratio": profit or 0.0,
+                "profit_pct": round((profit or 0.0) * 100, 2),
+                "profit_abs": profit_abs or 0.0,
                 "count": count,
             }
             for enter_tag, profit, profit_abs, count in enter_tag_perf
@@ -2062,9 +2062,9 @@ class Trade(ModelBase, LocalTrade):
         return [
             {
                 "exit_reason": exit_reason if exit_reason is not None else "Other",
-                "profit_ratio": profit,
-                "profit_pct": round(profit * 100, 2),
-                "profit_abs": profit_abs,
+                "profit_ratio": profit or 0.0,
+                "profit_pct": round((profit or 0.0) * 100, 2),
+                "profit_abs": profit_abs or 0.0,
                 "count": count,
             }
             for exit_reason, profit, profit_abs, count in sell_tag_perf
@@ -2099,6 +2099,8 @@ class Trade(ModelBase, LocalTrade):
         for _, enter_tag, exit_reason, profit, profit_abs, count in mix_tag_perf:
             enter_tag = enter_tag if enter_tag is not None else "Other"
             exit_reason = exit_reason if exit_reason is not None else "Other"
+            profit = profit or 0.0
+            profit_abs = profit_abs or 0.0
 
             if exit_reason is not None and enter_tag is not None:
                 mix_tag = enter_tag + " " + exit_reason
