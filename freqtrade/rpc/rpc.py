@@ -26,6 +26,7 @@ from freqtrade.data.metrics import (
     calculate_calmar,
     calculate_expectancy,
     calculate_max_drawdown,
+    calculate_pvalue,
     calculate_sharpe,
     calculate_sortino,
     calculate_sqn,
@@ -460,6 +461,7 @@ class RPC:
 
     def _rpc_volume_history(self, days: int, bucket: str) -> dict[str, Any]:
         import numpy as np
+
         from freqtrade.enums import CandleType
 
         cache_key = (days, bucket)
@@ -842,6 +844,7 @@ class RPC:
                     "close_date": format_date(trade.close_date),
                     "close_date_dt": trade.close_date,
                     "profit_abs": trade.close_profit_abs,
+                    "profit_ratio": trade.close_profit,
                 }
                 for trade in trades
                 if not trade.is_open and trade.close_date
@@ -889,6 +892,7 @@ class RPC:
             starting_balance=starting_balance,
         )
         sqn = calculate_sqn(trades=trades_df, starting_balance=starting_balance)
+        pvalue = calculate_pvalue(trades=trades_df)
         calmar = calculate_calmar(
             trades=trades_df,
             min_date=first_date,
@@ -946,6 +950,7 @@ class RPC:
             "sharpe": sharpe,
             "sortino": sortino,
             "sqn": sqn,
+            "pvalue": pvalue,
             "calmar": calmar,
             "cagr": cagr,
             "max_drawdown": drawdown.relative_account_drawdown,
@@ -1486,6 +1491,57 @@ class RPC:
                     f"Closed {c_count} open orders."
                 ),
                 "cancel_order_count": c_count,
+            }
+
+    def _rpc_adjust_trade_amount(self, trade_id: int, amount: float) -> dict[str, Any]:
+        """Fork-specific (shared netted wallet): rescale an open trade's position in
+        DB/memory WITHOUT placing any exchange order.
+
+        Scales every filled order of the trade by new/old amount and recomputes the
+        trade from its orders, so later recalc_trade_from_orders calls do not revert
+        the change. Used by the FleetView realign action when part of a bot's fills
+        were actually netted against sibling bots' positions on-chain.
+        """
+        if amount <= 0:
+            raise RPCException("Amount must be positive - delete the trade instead.")
+        with self._freqtrade._exit_lock:
+            trade = Trade.get_trades(
+                trade_filter=[Trade.id == trade_id, Trade.is_open.is_(True)]
+            ).first()
+            if not trade:
+                raise RPCException(f"Open trade with id '{trade_id}' not found.")
+            if trade.has_open_orders:
+                raise RPCException("Trade has open orders - cancel them before adjusting.")
+            old_amount = trade.amount
+            if not old_amount:
+                raise RPCException("Trade has no amount to adjust.")
+            factor = amount / old_amount
+            for o in trade.orders:
+                if not o.safe_filled:
+                    continue
+                o.filled = o.safe_filled * factor
+                if o.amount:
+                    o.amount = o.amount * factor
+                if o.ft_amount:
+                    o.ft_amount = o.ft_amount * factor
+                if o.cost:
+                    o.cost = o.cost * factor
+                if o.ft_fee_base:
+                    o.ft_fee_base = o.ft_fee_base * factor
+            trade.recalc_trade_from_orders()
+            Trade.commit()
+            self._freqtrade.wallets.update()
+            return {
+                "result": "success",
+                "trade_id": trade_id,
+                "pair": trade.pair,
+                "old_amount": old_amount,
+                "new_amount": trade.amount,
+                "stake_amount": trade.stake_amount,
+                "result_msg": (
+                    f"Adjusted trade #{trade_id} ({trade.pair}) amount "
+                    f"{old_amount} -> {trade.amount} (no exchange order placed)."
+                ),
             }
 
     @custom_data_rpc_wrapper

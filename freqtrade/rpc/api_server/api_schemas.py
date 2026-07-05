@@ -174,6 +174,7 @@ class Profit(BaseModel):
     sharpe: float
     sortino: float
     sqn: float
+    pvalue: float
     calmar: float
     cagr: float
     max_drawdown: float
@@ -506,6 +507,20 @@ class DeleteTrade(BaseModel):
     result: str
     result_msg: str
     trade_id: int
+
+
+class AdjustTradeAmountPayload(BaseModel):
+    amount: float
+
+
+class AdjustTradeAmount(BaseModel):
+    result: str
+    result_msg: str
+    trade_id: int
+    pair: str
+    old_amount: float
+    new_amount: float
+    stake_amount: float
 
 
 class PlotConfig_(BaseModel):

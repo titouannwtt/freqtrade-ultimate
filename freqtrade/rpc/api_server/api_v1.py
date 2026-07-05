@@ -73,7 +73,9 @@ logger = logging.getLogger(__name__)
 # 2.47: Add Strategy parameters
 # 2.48: add /backtest/history/wallets endpoint
 # 2.49: add /replay endpoints (fork-specific dry-run replay)
-API_VERSION = 2.49
+# 2.50: add /fleetview endpoints (fork-specific fleet dashboard)
+# 2.51: add /trades/<id>/amount (DB-only rescale) + /fleetview realign endpoint
+API_VERSION = 2.51
 
 # Public API, requires no auth.
 router_public = APIRouter()

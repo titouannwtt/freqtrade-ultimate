@@ -212,6 +212,7 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_background_tasks import router as api_bg_tasks
         from freqtrade.rpc.api_server.api_backtest import router as api_backtest
         from freqtrade.rpc.api_server.api_download_data import router as api_download_data
+        from freqtrade.rpc.api_server.api_fleetview import router as api_fleetview
         from freqtrade.rpc.api_server.api_pair_history import router as api_pair_history
         from freqtrade.rpc.api_server.api_pairlists import router as api_pairlists
         from freqtrade.rpc.api_server.api_replay import router as api_replay
@@ -259,6 +260,14 @@ class ApiServer(RPCHandler):
             api_replay,
             prefix="/api/v1",
             tags=["Replay"],
+            dependencies=[Depends(http_basic_or_jwt_token)],
+        )
+        # FleetView aggregates all local bots (proc scan + read-only DBs), so it is
+        # exposed on any bot like replay — whichever bot serves FreqUI answers.
+        app.include_router(
+            api_fleetview,
+            prefix="/api/v1",
+            tags=["FleetView"],
             dependencies=[Depends(http_basic_or_jwt_token)],
         )
         app.include_router(

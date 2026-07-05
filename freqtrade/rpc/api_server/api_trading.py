@@ -6,6 +6,8 @@ from fastapi.exceptions import HTTPException
 from freqtrade.enums import TradingMode
 from freqtrade.rpc import RPC
 from freqtrade.rpc.api_server.api_schemas import (
+    AdjustTradeAmount,
+    AdjustTradeAmountPayload,
     Balances,
     BlacklistPayload,
     BlacklistResponse,
@@ -25,11 +27,11 @@ from freqtrade.rpc.api_server.api_schemas import (
     OpenTradeSchema,
     PairCandlesRequest,
     PairHistory,
-    SignalSummaryResponse,
     PerformanceEntry,
     Profit,
     ProfitAll,
     ResultMsg,
+    SignalSummaryResponse,
     Stats,
     StatusMsg,
     VolumeHistoryResponse,
@@ -200,6 +202,17 @@ def trade(tradeid: int = 0, rpc: RPC = Depends(get_rpc)):
 @router.delete("/trades/{tradeid}", response_model=DeleteTrade, tags=["Trades"])
 def trades_delete(tradeid: int, rpc: RPC = Depends(get_rpc)):
     return rpc._rpc_delete(tradeid)
+
+
+@router.post("/trades/{tradeid}/amount", response_model=AdjustTradeAmount, tags=["Trades"])
+def trades_adjust_amount(
+    tradeid: int, payload: AdjustTradeAmountPayload, rpc: RPC = Depends(get_rpc)
+):
+    """Fork-specific: rescale an open trade in DB/memory without any exchange order.
+
+    Netted-shared-wallet repair tool (FleetView realign) - not a trading action.
+    """
+    return rpc._rpc_adjust_trade_amount(tradeid, payload.amount)
 
 
 @router.delete("/trades/{tradeid}/open-order", response_model=OpenTradeSchema, tags=["Trades"])
