@@ -1560,7 +1560,9 @@ class Exchange:
         params = self._params.copy()
         if time_in_force != "GTC" and ordertype != "market":
             params.update({"timeInForce": time_in_force.upper()})
-        if reduceOnly:
+        if reduceOnly and not self._config["exchange"].get("shared_wallet", False):
+            # On a shared netted wallet (multi-bot), reduceOnly exits can be rejected
+            # when the fleet's net position opposes this bot's trade direction.
             params.update({"reduceOnly": True})
         return params
 
@@ -1758,7 +1760,8 @@ class Exchange:
                 side=side, ordertype=ordertype, stop_price=stop_price_norm
             )
             if self.trading_mode == TradingMode.FUTURES:
-                params["reduceOnly"] = True
+                if not self._config["exchange"].get("shared_wallet", False):
+                    params["reduceOnly"] = True
                 if "stoploss_price_type" in order_types and "stop_price_type_field" in self._ft_has:
                     price_type = self._ft_has["stop_price_type_value_mapping"][
                         order_types.get("stoploss_price_type", PriceType.LAST)

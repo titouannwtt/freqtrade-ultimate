@@ -67,7 +67,9 @@ CONF_SCHEMA = {
             "default": 0.99,
         },
         "available_capital": {
-            "description": "Initial capital deposited. Used as reference for profit % calculations.",
+            "description": (
+                "Initial capital deposited. Used as reference for profit % calculations."
+            ),
             "type": "number",
             "minimum": 0,
         },
@@ -1059,6 +1061,15 @@ CONF_SCHEMA = {
                     "type": "array",
                     "items": {"type": "string"},
                     "uniqueItems": True,
+                },
+                "shared_wallet": {
+                    "description": (
+                        "Wallet is shared by multiple bots on a netting exchange. "
+                        "Drops the reduceOnly flag on exit and stoploss orders, since the "
+                        "net exchange position may oppose this bot's trade direction."
+                    ),
+                    "type": "boolean",
+                    "default": False,
                 },
                 "log_responses": {
                     "description": (
