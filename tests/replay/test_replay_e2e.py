@@ -116,8 +116,11 @@ class TestReplayE2E:
         "wins": 0,
         "win_rate": 0.0,
         "profit_factor": 0.0,
-        "total_profit_abs": -491.0467,
-        "total_profit_ratio": -1.964949,
+        # Updated for the intra-candle stoploss enforcement (commit f271ac2f8):
+        # at 15m sub-step the SL now fires on the sub-candle low instead of the
+        # next process() close, which legitimately changes the coarse result.
+        "total_profit_abs": -390.9842,
+        "total_profit_ratio": -1.451276,
     }
 
     def test_deterministic_and_matches_baseline(self, datadir, tmp_path):
