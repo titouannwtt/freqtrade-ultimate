@@ -4208,7 +4208,14 @@ class Exchange:
             )
 
         liquidation_price = None
-        if self._config["dry_run"] or not self.exchange_has("fetchPositions"):
+        if (
+            self._config["dry_run"]
+            or not self.exchange_has("fetchPositions")
+            # On a shared netted wallet, fetch_positions returns the fleet's NET position:
+            # its liquidationPrice can sit on the wrong side of this bot's trade and
+            # instantly trigger a false ExitType.LIQUIDATION exit. Compute locally instead.
+            or self._config["exchange"].get("shared_wallet", False)
+        ):
             liquidation_price = self.dry_run_liquidation_price(
                 pair=pair,
                 open_rate=open_rate,

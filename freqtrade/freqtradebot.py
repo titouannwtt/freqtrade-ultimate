@@ -496,6 +496,20 @@ class FreqtradeBot(LoggingMixin):
                 stake_currency=self.config["stake_currency"],
                 dry_run=self.config["dry_run"],
             )
+        elif self.trading_mode == TradingMode.FUTURES and self.config["exchange"].get(
+            "shared_wallet", False
+        ):
+            # Shared netted wallet: stored liquidation prices may come from the fleet's
+            # NET position (wrong side of the trade). Recompute them locally.
+            for trade in Trade.get_open_trades():
+                if trade.has_open_position:
+                    update_liquidation_prices(
+                        trade,
+                        exchange=self.exchange,
+                        wallets=self.wallets,
+                        stake_currency=self.config["stake_currency"],
+                        dry_run=self.config["dry_run"],
+                    )
 
     def update_funding_fees(self) -> None:
         if self.trading_mode == TradingMode.FUTURES:
