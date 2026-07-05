@@ -637,3 +637,40 @@ def calculate_sqn(trades: pd.DataFrame, starting_balance: float) -> float:
         sqn = -100.0
 
     return round(sqn, 4)
+
+
+def calculate_pvalue(trades: pd.DataFrame) -> float:
+    """
+    Calculate the one-sided p-value of the strategy's per-trade returns.
+
+    Runs a one-sample Student's t-test on the per-trade returns
+    (``profit_ratio``) against the null hypothesis H0: mean return <= 0
+    (alternative hypothesis H1: mean return > 0).
+
+    Interpretation: a low p-value (e.g. < 0.05) means the observed edge is
+    unlikely to have been produced by pure chance; a high p-value means the
+    result is not statistically distinguishable from random noise. It is an
+    "anti-luck" metric that complements winrate / profit factor by accounting
+    for both the size of the edge and the number of trades.
+
+    :param trades: DataFrame containing trades (requires column profit_ratio)
+    :return: p-value in [0, 1]. Returns 1.0 when it cannot be computed
+             (fewer than 2 trades or zero variance).
+    """
+    if len(trades) < 2 or "profit_ratio" not in trades:
+        return 1.0
+
+    returns = trades["profit_ratio"]
+    profits_std = returns.std()
+    if profits_std == 0 or np.isnan(profits_std):
+        return 1.0
+
+    # Local import: scipy is a heavy dependency, keep module import cheap.
+    from scipy import stats
+
+    # One-sided test: H0 mean <= 0 vs H1 mean > 0.
+    pvalue = float(stats.ttest_1samp(returns, 0.0, alternative="greater").pvalue)
+    if np.isnan(pvalue):
+        return 1.0
+
+    return round(pvalue, 4)

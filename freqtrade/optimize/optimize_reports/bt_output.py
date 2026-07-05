@@ -414,6 +414,10 @@ def text_table_add_metrics(strat_results: dict) -> None:
                 ),
             ),
             (
+                "P-Value",
+                f"{strat_results['pvalue']:.4f}" if "pvalue" in strat_results else "N/A",
+            ),
+            (
                 "Expectancy (Ratio)",
                 (
                     f"{strat_results['expectancy']:.2f} ({strat_results['expectancy_ratio']:.2f})"

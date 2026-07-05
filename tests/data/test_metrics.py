@@ -18,6 +18,7 @@ from freqtrade.data.metrics import (
     calculate_market_change,
     calculate_max_drawdown,
     calculate_max_drawdown_from_balance,
+    calculate_pvalue,
     calculate_sharpe,
     calculate_sharpe_from_balance,
     calculate_sortino,
@@ -440,6 +441,28 @@ def test_calculate_sqn_cases(profits, starting_balance, expected_sqn, descriptio
 
     assert isinstance(sqn, float)
     assert pytest.approx(sqn, rel=1e-4) == expected_sqn
+
+
+def test_calculate_pvalue():
+    # Fewer than 2 trades or missing column -> not computable -> 1.0
+    assert calculate_pvalue(DataFrame()) == 1.0
+    assert calculate_pvalue(DataFrame({"profit_ratio": []})) == 1.0
+    assert calculate_pvalue(DataFrame({"profit_ratio": [0.05]})) == 1.0
+    # Zero variance -> not computable -> 1.0
+    assert calculate_pvalue(DataFrame({"profit_ratio": [0.01, 0.01, 0.01]})) == 1.0
+
+    rng = np.random.default_rng(42)
+    # Clear positive edge -> highly significant -> very low p-value
+    edge = DataFrame({"profit_ratio": rng.normal(0.02, 0.03, 300)})
+    pvalue_edge = calculate_pvalue(edge)
+    assert isinstance(pvalue_edge, float)
+    assert 0.0 <= pvalue_edge <= 1.0
+    assert pvalue_edge < 0.05
+
+    # Returns centered on zero (pure noise) -> not significant -> high p-value
+    noise = DataFrame({"profit_ratio": rng.normal(0.0, 0.03, 300)})
+    pvalue_noise = calculate_pvalue(noise)
+    assert pvalue_noise > 0.05
 
 
 @pytest.mark.parametrize(
