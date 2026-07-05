@@ -30,7 +30,8 @@ do
         sleep "$stagger"
         first_start=false
     fi
-    freqtrade trade --config live_configs/"$config_file"
+    logfile="user_data/logs/${config_file%.json}.log"
+    freqtrade trade --config live_configs/"$config_file" --logfile "$logfile"
     echo "You have 60 seconds to press Ctrl+C to stop the bot."
     echo "Restarting in:"
     for i in 60 50 40 30 20 10
