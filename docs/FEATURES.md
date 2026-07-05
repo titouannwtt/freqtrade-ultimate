@@ -30,9 +30,10 @@ what `freqtrade-ultimate` adds over `freqtrade/freqtrade`.
   - [3.5 Hyperliquid Historical Data Bundle](#35-hyperliquid-historical-data-bundle)
 - [4. Pairlists and Risk Management](#4-pairlists-and-risk-management)
   - [4.1 TrendRegularityFilter](#41-trendregularityfilter)
-  - [4.2 `backtest_lock_wallet` Flag](#42-backtest_lock_wallet-flag)
-  - [4.3 Capital Withdrawal Accounting](#43-capital-withdrawal-accounting)
-  - [4.4 StoplossGuard `external_close` Fix](#44-stoplossguard-external_close-fix)
+  - [4.2 ExtremeMoveFilter](#42-extrememovefilter)
+  - [4.3 `backtest_lock_wallet` Flag](#43-backtest_lock_wallet-flag)
+  - [4.4 Capital Withdrawal Accounting](#44-capital-withdrawal-accounting)
+  - [4.5 StoplossGuard `external_close` Fix](#45-stoplossguard-external_close-fix)
 - [5. Rate Limiting Advanced](#5-rate-limiting-advanced)
   - [5.1 ExchangeMetrics](#51-exchangemetrics)
   - [5.2 Retrier Enhanced (token re-acquisition, daemon reporting)](#52-retrier-enhanced-token-re-acquisition-daemon-reporting)
@@ -669,7 +670,49 @@ for cross-bot deduplication.
 }
 ```
 
-### 4.2 `backtest_lock_wallet` Flag
+### 4.2 ExtremeMoveFilter
+
+`freqtrade/plugins/pairlist/ExtremeMoveFilter.py` is a new pairlist plugin acting as a
+**directional guard against extreme recent moves**. It measures the price change over the
+last `lookback_days` daily candles and excludes pairs that moved too far in the dangerous
+direction for the strategy's side:
+
+- `max_up_pct` — exclude pairs that **gained** more than this percentage (guard for
+  **short** strategies: don't short a coin in a violent pump).
+- `max_down_pct` — exclude pairs that **lost** more than this percentage (guard for
+  **long** strategies: don't buy a coin in free fall).
+
+At least one of the two must be set; a value of `0` disables that bound.
+
+**Relationship to TrendRegularityFilter.** TrendRegularityFilter detects *long, regular*
+trends (linear regression R² over thousands of candles); it misses short parabolic moves
+that are not "clean" trends. ExtremeMoveFilter is the complement: it catches a memecoin
+that did +80% in four days regardless of trend regularity. Both can be chained.
+
+**Parameters.**
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `lookback_days` | `7` | Number of daily candles to measure the change over |
+| `max_up_pct` | `0` (disabled) | Exclude pairs up more than this % |
+| `max_down_pct` | `0` (disabled) | Exclude pairs down more than this % |
+| `refresh_period` | `3600` | Cache TTL in seconds |
+
+Registered in `constants.py` as `"ExtremeMoveFilter"` in `AVAILABLE_PAIRLISTS`. Like
+TrendRegularityFilter, it uses the shared pairlist cache client
+(see [section 1.2](#12-pairlist-cache-daemon-ftpairlists)) for cross-bot deduplication.
+
+```json
+{
+  "pairlists": [
+    {"method": "VolumePairList", "number_assets": 100, "sort_key": "quoteVolume"},
+    {"method": "ExtremeMoveFilter", "lookback_days": 7,
+     "max_up_pct": 50, "refresh_period": 3600}
+  ]
+}
+```
+
+### 4.3 `backtest_lock_wallet` Flag
 
 **Where upstream falls short.** Upstream backtests compound profits indefinitely, which
 produces unrealistic equity curves for strategies that the trader actually withdraws
@@ -681,7 +724,7 @@ reports the **initial wallet value**, no matter how much profit has been accumul
 Position sizing then operates on the starting capital, which prevents the compounding tail
 from dominating the optimization.
 
-### 4.3 Capital Withdrawal Accounting
+### 4.4 Capital Withdrawal Accounting
 
 A new config field `capital_withdrawal` (numeric, >= 0) represents capital withdrawn from
 the wallet. The wallet computes:
@@ -705,7 +748,7 @@ Stake amount tolerance was widened: previously `stake_amount * 1.3 < min_stake_a
 triggered an adjustment, the new threshold is `stake_amount * 1.8 < min_stake_amount`
 (ceiling raised from +30% to +80%).
 
-### 4.4 StoplossGuard `external_close` Fix
+### 4.5 StoplossGuard `external_close` Fix
 
 A one-line fix in `plugins/protections/stoploss_guard.py` adds `"external_close"` to the
 set of exit reasons counted by `StoplossGuard`. Without this, positions closed externally
@@ -837,8 +880,8 @@ host reboot or a `launch_bot.sh` cycle.
 
 ### 7.3 Wallet Anti-Compounding and Capital Withdrawal
 
-See [section 4.2](#42-backtest_lock_wallet-flag) and
-[section 4.3](#43-capital-withdrawal-accounting).
+See [section 4.3](#43-backtest_lock_wallet-flag) and
+[section 4.4](#44-capital-withdrawal-accounting).
 
 ### 7.4 SQLAlchemy Pool Sizing
 
