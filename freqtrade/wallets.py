@@ -380,6 +380,12 @@ class Wallets:
                     f"No capital available for trading."
                 )
                 available_amount = 0
+            # Fork behaviour: upstream ignores tradable_balance_ratio whenever
+            # available_capital is set, so the config knob is silently a no-op for
+            # every bot that pins its capital. We apply it here as a global throttle
+            # (effective deployment = available_capital-based amount x tradable_balance_ratio),
+            # letting one config value cap aggregate exposure without touching strategy code.
+            available_amount *= self._config.get("tradable_balance_ratio", 1.0)
 
         else:
             # Ensure <tradable_balance_ratio>% is used from the overall balance

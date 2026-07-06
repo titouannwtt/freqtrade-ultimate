@@ -118,12 +118,13 @@ def test_get_trade_stake_amount_no_stake_amount(default_conf, mocker) -> None:
         (1, None, 50, 66.66666),
         (0.99, None, 49.5, 66.0),
         (0.50, None, 25, 33.3333),
-        # Tests with capital ignore balance_ratio
+        # Fork behaviour: tradable_balance_ratio is applied as a global throttle
+        # even when available_capital is set (upstream silently ignores it there).
         (1, 100, 50, 0.0),
         (0.99, 200, 50, 66.66666),
         (0.99, 150, 50, 50),
-        (0.50, 50, 25, 0.0),
-        (0.50, 10, 5, 0.0),
+        (0.50, 50, 12.5, 0.0),
+        (0.50, 10, 2.5, 0.0),
     ],
 )
 def test_get_trade_stake_amount_unlimited_amount(
@@ -177,6 +178,23 @@ def test_get_trade_stake_amount_unlimited_amount(
     # set max_open_trades = None, so do not trade
     result = freqtrade.wallets.get_trade_stake_amount("NEO/USDT", 0)
     assert result == 0
+
+
+@pytest.mark.parametrize("ratio,expected", [(1.0, 100.0), (0.5, 50.0), (0.3, 30.0)])
+def test_get_total_stake_amount_available_capital_applies_ratio(
+    mocker, default_conf, ratio, expected
+) -> None:
+    # Fork regression guard: upstream ignores tradable_balance_ratio whenever
+    # available_capital is set, silently making the config knob a no-op for every
+    # bot that pins its capital. Our fork applies it as a global throttle.
+    conf = deepcopy(default_conf)
+    conf["stake_amount"] = UNLIMITED_STAKE_AMOUNT
+    conf["dry_run_wallet"] = 100
+    conf["available_capital"] = 100
+    conf["tradable_balance_ratio"] = ratio
+
+    freqtrade = get_patched_freqtradebot(mocker, conf)
+    assert freqtrade.wallets.get_total_stake_amount() == expected
 
 
 @pytest.mark.parametrize(
