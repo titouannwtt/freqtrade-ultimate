@@ -76,6 +76,7 @@ class Webhook(RPCHandler):
             RPCMessageType.ANALYZED_DF,
             RPCMessageType.NEW_CANDLE,
             RPCMessageType.STRATEGY_MSG,
+            RPCMessageType.TRADE_SNAPSHOT,
         ):
             # Don't fail for non-implemented types
             return None

@@ -876,6 +876,23 @@ CONF_SCHEMA = {
                     "type": "string",
                     "enum": ["error", "info"],
                 },
+                "ws_trade_snapshot_enabled": {
+                    "description": (
+                        "Fork-specific: opt-in periodic live profit snapshot for open "
+                        "trades, pushed over the WS message stream "
+                        "(RPCMessageType.TRADE_SNAPSHOT). Off by default."
+                    ),
+                    "type": "boolean",
+                    "default": False,
+                },
+                "ws_trade_snapshot_throttle_secs": {
+                    "description": (
+                        "Fork-specific: minimum seconds between TRADE_SNAPSHOT emissions. "
+                        "Floored at PROCESS_THROTTLE_SECS regardless of this value."
+                    ),
+                    "type": "integer",
+                    "default": 10,
+                },
             },
             "required": [
                 "enabled",

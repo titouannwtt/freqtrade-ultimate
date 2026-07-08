@@ -122,6 +122,29 @@ class RPCNewCandleMsg(RPCSendMsgBase):
     data: PairWithTimeframe
 
 
+class RPCTradeSnapshotEntry(TypedDict):
+    """Per-trade live profit snapshot, one entry per currently open trade."""
+
+    trade_id: int
+    pair: str
+    current_rate: float
+    profit_ratio: float
+    profit_abs: float
+    total_profit_abs: float
+    total_profit_ratio: float
+
+
+class RPCTradeSnapshotMsg(RPCSendMsgBase):
+    """
+    Fork-specific: periodic live profit snapshot for all open trades. Trades whose
+    current rate couldn't be resolved this cycle (e.g. cold pricing cache) are simply
+    omitted from `data` rather than failing the whole message.
+    """
+
+    type: Literal[RPCMessageType.TRADE_SNAPSHOT]
+    data: list[RPCTradeSnapshotEntry]
+
+
 RPCOrderMsg = RPCEntryMsg | RPCExitMsg | RPCExitCancelMsg | RPCCancelMsg
 
 
@@ -136,4 +159,5 @@ RPCSendMsg = (
     | RPCExitCancelMsg
     | RPCAnalyzedDFMsg
     | RPCNewCandleMsg
+    | RPCTradeSnapshotMsg
 )

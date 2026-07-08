@@ -18,7 +18,14 @@ from schedule import Scheduler
 
 from freqtrade import constants
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
-from freqtrade.constants import BuySell, Config, EntryExecuteMode, ExchangeConfig, LongShort
+from freqtrade.constants import (
+    PROCESS_THROTTLE_SECS,
+    BuySell,
+    Config,
+    EntryExecuteMode,
+    ExchangeConfig,
+    LongShort,
+)
 from freqtrade.data.converter import order_book_to_dataframe
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.enums import (
@@ -63,6 +70,8 @@ from freqtrade.rpc.rpc_types import (
     RPCExitCancelMsg,
     RPCExitMsg,
     RPCProtectionMsg,
+    RPCTradeSnapshotEntry,
+    RPCTradeSnapshotMsg,
 )
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
@@ -245,6 +254,19 @@ class FreqtradeBot(LoggingMixin):
             self._schedule.every().day.at("00:02").do(self.exchange.ws_connection_reset)
             self._schedule.every().day.at("00:07").do(self.wallets.record_wallet_state)
 
+            # Fork-specific: periodic WS trade-snapshot emission (see _emit_trade_snapshot).
+            # Opt-in and off by default - a bot's config must explicitly enable it.
+            api_server_conf = self.config.get("api_server", {})
+            self._trade_snapshot_enabled: bool = api_server_conf.get(
+                "ws_trade_snapshot_enabled", False
+            )
+            # Floor matches PROCESS_THROTTLE_SECS so a misconfigured (too-low/zero/negative)
+            # value can't turn this into an every-cycle emission.
+            self._trade_snapshot_throttle_secs: float = max(
+                PROCESS_THROTTLE_SECS, api_server_conf.get("ws_trade_snapshot_throttle_secs", 10)
+            )
+            self._last_trade_snapshot_emit: float = 0.0
+
             self.strategy.ft_bot_start()
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
             self.protections = ProtectionManager(self.config, self.strategy.protections)
@@ -419,6 +441,17 @@ class FreqtradeBot(LoggingMixin):
         with self._exit_lock:
             self._schedule.run_pending()
 
+        Trade.commit()
+        self.rpc.process_msg_queue(self.dataprovider._msg_queue)
+
+        try:
+            self._emit_trade_snapshot()
+        except Exception as exc:  # never let the snapshot push break the trading loop
+            logger.debug("trade snapshot emission failed: %s", exc)
+        _cp("snapshot")
+
+        # Placed after the snapshot step (not before it) so a latency regression there
+        # would actually trip this warning instead of being invisible to it.
         cycle_total = time_module.monotonic() - _cycle_t0
         if cycle_total > 10.0:
             prev = _cycle_t0
@@ -429,9 +462,61 @@ class FreqtradeBot(LoggingMixin):
             logger.warning(
                 "[cycle] slow cycle: %.1fs — %s", cycle_total, ", ".join(parts),
             )
-        Trade.commit()
-        self.rpc.process_msg_queue(self.dataprovider._msg_queue)
         self.last_process = datetime.now(UTC)
+
+    def _emit_trade_snapshot(self) -> None:
+        """
+        Fork-specific: push a periodic live profit snapshot for all open trades over the
+        WS message stream (RPCMessageType.TRADE_SNAPSHOT), throttled, so a dashboard can
+        replace REST /status polling. Opt-in via api_server.ws_trade_snapshot_enabled.
+
+        Every trade is priced independently and a pricing failure for one trade only
+        drops that trade from the snapshot - it never aborts the whole emission, and
+        this method is only ever called from within process()'s own try/except, so it
+        can never affect trade execution regardless of what goes wrong here.
+        """
+        if not self._trade_snapshot_enabled:
+            return
+        now = time_module.monotonic()
+        if now - self._last_trade_snapshot_emit < self._trade_snapshot_throttle_secs:
+            return
+
+        with self._exit_lock:
+            trades = Trade.get_open_trades()
+
+        entries: list[RPCTradeSnapshotEntry] = []
+        for trade in trades:
+            if len(trade.select_filled_orders(trade.entry_side)) == 0:
+                # Entry order not filled yet - nothing meaningful to report.
+                continue
+            try:
+                current_rate = self.exchange.get_rate(
+                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
+                )
+            except (ExchangeError, PricingError):
+                # Same refresh=False semantics as _notify_exit/_rpc_trade_status: usually
+                # a cache hit, but on a cold cache (e.g. a trade sitting behind an
+                # exchange-side stoploss) this can fall through to a real ticker/orderbook
+                # call, same as the existing REST /status endpoint already does today. If
+                # that call fails, drop just this trade from the snapshot rather than the
+                # whole batch - this is a best-effort dashboard feed, not trade-critical.
+                continue
+            prof = trade.calculate_profit(current_rate)
+            entries.append(
+                {
+                    "trade_id": trade.id,
+                    "pair": trade.pair,
+                    "current_rate": current_rate,
+                    "profit_ratio": prof.profit_ratio,
+                    "profit_abs": prof.profit_abs,
+                    "total_profit_abs": prof.total_profit,
+                    "total_profit_ratio": prof.total_profit_ratio,
+                }
+            )
+
+        self._last_trade_snapshot_emit = now
+        msg: RPCTradeSnapshotMsg = {"type": RPCMessageType.TRADE_SNAPSHOT, "data": entries}
+        self.rpc.send_msg(msg)
 
     def process_stopped(self) -> None:
         """
