@@ -3,6 +3,8 @@ from pathlib import Path
 
 import requests
 
+from freqtrade.exceptions import OperationalException
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,25 +39,30 @@ def download_and_install_ui(dest_folder: Path, dl_url: str, version: str):
 
     logger.info(f"Downloading {dl_url}")
     resp = requests.get(dl_url, timeout=req_timeout).content
+    dest_folder = dest_folder.resolve()
     dest_folder.mkdir(parents=True, exist_ok=True)
-
     if dl_url.endswith(".tar.gz") or dl_url.endswith(".tgz"):
         import tarfile
 
         with tarfile.open(fileobj=BytesIO(resp), mode="r:gz") as tf:
+            for member in tf.getmembers():
+                destfile = (dest_folder / member.name).resolve()
+                if not destfile.is_relative_to(dest_folder):
+                    raise OperationalException(f"Dangerous path in tarfile: {member.name}")
             tf.extractall(path=dest_folder)
     else:
         from zipfile import ZipFile
 
         with ZipFile(BytesIO(resp)) as zf:
             for fn in zf.filelist:
+                destfile = (dest_folder / fn.filename).resolve()
+                if not destfile.is_relative_to(dest_folder):
+                    raise OperationalException(f"Dangerous path in zipfile: {fn.filename}")
                 with zf.open(fn) as x:
-                    destfile = dest_folder / fn.filename
                     if fn.is_dir():
                         destfile.mkdir(exist_ok=True)
                     else:
                         destfile.write_bytes(x.read())
-
     with (dest_folder / ".uiversion").open("w") as f:
         f.write(version)
 
@@ -80,7 +87,7 @@ def get_ui_download_url(version: str | None, prerelease: bool) -> tuple[str, str
         latest_version = tmp[0]["name"]
         assets = tmp[0].get("assets", [])
     else:
-        raise ValueError("UI-Version not found.")
+        raise OperationalException("UI-Version not found.")
 
     dl_url = ""
     if assets and len(assets) > 0:
