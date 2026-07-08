@@ -53,20 +53,26 @@ def init_db(db_url: str) -> None:
     :param db_url: Database to use
     :return: None
     """
-    kwargs: dict[str, Any] = {
-        "pool_size": 20,
-        "max_overflow": 40,
-        "pool_timeout": 120,
-    }
+    kwargs: dict[str, Any] = {}
 
     if db_url == "sqlite:///":
         raise OperationalException(
             f"Bad db-url {db_url}. For in-memory database, please use `sqlite://`."
         )
     if db_url == "sqlite://":
+        # StaticPool (in-memory sqlite, e.g. the test suite) doesn't accept QueuePool's
+        # sizing kwargs below - keep it on the pool's own defaults instead.
         kwargs.update(
             {
                 "poolclass": StaticPool,
+            }
+        )
+    else:
+        kwargs.update(
+            {
+                "pool_size": 20,
+                "max_overflow": 40,
+                "pool_timeout": 120,
             }
         )
     # Take care of thread ownership
