@@ -119,7 +119,9 @@ class TestReplayE2E:
         # Updated for the intra-candle stoploss enforcement (commit f271ac2f8):
         # at 15m sub-step the SL now fires on the sub-candle low instead of the
         # next process() close, which legitimately changes the coarse result.
-        "total_profit_abs": -390.9842,
+        # Re-frozen 2026-07-08 after the tradable_balance_ratio-with-available_capital
+        # sizing fix (commit 0e82b4f1c) legitimately changed position sizes.
+        "total_profit_abs": -387.8806,
         "total_profit_ratio": -1.451276,
     }
 
