@@ -75,7 +75,8 @@ logger = logging.getLogger(__name__)
 # 2.49: add /replay endpoints (fork-specific dry-run replay)
 # 2.50: add /fleetview endpoints (fork-specific fleet dashboard)
 # 2.51: add /trades/<id>/amount (DB-only rescale) + /fleetview realign endpoint
-API_VERSION = 2.51
+# 2.52: add /fleetview/exposure (wallet-level aggregate exposure snapshot)
+API_VERSION = 2.52
 
 # Public API, requires no auth.
 router_public = APIRouter()

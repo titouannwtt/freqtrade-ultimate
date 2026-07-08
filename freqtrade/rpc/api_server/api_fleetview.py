@@ -800,3 +800,49 @@ def fleetview_realign(payload: RealignPayload):
     with _CACHE_LOCK:
         _RECON_CACHE["ts"] = 0.0  # force refresh on next read
     return {"preview": False, **preview, "results": results}
+
+
+# Wallet-level exposure thresholds - kept in sync with user_data/exposure_guardrail.py.
+FREE_MARGIN_WARN = 0.30
+FREE_MARGIN_CRIT = 0.10
+LEVERAGE_WARN = 2.0
+LEVERAGE_CRIT = 2.5
+MARGIN_UTIL_WARN = 0.80
+MARGIN_UTIL_CRIT = 0.92
+EXPOSURE_STALE_S = 30 * 60
+
+
+@router.get("/fleetview/exposure", tags=["FleetView"])
+def fleetview_exposure(config=Depends(get_config)):
+    """Latest aggregate-exposure snapshot for the shared netted wallet (fork).
+
+    Reads the JSON snapshot written every 15 min by the exposure_guardrail.py cron
+    (equity / notional / margin / withdrawable + derived leverage & utilisation).
+    No exchange call: the guardrail owns the single HL info fetch. Returns
+    ``{"available": False}`` when no snapshot exists yet.
+    """
+    udir = Path(config.get("user_data_dir") or "user_data")
+    snap = udir / "exposure_state.json"
+    if not snap.exists():
+        return {"available": False}
+    try:
+        data = json.loads(snap.read_text())
+    except Exception:
+        return {"available": False}
+    data["available"] = True
+    data["thresholds"] = {
+        "free_margin_warn": FREE_MARGIN_WARN,
+        "free_margin_crit": FREE_MARGIN_CRIT,
+        "leverage_warn": LEVERAGE_WARN,
+        "leverage_crit": LEVERAGE_CRIT,
+        "margin_util_warn": MARGIN_UTIL_WARN,
+        "margin_util_crit": MARGIN_UTIL_CRIT,
+    }
+    try:
+        ts = datetime.fromisoformat(data.get("ts")).timestamp()
+        data["age_s"] = max(0.0, time.time() - ts)
+        data["stale"] = data["age_s"] > EXPOSURE_STALE_S
+    except Exception:
+        data["age_s"] = None
+        data["stale"] = None
+    return data
