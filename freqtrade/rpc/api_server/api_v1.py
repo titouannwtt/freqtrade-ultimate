@@ -72,11 +72,12 @@ logger = logging.getLogger(__name__)
 # 2.46: Add prepend_data to download-data endpoint
 # 2.47: Add Strategy parameters
 # 2.48: add /backtest/history/wallets endpoint
-# 2.49: add /replay endpoints (fork-specific dry-run replay)
-# 2.50: add /fleetview endpoints (fork-specific fleet dashboard)
-# 2.51: add /trades/<id>/amount (DB-only rescale) + /fleetview realign endpoint
-# 2.52: add /fleetview/exposure (wallet-level aggregate exposure snapshot)
-API_VERSION = 2.52
+# 2.49: Add /lookahead_analysis and /recursive_analysis endpoints and background job deletion (upstream)
+# 2.50: add /replay endpoints (fork-specific dry-run replay)
+# 2.51: add /fleetview endpoints (fork-specific fleet dashboard)
+# 2.52: add /trades/<id>/amount (DB-only rescale) + /fleetview realign endpoint
+# 2.53: add /fleetview/exposure (wallet-level aggregate exposure snapshot)
+API_VERSION = 2.53
 
 # Public API, requires no auth.
 router_public = APIRouter()
@@ -159,6 +160,7 @@ def markets(
         "markets": exchange.get_markets(
             base_currencies=[query.base] if query.base else None,
             quote_currencies=[query.quote] if query.quote else None,
+            active_only=not query.include_inactive,
         ),
         "exchange_id": exchange.id,
     }
