@@ -327,6 +327,17 @@ class Worker:
             logger.exception(
                 "Unexpected error in trading cycle, retrying in %s seconds...", RETRY_TIMEOUT
             )
+            # Fork-specific: a failed cycle can leave the shared DB session in a bad
+            # transactional state (e.g. SQLAlchemy 'prepared' state after an interrupted
+            # commit). Without a rollback the very same error re-raises every retry,
+            # wedging the bot until it crashes. Reset the session so the next cycle starts
+            # clean. Best-effort: never let the recovery itself break the retry loop.
+            try:
+                from freqtrade.persistence import Trade
+
+                Trade.rollback()
+            except Exception:  # noqa: S110
+                pass
             try:
                 self.freqtrade.notify_status(
                     f"*Unexpected error:*\n```\n{traceback.format_exc()}```\n"
