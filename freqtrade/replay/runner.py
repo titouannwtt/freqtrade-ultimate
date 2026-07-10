@@ -104,6 +104,11 @@ def run_replay(
     config["dry_run_wallet"] = wallet
     config["available_capital"] = wallet
     config["capital_withdrawal"] = 0.0
+    # Freeze the sizing wallet: without this, paper profits over months of replay
+    # compound into total_closed_profit -> available_amount -> stake, ballooning
+    # positions (and the funding fees computed on them) into fantasy millions.
+    # Wallets honours this flag to keep replay stakes bounded by the real capital.
+    config["replay_lock_wallet"] = True
 
     exchange_cfg = config.setdefault("exchange", {})
     exchange_cfg["pair_whitelist"] = list(pairs)

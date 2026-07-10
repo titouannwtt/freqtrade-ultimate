@@ -121,7 +121,9 @@ class TestReplayE2E:
         # next process() close, which legitimately changes the coarse result.
         # Re-frozen 2026-07-08 after the tradable_balance_ratio-with-available_capital
         # sizing fix (commit 0e82b4f1c) legitimately changed position sizes.
-        "total_profit_abs": -387.8806,
+        # Re-frozen 2026-07-10 after the replay wallet-lock (replay_lock_wallet) stopped
+        # paper profits from compounding into stake sizes.
+        "total_profit_abs": -390.9842,
         "total_profit_ratio": -1.451276,
     }
 
@@ -151,7 +153,7 @@ class TestReplayE2E:
             sub_step=60,
         )
         assert s["closed_trades"] == 30
-        assert s["total_profit_abs"] == pytest.approx(268.3742)
+        assert s["total_profit_abs"] == pytest.approx(239.18)
 
     def test_seed_marker_written(self, datadir, tmp_path):
         import sqlite3

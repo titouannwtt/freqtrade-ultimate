@@ -353,11 +353,18 @@ class Wallets:
         """
         val_tied_up = Trade.total_open_trades_stakes()
 
-        # === Anti-compounding lock (backtest/hyperopt only) ===
+        # === Anti-compounding lock (backtest/hyperopt, and dry-run replay) ===
+        # Replay drives the live bot loop candle-by-candle over months of data. Left
+        # unlocked, paper profits feed total_closed_profit -> available_amount -> stake
+        # sizing, so positions balloon (seen: 41M USDC stakes on a 150 wallet) and the
+        # funding fees computed on those absurd sizes explode the result into the millions.
+        # Freezing the sizing wallet at the configured capital keeps replay results
+        # realistic (per-trade edge, not compounded fantasy). Gated by replay_lock_wallet,
+        # which the ReplayRunner sets, so live/dry bots are unaffected.
         if (
             self._config.get("backtest_lock_wallet", False)
             and self._config.get("runmode") in (RunMode.BACKTEST, RunMode.HYPEROPT)
-        ):
+        ) or self._config.get("replay_lock_wallet", False):
             if "available_capital" in self._config:
                 starting_balance = float(self._config["available_capital"])
                 withdrawal = self.get_capital_withdrawal()

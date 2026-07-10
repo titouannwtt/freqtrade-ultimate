@@ -797,6 +797,21 @@ class LocalTrade:
         """
         if funding_fee is None:
             return
+        # Sanity guard: a funding fee cannot plausibly dwarf the position it is charged
+        # on. Even 6 months at Hyperliquid's max funding rate accumulates only ~2x the
+        # notional, so anything past 10x is a computation/data bug (a dry-run replay once
+        # produced 380M USDC of funding on a ~550k position). Reject it rather than let it
+        # corrupt close_profit and — via compounding into available_capital — snowball.
+        notional = abs((self.amount or 0.0) * (self.open_rate or 0.0))
+        if notional > 0.0 and abs(funding_fee) > 10.0 * notional:
+            logger.warning(
+                "Trade %s %s: implausible funding fee %.2f vs notional %.2f — clamping to 0",
+                self.id,
+                self.pair,
+                funding_fee,
+                notional,
+            )
+            funding_fee = 0.0
         self.funding_fee_running = funding_fee
         prior_funding_fees = sum([o.funding_fee for o in self.orders if o.funding_fee])
         self.funding_fees = prior_funding_fees + funding_fee
