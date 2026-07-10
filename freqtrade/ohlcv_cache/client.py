@@ -613,6 +613,7 @@ class OhlcvCacheClient:
                     "persistence_path": global_cfg["persistence_path"],
                     "flush_interval_s": global_cfg["flush_interval_s"],
                     "max_candles_per_series": global_cfg["max_candles_per_series"],
+                    "positions_cache_ttl_s": global_cfg["positions_cache_ttl_s"],
                 },
                 "exchanges": cache_cfg.get("exchanges") or {},
             },

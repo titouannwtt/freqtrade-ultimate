@@ -992,7 +992,11 @@ class Daemon:
         self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 30.0))
         self._tickers_inflight: dict[str, asyncio.Event] = {}
         self._positions_cache: dict[str, _PositionsCacheEntry] = {}
-        self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 3.0))
+        # Default raised 3.0 -> 15.0: all bots share one wallet, so coalescing
+        # fetch_positions to ~1 real API call per TTL window across the whole
+        # fleet cuts positions rate-limit pressure without risking staleness
+        # (bot side still forces a fresh CRITICAL fetch past 45s when holding).
+        self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 15.0))
         self._positions_inflight: dict[str, asyncio.Event] = {}
         self._balances_cache: dict[str, _BalancesCacheEntry] = {}
         self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))

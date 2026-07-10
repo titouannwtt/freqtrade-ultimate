@@ -57,6 +57,13 @@ GLOBAL_DEFAULTS: dict = {
     "client_stagger_s": 30,
     # Feather flush cadence (seconds). Only writes dirty series.
     "flush_interval_s": 30,
+    # Shared positions cache TTL (seconds). All bots share one wallet, so the
+    # daemon coalesces fetch_positions into one real API call per TTL window and
+    # serves it to every bot. 15s (vs the old 3s) cuts positions API pressure
+    # ~5x while staying well under the bot-side 45s staleness guard
+    # (mixin _STALE_POSITIONS_MAX_AGE_S), which still forces a fresh CRITICAL
+    # fetch whenever a bot actually holds an open position.
+    "positions_cache_ttl_s": 15,
 }
 
 
