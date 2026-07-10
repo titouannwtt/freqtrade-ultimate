@@ -6,6 +6,7 @@ import logging
 import os
 import time as time_module
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
@@ -266,6 +267,21 @@ class FreqtradeBot(LoggingMixin):
                 PROCESS_THROTTLE_SECS, api_server_conf.get("ws_trade_snapshot_throttle_secs", 10)
             )
             self._last_trade_snapshot_emit: float = 0.0
+            # Bounds each per-trade get_rate() call in _emit_trade_snapshot(). Observed in
+            # production (2026-07-10, dry_pipeline_bb_sroc_fade_dual_v1): under fleet-wide
+            # DDosProtection, the retrier's daemon-queue wait path can legitimately take up
+            # to ~120s per retry without ever raising - so a plain except (ExchangeError,
+            # PricingError) never triggers and the call can block far longer than the
+            # cache-hit case this feature was designed around (one observed cycle stalled
+            # 620s this way). Run each call in its own thread and give up after this many
+            # seconds; the underlying call is left to finish in the background (harmless,
+            # read-only) rather than blocking the trading loop. 15s comfortably covers the
+            # slow-but-legitimate range already seen during congestion (up to ~57s total
+            # across 2-3 trades, so ~15-20s/trade) while capping the pathological case.
+            self._trade_snapshot_rate_timeout: float = 15.0
+            self._trade_snapshot_executor = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="snapshot-rate"
+            )
 
             self.strategy.ft_bot_start()
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
@@ -315,6 +331,10 @@ class FreqtradeBot(LoggingMixin):
             if getattr(self, "strategy", None):
                 self.strategy.ft_bot_cleanup()
 
+        if getattr(self, "_trade_snapshot_executor", None):
+            # Don't wait for in-flight get_rate() calls - they may themselves be stuck in
+            # the same daemon-queue wait this timeout exists to route around.
+            self._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
         if getattr(self, "rpc", None):
             self.rpc.cleanup()
         if hasattr(self, "emc") and self.emc:
@@ -470,10 +490,11 @@ class FreqtradeBot(LoggingMixin):
         WS message stream (RPCMessageType.TRADE_SNAPSHOT), throttled, so a dashboard can
         replace REST /status polling. Opt-in via api_server.ws_trade_snapshot_enabled.
 
-        Every trade is priced independently and a pricing failure for one trade only
-        drops that trade from the snapshot - it never aborts the whole emission, and
-        this method is only ever called from within process()'s own try/except, so it
-        can never affect trade execution regardless of what goes wrong here.
+        Every trade is priced independently, bounded by _trade_snapshot_rate_timeout, and
+        a pricing failure or timeout for one trade only drops that trade from the snapshot
+        - it never aborts the whole emission, and this method is only ever called from
+        within process()'s own try/except, so it can never affect trade execution
+        regardless of what goes wrong here.
         """
         if not self._trade_snapshot_enabled:
             return
@@ -490,16 +511,28 @@ class FreqtradeBot(LoggingMixin):
                 # Entry order not filled yet - nothing meaningful to report.
                 continue
             try:
-                current_rate = self.exchange.get_rate(
-                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
-                )
-            except (ExchangeError, PricingError):
                 # Same refresh=False semantics as _notify_exit/_rpc_trade_status: usually
                 # a cache hit, but on a cold cache (e.g. a trade sitting behind an
                 # exchange-side stoploss) this can fall through to a real ticker/orderbook
-                # call, same as the existing REST /status endpoint already does today. If
-                # that call fails, drop just this trade from the snapshot rather than the
-                # whole batch - this is a best-effort dashboard feed, not trade-critical.
+                # call, same as the existing REST /status endpoint already does today.
+                # Bounded via the executor below: under fleet-wide rate pressure this call
+                # can legitimately take minutes without raising (daemon-queue wait), so a
+                # bare try/except on exception type alone doesn't cap the wait - see
+                # _trade_snapshot_rate_timeout's docstring in __init__.
+                future = self._trade_snapshot_executor.submit(
+                    self.exchange.get_rate,
+                    trade.pair,
+                    side="exit",
+                    is_short=trade.is_short,
+                    refresh=False,
+                )
+                current_rate = future.result(timeout=self._trade_snapshot_rate_timeout)
+            except (ExchangeError, PricingError, TimeoutError):
+                # If that call fails or times out, drop just this trade from the snapshot
+                # rather than the whole batch - this is a best-effort dashboard feed, not
+                # trade-critical. On timeout the underlying call keeps running to
+                # completion in its own thread (harmless - it's read-only) instead of
+                # blocking the trading loop.
                 continue
             prof = trade.calculate_profit(current_rate)
             entries.append(

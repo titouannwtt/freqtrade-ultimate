@@ -6117,3 +6117,57 @@ def test_emit_trade_snapshot_throttle(mocker, default_conf_usdt, fee) -> None:
     freqtrade._last_trade_snapshot_emit = 0.0
     freqtrade._emit_trade_snapshot()
     assert rpc_mock.call_count == 2
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_rate_lookup_timeout(mocker, default_conf_usdt, fee) -> None:
+    """
+    A get_rate() call that hangs (e.g. stuck in the daemon-queue wait path under
+    exchange-wide rate pressure, as observed in production) must not block
+    _emit_trade_snapshot() for anywhere near that long - it should give up after
+    _trade_snapshot_rate_timeout, drop just that trade, and still emit the others.
+    """
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+
+    def get_rate_side_effect(pair, *args, **kwargs):
+        if pair == "BTC/USDT":
+            time.sleep(2)  # never raises - just very slow, like the real incident
+            return 50000.0
+        return 50000.0
+
+    mocker.patch(f"{EXMS}.get_rate", side_effect=get_rate_side_effect)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()
+    freqtrade._trade_snapshot_enabled = True
+    freqtrade._trade_snapshot_rate_timeout = 0.2  # keep the test fast
+
+    filled_entry = {
+        "id": "1",
+        "status": "closed",
+        "side": "buy",
+        "type": "limit",
+        "price": 50000.0,
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+    }
+    _make_open_trade(fee, "ETH/USDT", filled_entry)  # fast lookup -> should appear
+    _make_open_trade(fee, "BTC/USDT", filled_entry)  # slow lookup -> should be dropped
+    Trade.commit()
+
+    t0 = time.monotonic()
+    freqtrade._emit_trade_snapshot()
+    elapsed = time.monotonic() - t0
+
+    # Bounded by the timeout, not by the 2s the slow trade takes to "resolve".
+    assert elapsed < 1.5
+
+    assert rpc_mock.call_count == 1
+    msg = rpc_mock.call_args_list[0][0][0]
+    assert msg["type"] == RPCMessageType.TRADE_SNAPSHOT
+    assert len(msg["data"]) == 1
+    assert msg["data"][0]["pair"] == "ETH/USDT"
+
+    freqtrade._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
