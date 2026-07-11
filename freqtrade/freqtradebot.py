@@ -279,8 +279,19 @@ class FreqtradeBot(LoggingMixin):
             # slow-but-legitimate range already seen during congestion (up to ~57s total
             # across 2-3 trades, so ~15-20s/trade) while capping the pathological case.
             self._trade_snapshot_rate_timeout: float = 15.0
+            # Bounds the Trade.get_open_trades() call. A local, read-only SQLite query -
+            # 10s is already generous; if it takes that long the host itself is under
+            # severe strain (observed 2026-07-10: ~155s unaccounted for in one call during
+            # a fleet-wide host/DB contention episode - see _emit_trade_snapshot).
+            self._trade_snapshot_db_timeout: float = 10.0
+            # Overall ceiling for the per-trade pricing loop, independent of open-trade
+            # count, so a bot with many open trades (each hitting its own
+            # _trade_snapshot_rate_timeout) can't scale this step unboundedly. 90s covers
+            # 6 trades all timing out individually - comfortably above any bot in this
+            # fleet's max_open_trades today, purely a defense-in-depth ceiling.
+            self._trade_snapshot_loop_budget_secs: float = 90.0
             self._trade_snapshot_executor = ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="snapshot-rate"
+                max_workers=3, thread_name_prefix="snapshot-rate"
             )
 
             self.strategy.ft_bot_start()
@@ -495,6 +506,17 @@ class FreqtradeBot(LoggingMixin):
         - it never aborts the whole emission, and this method is only ever called from
         within process()'s own try/except, so it can never affect trade execution
         regardless of what goes wrong here.
+
+        Trade.get_open_trades() and the overall per-trade loop are also bounded (see
+        _trade_snapshot_db_timeout / _trade_snapshot_loop_budget_secs in __init__) -
+        observed in production (2026-07-10 23:59, dry_pipeline_bb_sroc_fade_dual_v1): a
+        single get_open_trades() call absorbed ~155s of unaccounted time during a severe,
+        fleet-wide (not snapshot-specific - another bot without this feature hit the same
+        pattern in its candle-refresh phase minutes later) host/DB contention episode,
+        pushing the whole method to 202.7s despite every get_rate() call individually
+        respecting its 15s cap. orders is eager-loaded (lazy="selectin" on Trade.orders),
+        so select_filled_orders() below is pure in-memory filtering once trades is in hand
+        - the DB call is the only other unbounded piece worth guarding.
         """
         if not self._trade_snapshot_enabled:
             return
@@ -502,11 +524,21 @@ class FreqtradeBot(LoggingMixin):
         if now - self._last_trade_snapshot_emit < self._trade_snapshot_throttle_secs:
             return
 
-        with self._exit_lock:
-            trades = Trade.get_open_trades()
+        try:
+            trades_future = self._trade_snapshot_executor.submit(Trade.get_open_trades)
+            trades = trades_future.result(timeout=self._trade_snapshot_db_timeout)
+        except Exception:
+            # Can't even list open trades within budget - nothing to report this cycle.
+            return
 
         entries: list[RPCTradeSnapshotEntry] = []
+        loop_deadline = time_module.monotonic() + self._trade_snapshot_loop_budget_secs
         for trade in trades:
+            if time_module.monotonic() >= loop_deadline:
+                # Overall per-cycle budget exhausted (e.g. many open trades each hitting
+                # their individual timeout) - emit whatever was gathered so far rather
+                # than let this loop scale unboundedly with open-trade count.
+                break
             if len(trade.select_filled_orders(trade.entry_side)) == 0:
                 # Entry order not filled yet - nothing meaningful to report.
                 continue
