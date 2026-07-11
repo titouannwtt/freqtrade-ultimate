@@ -340,6 +340,13 @@ class CachedExchangeMixin:
                 )
                 self._ftcache_warned = True
             self._ftcache_client = False
+        # Start the mixin-side positions refresher (no-op unless live +
+        # positions_refresh_enabled). Kept outside the try so a daemon-client
+        # failure above doesn't prevent the (daemon-independent) refresher.
+        try:
+            self._ftcache_maybe_start_positions_refresher()
+        except Exception as e:
+            logger.warning("[positions-refresh] start failed: %r", e)
 
     def _ftcache_disable_ccxt_ratelimit(self) -> None:
         """Reduce ccxt's built-in rate limiter when daemon is active.
@@ -428,7 +435,18 @@ class CachedExchangeMixin:
 
     def ftcache_get_stats(self) -> dict:
         """Return diagnostic counters for the cache layer."""
-        return dict(getattr(self, "_ftcache_stats", {}))
+        stats = dict(getattr(self, "_ftcache_stats", {}))
+        if self._pos_refresher_active:
+            stats["positions_refresher_active"] = True
+            stats["positions_source"] = self._pos_source
+            stats["positions_cache_age_s"] = round(
+                time.monotonic() - (self._ftcache_last_positions_ts or 0), 1
+            )
+            stats["positions_consecutive_fail"] = self._pos_consecutive_fail
+            stats["positions_thread_alive"] = bool(
+                self._pos_thread is not None and self._pos_thread.is_alive()
+            )
+        return stats
 
     def _ftcache_save_positions(
         self, positions: list, *, fetched_at: float | None = None
@@ -583,7 +601,7 @@ class CachedExchangeMixin:
                     age,
                     e,
                 )
-            except Exception as e:  # noqa: BLE001 — the thread must survive anything
+            except Exception as e:  # the thread must survive anything
                 self._pos_consecutive_fail += 1
                 self._ftcache_bump("positions_refresh_err")
                 age = time.monotonic() - (self._ftcache_last_positions_ts or 0)
@@ -660,6 +678,104 @@ class CachedExchangeMixin:
         )
         self._ftcache_bump("positions_fallback_direct")
         return None
+
+    # ---- positions refresher lifecycle (phase 3) ----
+
+    def _ftcache_maybe_start_positions_refresher(self) -> None:
+        """Start the refresher iff: live (not dry/offline/util), the shared cache is
+        usable, and positions_refresh_enabled is set. Idempotent."""
+        if self._pos_refresher_active:
+            return
+        if getattr(self, "_ftcache_is_offline_mode", False) or getattr(
+            self, "_ftcache_is_utility_mode", False
+        ):
+            return
+        if self._config.get("dry_run", True):  # live only (invariant I4)
+            return
+        try:
+            from freqtrade.ohlcv_cache.defaults import resolve_global_config
+
+            gc = resolve_global_config(self._config.get("shared_ohlcv_cache") or {})
+        except Exception as e:
+            logger.debug("[positions-refresh] config resolve failed: %s", e)
+            return
+        if not gc.get("positions_refresh_enabled", False):
+            return
+        self._ftcache_start_positions_refresher(gc)
+
+    def _ftcache_start_positions_refresher(
+        self, gc: dict | None = None, *, restart: bool = False
+    ) -> None:
+        if restart:
+            self._ftcache_stop_positions_refresher()
+        if gc is None:
+            from freqtrade.ohlcv_cache.defaults import resolve_global_config
+
+            gc = resolve_global_config(self._config.get("shared_ohlcv_cache") or {})
+        self._pos_source = self._resolve_positions_source()
+        self._pos_interval = float(gc.get("positions_refresh_interval_s", 10))
+        self._pos_jitter_pct = float(gc.get("positions_refresh_jitter_pct", 0.3))
+        self._pos_backoff_max = float(gc.get("positions_refresh_backoff_max_s", 120))
+        self._pos_soft_stale = float(gc.get("positions_soft_stale_s", 45))
+        self._pos_hard_stale = float(gc.get("positions_hard_stale_s", 90))
+        self._pos_report_to_daemon = bool(gc.get("positions_report_to_daemon", True))
+        self._pos_lock = threading.Lock()
+        self._pos_stop = threading.Event()
+        self._pos_force_event = threading.Event()
+        self._pos_consecutive_fail = 0
+        # Synchronous initial refresh so the cache is never empty on the first
+        # process() cycle (a failure here is non-fatal — the fast-path fallback
+        # covers it until the thread lands a fresh copy).
+        try:
+            self._ftcache_refresh_positions_once()
+            logger.info("[positions-refresh] refresh initial OK (source=%s)", self._pos_source)
+        except Exception as e:
+            logger.warning(
+                "[positions-refresh] refresh initial échoué (fallback prend le relais): %r", e
+            )
+        self._pos_thread = threading.Thread(
+            target=self._positions_refresh_loop,
+            name=f"pos-refresh-{getattr(self, 'id', 'x')}",
+            daemon=True,
+        )
+        self._pos_refresher_active = True
+        self._pos_thread.start()
+        logger.info(
+            "[positions-refresh] démarré (mode=%s, interval=%.0fs, soft=%.0fs, hard=%.0fs)",
+            self._pos_source,
+            self._pos_interval,
+            self._pos_soft_stale,
+            self._pos_hard_stale,
+        )
+
+    def _ftcache_stop_positions_refresher(self) -> None:
+        if not self._pos_refresher_active and self._pos_thread is None:
+            return
+        self._pos_refresher_active = False
+        if self._pos_stop is not None:
+            self._pos_stop.set()
+        if self._pos_force_event is not None:
+            self._pos_force_event.set()
+        th = self._pos_thread
+        if th is not None and th.is_alive():
+            th.join(timeout=5.0)
+        self._pos_thread = None
+        fetcher = self._pos_fetcher_api
+        if fetcher is not None:
+            try:
+                if hasattr(fetcher, "close"):
+                    fetcher.close()
+            except Exception:  # noqa: S110
+                pass
+            self._pos_fetcher_api = None
+        logger.info("[positions-refresh] arrêté")
+
+    def close(self):  # override Exchange.close to stop the refresher first
+        try:
+            self._ftcache_stop_positions_refresher()
+        except Exception as e:
+            logger.debug("[positions-refresh] stop on close failed: %s", e)
+        return super().close()
 
     _LOOP_LOCK_TIMEOUT_S: float = 5.0
 
@@ -1224,6 +1340,7 @@ class CachedExchangeMixin:
         # through to the daemon/ccxt path when the cache is too old. Inert when the
         # refresher is off — legacy behaviour preserved.
         if self._pos_refresher_active:
+            self._positions_watchdog()  # self-heal a dead thread / force refresh if frozen
             served = self._positions_serve_from_refresher(pair)
             if served is not None:
                 return served
