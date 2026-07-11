@@ -146,6 +146,11 @@ class CachedExchangeMixin:
     # Local fallback caches for rate-limited scenarios
     _ftcache_last_positions: list | None = None
     _ftcache_last_positions_ts: float = 0.0
+    # Monotonic timestamp of the *fetch* that produced _ftcache_last_positions
+    # (captured before the network call). Used to reject out-of-order writes so a
+    # slow refresh can never overwrite fresher data with staler data. See
+    # docs/dev/positions_refresher_plan_v2.md (invariant I2).
+    _pos_last_fetched_at: float = 0.0
     _ftcache_tickers_fresh_ts: float = 0.0
     _ftcache_last_balances: dict | None = None
     _ftcache_last_backoff_active: bool = False
@@ -405,9 +410,31 @@ class CachedExchangeMixin:
         """Return diagnostic counters for the cache layer."""
         return dict(getattr(self, "_ftcache_stats", {}))
 
-    def _ftcache_save_positions(self, positions: list) -> None:
+    def _ftcache_save_positions(
+        self, positions: list, *, fetched_at: float | None = None
+    ) -> None:
+        """Store the latest positions, rejecting out-of-order writes.
+
+        ``fetched_at`` is the monotonic time captured *before* the fetch that
+        produced ``positions``. When the background refresher and a fallback
+        direct fetch run concurrently, a slow fetch started earlier could return
+        after a newer one; without this guard it would clobber fresher data with
+        staler data. Callers that don't pass ``fetched_at`` (in-order legacy
+        paths) get ``now`` and always win, preserving current behaviour.
+        (Not yet lock-protected — the refresher thread lands in a later phase
+        and will add the lock; today all callers run on the worker thread.)
+        """
+        fa = fetched_at if fetched_at is not None else time.monotonic()
+        if fa <= self._pos_last_fetched_at:
+            logger.debug(
+                "positions write ignored — out of order (fetched_at=%.3f <= last=%.3f)",
+                fa,
+                self._pos_last_fetched_at,
+            )
+            return
         self._ftcache_last_positions = positions
         self._ftcache_last_positions_ts = time.monotonic()
+        self._pos_last_fetched_at = fa
 
     def _ftcache_get_stale_positions(self, *, reject_if_too_old: bool = True) -> list | None:
         if self._ftcache_last_positions is None:

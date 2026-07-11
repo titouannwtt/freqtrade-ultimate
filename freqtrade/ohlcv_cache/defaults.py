@@ -69,6 +69,19 @@ GLOBAL_DEFAULTS: dict = {
     # (mixin _STALE_POSITIONS_MAX_AGE_S), which still forces a fresh CRITICAL
     # fetch whenever a bot actually holds an open position.
     "positions_cache_ttl_s": 15,
+    # --- Mixin-side positions refresher (see docs/dev/positions_refresher_plan_v2.md) ---
+    # A per-bot background thread that keeps the local positions cache fresh,
+    # decoupled from the OHLCV backoff, so a "daemon busy" spike can't freeze a
+    # live bot for the whole client_timeout window. Phase 1 ships the config +
+    # the monotonic cache guard; the thread/circuit-breaker land in later phases.
+    "positions_refresh_enabled": False,  # master flag — off until the refresher lands + is piloted
+    "positions_refresh_interval_s": 10,  # nominal cadence
+    "positions_refresh_jitter_pct": 0.3,  # +/-30% to desync the fleet
+    "positions_refresh_backoff_max_s": 120,  # cap on the adaptive backoff after consecutive failures
+    "positions_soft_stale_s": 45,  # cache older than this -> best-effort direct fetch
+    "positions_hard_stale_s": 90,  # circuit breaker: older than this -> refuse risky actions
+    "positions_equiv_check_interval_s": 3600,  # HL public-vs-signed field cross-check cadence
+    "positions_report_to_daemon": True,  # push refreshed positions to the shared cache (non-blocking)
 }
 
 
