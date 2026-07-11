@@ -1182,6 +1182,11 @@ class FreqtradeBot(LoggingMixin):
         :param trade: Trade to close
         :return: True if handled, False otherwise
         """
+        # Circuit breaker: a "position gone" reading on stale data may be a false
+        # positive (429 storm froze the cache). Don't fabricate an external close
+        # until positions are fresh — the reconciliation retries next cycle.
+        if self._positions_circuit_open(f"external close {trade.pair}"):
+            return False
         try:
             # Try to find the actual close price from recent trades on exchange
             close_price = None
@@ -1320,6 +1325,48 @@ class FreqtradeBot(LoggingMixin):
 
         return trades_created
 
+    def _positions_circuit_open(self, context: str) -> bool:
+        """Circuit breaker: True when the position cache is too stale to safely
+        take a risky action (a new entry, a fabricated external close). It is a
+        no-op — returns False — unless the mixin-side positions refresher is
+        active and its cache has aged past the hard-stale threshold (e.g. during a
+        429 storm). Exits are never gated by this: we must always be able to close.
+        """
+        check = getattr(self.exchange, "positions_are_trustworthy", None)
+        if check is None:
+            return False
+        # Fail open on anything that isn't a clean (bool, number) verdict — a
+        # circuit breaker must never block trading because of a mock/garbage
+        # value; it only engages on an explicit "not trustworthy" from a live
+        # refresher.
+        try:
+            result = check()
+        except Exception:
+            return False
+        if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool)):
+            return False
+        ok, age = result
+        if ok:
+            return False
+        now = time_module.monotonic()
+        if now - getattr(self, "_pos_cb_last_warn", 0.0) > 60.0:
+            logger.warning(
+                "Positions too stale (age=%.0fs) — %s blocked until fresh", age, context
+            )
+            self._pos_cb_last_warn = now
+        req = getattr(self.exchange, "request_positions_refresh", None)
+        if req is not None:
+            req()
+        return True
+
+    def _request_positions_refresh(self) -> None:
+        """Event-driven freshness: nudge the mixin-side refresher to fetch now
+        (after an order placement the wallet position is about to change). No-op
+        when the refresher is inactive."""
+        req = getattr(self.exchange, "request_positions_refresh", None)
+        if req is not None:
+            req()
+
     def create_trade(self, pair: str) -> bool:
         """
         Check the implemented trading strategy for entry signals.
@@ -1330,6 +1377,10 @@ class FreqtradeBot(LoggingMixin):
         :return: True if a trade has been created.
         """
         logger.debug(f"create_trade for pair {pair}")
+        # Circuit breaker: never open a NEW position on stale position data — on a
+        # shared/netted wallet that risks double-entering or wrong netting.
+        if self._positions_circuit_open(f"entry {pair}"):
+            return False
 
         analyzed_df, _ = self.dataprovider.get_analyzed_dataframe(pair, self.strategy.timeframe)
         nowtime = analyzed_df.iloc[-1]["date"] if len(analyzed_df) > 0 else None
@@ -1620,6 +1671,7 @@ class FreqtradeBot(LoggingMixin):
         order_id = order["id"]
         order_status = order.get("status")
         logger.info(f"Order {order_id} was created for {pair} and status is {order_status}.")
+        self._request_positions_refresh()  # entry placed — position about to change
 
         # we assume the order is executed at the price requested
         enter_limit_filled_price = enter_limit_requested
@@ -2851,6 +2903,7 @@ class FreqtradeBot(LoggingMixin):
         trade.exit_reason = exit_reason
 
         self._notify_exit(trade, order_type, sub_trade=bool(sub_trade_amt), order=order_obj)
+        self._request_positions_refresh()  # exit placed — position about to change
         # In case of market exit orders the order can be closed immediately
         if order.get("status", "unknown") in ("closed", "expired"):
             self.update_trade_state(trade, order_obj.order_id, order)
