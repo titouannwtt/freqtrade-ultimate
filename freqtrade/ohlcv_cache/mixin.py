@@ -509,7 +509,7 @@ class CachedExchangeMixin:
         /info endpoint (ccxt.hyperliquid.fetch_positions uses handle_public_address
         + publicPostInfo — no signing, address only). Everything else is signed."""
         if (
-            getattr(self, "name", None) == "hyperliquid"
+            getattr(self, "id", None) == "hyperliquid"  # ccxt id (lowercase), not self.name
             and self.trading_mode == TradingMode.FUTURES
             and not self._config.get("dry_run", True)
             and getattr(self._api, "walletAddress", None)
@@ -529,7 +529,7 @@ class CachedExchangeMixin:
             return self._pos_fetcher_api
         import ccxt
 
-        name = self.name
+        name = self.id  # ccxt module attribute is the lowercase id (self.name is the display name)
         cfg: dict[str, Any] = {"enableRateLimit": True}
         opts = getattr(self._api, "options", {}) or {}
         if self.trading_mode == TradingMode.FUTURES and opts.get("defaultType"):
