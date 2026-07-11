@@ -47,9 +47,14 @@ GLOBAL_DEFAULTS: dict = {
     # 40 pairs x multiple timeframes, the token bucket queue can be very
     # deep on cold start. A short timeout causes cascade failure: client
     # falls back to direct ccxt, adds API pressure, 429, daemon backs
-    # off, more timeouts. 900s (15 min) lets the daemon's centralized
-    # rate limiter drain the queue even under heavy contention (100+ bots).
-    "client_timeout_s": 900,
+    # off, more timeouts.
+    # Lowered 900s -> 240s: at 900s a single "daemon busy" spike froze live
+    # bots for a full 15 min (no heartbeat, no pricing, no exit evaluation).
+    # 240s caps that stall at 4 min before falling back to direct ccxt, which
+    # is a much better failure mode for live bots than a 15-min freeze. Trade-off:
+    # on a *cold start* (all bots restarting at once, very deep queue) a lower
+    # timeout can trigger fallback-to-ccxt cascade — stagger restarts to avoid it.
+    "client_timeout_s": 240,
     "client_spawn_timeout_s": 15,
     # Maximum random startup delay (seconds) applied once per client
     # singleton to stagger initial connections and avoid thundering herd
