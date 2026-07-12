@@ -36,6 +36,7 @@ from pathlib import Path
 import pandas as pd
 
 from freqtrade.enums import CandleType
+from freqtrade.exchange import timeframe_to_minutes
 
 
 logger = logging.getLogger(__name__)
@@ -147,9 +148,16 @@ class ReplayDataStore:
             return pd.DataFrame(columns=_EMPTY_COLS)
 
         up_to_ts = pd.Timestamp(up_to)
-        # side="left" excludes a candle whose open == up_to (still forming);
-        # side="right" includes it (drop_incomplete=False).
-        hi = int(df["date"].searchsorted(up_to_ts, side="left" if drop_incomplete else "right"))
+        if drop_incomplete:
+            # A candle is only usable once its CLOSE has passed: open + tf <= now.
+            # Gating on open time alone (open < now) re-admits the still-forming
+            # candle as soon as the clock leaves the open boundary — a look-ahead
+            # of up to (timeframe - sub_step) whenever the sub-step is finer than
+            # the timeframe (e.g. 1m sub-step on a 1h strategy).
+            tf_delta = pd.Timedelta(minutes=timeframe_to_minutes(tf))
+            hi = int(df["date"].searchsorted(up_to_ts - tf_delta, side="right"))
+        else:
+            hi = int(df["date"].searchsorted(up_to_ts, side="right"))
 
         lo = 0
         if since_ms is not None:

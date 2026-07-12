@@ -157,6 +157,16 @@ class TestDataStore:
         df = store.get_candles(self.PAIR, "15m", CandleType.FUTURES, up_to, drop_incomplete=False)
         assert up_to in set(df["date"])
 
+    def test_drop_incomplete_hides_forming_candle_mid_bar(self, store):
+        # Regression for the look-ahead bug: a sub-step finer than the
+        # timeframe (e.g. 1m ticks on 15m candles) must not reveal a candle
+        # still forming — only once its close has actually passed.
+        up_to = pd.Timestamp("2026-01-01 02:31", tz="UTC")  # 1 minute into the 02:30 candle
+        df = store.get_candles(self.PAIR, "15m", CandleType.FUTURES, up_to, drop_incomplete=True)
+        last_open = pd.Timestamp("2026-01-01 02:15", tz="UTC")
+        assert df["date"].iloc[-1] == last_open
+        assert pd.Timestamp("2026-01-01 02:30", tz="UTC") not in set(df["date"])
+
     def test_max_candles_cap(self, store):
         up_to = pd.Timestamp("2026-01-02", tz="UTC")
         df = store.get_candles(
