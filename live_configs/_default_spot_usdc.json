@@ -76,5 +76,8 @@
         "ccxt_async_config": {}
     },
     "initial_state": "running",
-    "force_entry_enable": false
+    "force_entry_enable": false,
+    "shared_ohlcv_cache": {
+        "positions_refresh_enabled": true
+    }
 }
