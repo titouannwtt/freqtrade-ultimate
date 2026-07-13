@@ -78,6 +78,7 @@
     "initial_state": "running",
     "force_entry_enable": false,
     "shared_ohlcv_cache": {
-        "positions_refresh_enabled": true
+        "positions_refresh_enabled": true,
+        "positions_report_to_daemon": false
     }
 }
