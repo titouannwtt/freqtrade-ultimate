@@ -79,6 +79,8 @@
     "force_entry_enable": false,
     "shared_ohlcv_cache": {
         "positions_refresh_enabled": true,
-        "positions_report_to_daemon": false
+        "positions_report_to_daemon": false,
+        "positions_refresh_interval_s": 45,
+        "positions_soft_stale_s": 60
     }
 }
