@@ -798,6 +798,13 @@ class BotRegistry:
         self._conn_to_bot[conn_id] = bot_id
         return entry
 
+    def is_dry(self, conn_id: int) -> bool:
+        """Whether the bot on this connection runs in dry-run mode.
+        Unknown connection -> False (treat as live = conservative)."""
+        bot_id = self._conn_to_bot.get(conn_id)
+        entry = self._bots.get(bot_id) if bot_id else None
+        return bool(entry.dry_run) if entry else False
+
     def heartbeat(self, conn_id: int) -> None:
         bot_id = self._conn_to_bot.get(conn_id)
         if bot_id is not None:
@@ -969,13 +976,15 @@ class Daemon:
         self.stats = DaemonStats()
         # Stale-while-revalidate (SWR) for live OHLCV — see defaults.py.
         self._swr_enabled = bool(global_cfg.get("swr_enabled", True))
-        self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 3))
+        self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 8))
+        self._swr_dry_max_stale_candles = int(global_cfg.get("swr_dry_max_stale_candles", 20))
         self._swr_max_missing_tail_candles = int(
             global_cfg.get("swr_max_missing_tail_candles", 4)
         )
         self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
         self._swr_inflight: set = set()  # series keys with a background refresh pending
         self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
+        self._open_pos_memo: dict[str, tuple[float, set]] = {}  # exchange -> (ts, symbols)
         self.persistence = (
             FeatherPersistence(
                 root=Path(global_cfg.get("persistence_path", "")),
@@ -1300,7 +1309,7 @@ class Daemon:
         # Trim if we've grown past the cap
         series.trim_to(self._max_candles_per_series)
 
-    async def _handle_fetch(self, req: dict) -> dict:
+    async def _handle_fetch(self, req: dict, conn_id: int = 0) -> dict:
         t0 = time.monotonic()
         self.stats.requests_total += 1
         exchange = req["exchange"]
@@ -1393,6 +1402,11 @@ class Daemon:
         # blocking the client behind a deep token-bucket queue (which would
         # blow past client_timeout_s and freeze the bot's whole cycle — the
         # "CacheTimedOut / slow cycle: 240s candles" storm at fleet scale).
+        is_dry = self.registry.is_dry(conn_id)
+        # Dry bots tolerate more staleness: they piggyback on the cache the live
+        # bots keep warm and should almost never spend fetch budget themselves.
+        stale_candles = self._swr_dry_max_stale_candles if is_dry else self._swr_max_stale_candles
+        serve_cap_ms = max(stale_candles * tf_ms, self._swr_min_stale_ms)
         if (
             is_live
             and self._swr_enabled
@@ -1401,16 +1415,26 @@ class Daemon:
             and series.range_start_ms <= start_ms
             and series.range_end_ms is not None
             and series.range_end_ms >= end_ms - self._swr_max_missing_tail_candles * tf_ms
-            # Freshness from the DATA itself (populated on disk-load too, unlike
-            # last_live_refresh_wall_ms which is 0 for a just-restarted daemon):
-            # only serve stale while the cached tail is within a few periods of
-            # now — else fetch synchronously so we never serve ancient candles.
-            and series.range_end_ms
-            >= now_wall_ms - max(self._swr_max_stale_candles * tf_ms, self._swr_min_stale_ms)
+            # Freshness from the DATA itself (populated on disk-load too). Serve
+            # stale up to serve_cap; beyond it fetch synchronously so we never
+            # serve ancient candles.
+            and series.range_end_ms >= now_wall_ms - serve_cap_ms
         ):
-            self._schedule_swr_refresh(
-                series, exchange, trading_mode, pair, timeframe, candle_type, gaps, ex_cfg, tf_ms
-            )
+            # Only LIVE bots drive background refreshes: the dry bots (majority of
+            # the fleet) piggyback on the cache the live bots keep warm, so they
+            # stop consuming the scarce IP fetch budget entirely. Refreshes for
+            # pairs the fleet holds an OPEN POSITION on get HIGH priority so the
+            # limited budget keeps position-bearing series the freshest.
+            if not is_dry:
+                refresh_prio = (
+                    TokenBucket.HIGH
+                    if pair in self._open_position_symbols(exchange)
+                    else TokenBucket.LOW
+                )
+                self._schedule_swr_refresh(
+                    series, exchange, trading_mode, pair, timeframe,
+                    candle_type, gaps, ex_cfg, tf_ms, refresh_prio,
+                )
             series.hits += 1
             self.stats.cache_swr += 1
             return self._ok(
@@ -1539,6 +1563,28 @@ class Daemon:
                 errors += 1
         return errors, shed_errors
 
+    def _open_position_symbols(self, exchange: str) -> set:
+        """Symbols the fleet currently holds an open position on, from the
+        phase-5 central positions cache. Memoised for a few seconds so it's
+        cheap to consult on every fetch. Empty set if positions unknown."""
+        now = time.monotonic()
+        cached = self._open_pos_memo.get(exchange)
+        if cached is not None and (now - cached[0]) < 5.0:
+            return cached[1]
+        syms: set = set()
+        entry = self._positions_cache.get(exchange)
+        if entry is not None:
+            for p in entry.data:
+                try:
+                    if p.get("contracts") and float(p.get("contracts") or 0) != 0:
+                        sym = p.get("symbol")
+                        if sym:
+                            syms.add(sym)
+                except (TypeError, ValueError):
+                    continue
+        self._open_pos_memo[exchange] = (now, syms)
+        return syms
+
     def _schedule_swr_refresh(
         self,
         series,
@@ -1550,11 +1596,13 @@ class Daemon:
         gaps,
         ex_cfg: dict,
         tf_ms: int,
+        priority: int = TokenBucket.LOW,
     ) -> None:
         """Fire a background gap-fill for a series we just served stale.
-        Deduplicated per series (one refresh in flight at a time) and run at
-        LOW priority so it yields to client-blocking cold fetches and is shed
-        first under backoff — the client already has (slightly stale) data."""
+        Deduplicated per series (one refresh in flight at a time). Runs at LOW
+        priority by default so it yields to client-blocking cold fetches and is
+        shed first under backoff — the client already has (slightly stale) data;
+        HIGH is used for pairs the fleet holds an open position on."""
         skey = (exchange, trading_mode, pair, timeframe, candle_type)
         if skey in self._swr_inflight:
             return
@@ -1572,7 +1620,7 @@ class Daemon:
                     gaps,
                     ex_cfg,
                     tf_ms,
-                    TokenBucket.LOW,
+                    priority,
                     0.0,
                 )
                 if errors == 0:
@@ -2407,7 +2455,7 @@ class Daemon:
                     self.coordinator.active_count(),
                 )
             try:
-                resp = await self._handle_fetch(req)
+                resp = await self._handle_fetch(req, conn_id)
                 resp["pending_fetches"] = self._pending_fetches
                 return resp
             except Exception as e:

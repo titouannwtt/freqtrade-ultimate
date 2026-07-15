@@ -106,9 +106,16 @@ GLOBAL_DEFAULTS: dict = {
     # client. A candle at most a few periods stale is far better than a 240s
     # frozen cycle; the bot re-requests next cycle and gets the refreshed copy.
     "swr_enabled": True,
-    # Serve stale only while the cached series was refreshed within this many
-    # timeframe periods (e.g. 3 -> a 5m series may be served up to 15m stale).
-    "swr_max_stale_candles": 3,
+    # Serve stale while the cached series is within this many timeframe periods
+    # of now (e.g. 8 -> a 5m series may be served up to 40m stale before a
+    # synchronous refetch). Bigger = more headroom against the client ever
+    # blocking on a fetch (the slow-cycle cause), at the cost of staler data.
+    "swr_max_stale_candles": 8,
+    # Dry-run bots tolerate more staleness: they piggyback on the cache the live
+    # bots keep warm and (below) never drive background refreshes, so they stop
+    # consuming the scarce IP fetch budget. Only a dry-EXCLUSIVE series (no live
+    # bot watching it) drifts this stale before a lazy LOW-priority refetch.
+    "swr_dry_max_stale_candles": 20,
     # ...and only when the missing part is just the recent tail (cache still
     # covers all but this many trailing candles). Guards against SWR-serving a
     # series that is missing a large chunk of its requested range.
