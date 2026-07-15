@@ -443,13 +443,19 @@ class OhlcvCacheClient:
                 f"positions_put failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
 
-    async def get_positions(self) -> tuple[bool, list, bool]:
-        """Get cached positions from the daemon. Returns (hit, data, auto_grant)."""
+    async def get_positions(self, wallet_address: str | None = None) -> tuple[bool, list, bool]:
+        """Get cached positions from the daemon. Returns (hit, data, auto_grant).
+
+        ``wallet_address`` lets the daemon learn which wallet to fetch centrally
+        (phase 5): it's public (address only), safe to send.
+        """
         req = {
             "op": "positions_get",
             "req_id": uuid.uuid4().hex,
             "exchange": self.exchange_id,
         }
+        if wallet_address:
+            req["wallet_address"] = wallet_address
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(

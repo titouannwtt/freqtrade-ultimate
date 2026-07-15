@@ -82,6 +82,20 @@ GLOBAL_DEFAULTS: dict = {
     "positions_hard_stale_s": 90,  # circuit breaker: older than this -> refuse risky actions
     "positions_equiv_check_interval_s": 3600,  # HL public-vs-signed field cross-check cadence
     "positions_report_to_daemon": True,  # push refreshed positions to the shared cache (non-blocking)
+    # --- Phase 5: daemon-side central positions fetch ---
+    # The daemon fetches clearinghouseState ONCE per wallet on a timer (public
+    # /info, address-only — no private key) and serves it to every bot, instead
+    # of each bot hitting /info itself. Collapses N identical /info calls into 1,
+    # which is what saturates the endpoint once the refresher is fleet-wide. The
+    # per-bot refresher stays as the fallback (fires only if the daemon cache is
+    # stale), so there's no single point of failure. Opt-in; the daemon learns
+    # the (exchange -> wallet) target from the first positions_get carrying it.
+    # Enabled by default but DORMANT until an updated bot teaches it a wallet, so
+    # it's a no-op on daemons that only serve old-code bots (and it sidesteps the
+    # respawn race: the daemon runs whatever code is on disk regardless of which
+    # bot respawns it, but the *config* comes from resolve_global_config here).
+    "positions_daemon_fetch_enabled": True,
+    "positions_daemon_fetch_interval_s": 10,
 }
 
 

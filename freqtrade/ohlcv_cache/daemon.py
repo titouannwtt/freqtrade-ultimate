@@ -998,6 +998,21 @@ class Daemon:
         # (bot side still forces a fresh CRITICAL fetch past 45s when holding).
         self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 15.0))
         self._positions_inflight: dict[str, asyncio.Event] = {}
+        # Phase 5: central positions fetcher. Learn (exchange -> wallet address)
+        # from positions_get requests; a background task fetches clearinghouseState
+        # (public /info, address-only) per target and keeps _positions_cache warm.
+        # Default True: the central fetcher is dormant until a bot teaches it a
+        # (exchange -> wallet) target via positions_get, so enabling it by default
+        # is a no-op until an updated bot connects — and it sidesteps the respawn
+        # race (whichever bot respawns the daemon may still run old client code).
+        self._positions_daemon_fetch_enabled = bool(
+            global_cfg.get("positions_daemon_fetch_enabled", True)
+        )
+        self._positions_daemon_fetch_interval_s = float(
+            global_cfg.get("positions_daemon_fetch_interval_s", 10.0)
+        )
+        self._positions_fetch_targets: dict[str, str] = {}  # exchange -> wallet_address
+        self._positions_fetch_clients: dict[str, Any] = {}  # exchange -> ccxt (address-only)
         self._balances_cache: dict[str, _BalancesCacheEntry] = {}
         self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))
         self._balances_inflight: dict[str, asyncio.Event] = {}
@@ -1671,6 +1686,17 @@ class Daemon:
         exchange = req.get("exchange", "hyperliquid")
         cache_key = exchange
         self.stats.positions_gets += 1
+        # Phase 5: learn the wallet address so the central fetcher can serve this
+        # exchange. Bots send it on every positions_get; recording is idempotent.
+        wallet = req.get("wallet_address")
+        if wallet and self._positions_fetch_targets.get(exchange) != wallet:
+            self._positions_fetch_targets[exchange] = wallet
+            logger.info(
+                "positions central fetch: learned %s wallet %s…%s",
+                exchange,
+                str(wallet)[:6],
+                str(wallet)[-4:],
+            )
         entry = self._positions_cache.get(cache_key)
         if entry and (time.monotonic() - entry.pushed_at) < self._positions_ttl_s:
             self.stats.positions_cache_hits += 1
@@ -2396,6 +2422,50 @@ class Daemon:
                 self._shutdown_event.set()
                 return
 
+    async def _positions_fetch_client(self, exchange: str, wallet: str) -> Any:
+        """Lazily build an address-only async ccxt client for the central
+        positions fetch. No private key — clearinghouseState/info is public."""
+        client = self._positions_fetch_clients.get(exchange)
+        if client is not None:
+            return client
+        import ccxt.async_support as ccxt_async
+
+        cfg: dict[str, Any] = {"enableRateLimit": True, "walletAddress": wallet}
+        dt = ExchangeFetcher._DEFAULT_TYPE_MAP.get(exchange)
+        if dt:
+            cfg["options"] = {"defaultType": dt}
+        client = getattr(ccxt_async, exchange)(cfg)
+        self._positions_fetch_clients[exchange] = client
+        logger.info("central positions client created for %s (address-only)", exchange)
+        return client
+
+    async def _periodic_positions_fetch(self) -> None:
+        """Phase 5: fetch positions ONCE per (exchange, wallet) on a timer and
+        keep _positions_cache warm, so every bot's positions_get is a cache hit
+        instead of an /info call. Runs independently of the OHLCV fetch queue."""
+        if not self._positions_daemon_fetch_enabled:
+            return
+        interval = self._positions_daemon_fetch_interval_s
+        logger.info("central positions fetcher started (interval=%.0fs)", interval)
+        while not self._shutdown_event.is_set():
+            for exchange, wallet in list(self._positions_fetch_targets.items()):
+                try:
+                    client = await self._positions_fetch_client(exchange, wallet)
+                    positions = await client.fetch_positions()
+                    self._positions_cache[exchange] = _PositionsCacheEntry(
+                        data=positions, pushed_at=time.monotonic()
+                    )
+                    ev = self._positions_inflight.pop(exchange, None)
+                    if ev is not None:
+                        ev.set()
+                    self.stats.positions_puts += 1
+                except Exception as e:  # keep the loop alive; bots fall back locally
+                    logger.warning("central positions fetch failed for %s: %s", exchange, e)
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
+
     async def _periodic_stats(self) -> None:
         stats_interval = float(self.global_cfg.get("stats_interval_s", 60))
         while not self._shutdown_event.is_set():
@@ -2506,10 +2576,17 @@ class Daemon:
         watchdog_task = asyncio.create_task(self._idle_watchdog())
         flush_task = asyncio.create_task(self._periodic_flush())
         stats_task = asyncio.create_task(self._periodic_stats())
+        positions_task = asyncio.create_task(self._periodic_positions_fetch())
 
         try:
             await self._shutdown_event.wait()
         finally:
+            positions_task.cancel()
+            for _c in self._positions_fetch_clients.values():
+                try:
+                    await _c.close()
+                except Exception:  # noqa: S110
+                    pass
             watchdog_task.cancel()
             flush_task.cancel()
             stats_task.cancel()

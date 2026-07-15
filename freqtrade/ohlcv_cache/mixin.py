@@ -549,6 +549,44 @@ class CachedExchangeMixin:
         )
         return self._pos_fetcher_api
 
+    def _positions_daemon_read(self, wallet: str | None) -> tuple[bool, list] | None:
+        """Read the daemon's central positions cache (phase 5) from the refresher
+        thread WITHOUT touching the shared exchange event loop.
+
+        The refresher runs in its own background thread; driving ``self.loop``
+        (the exchange's asyncio loop, owned by the main thread) from here races
+        with the main thread's ccxt calls — the reason the earlier
+        ``_ftcache_run_on_loop`` bridge silently failed and every bot fell back
+        to its own /info. Instead we spin up a dedicated short-lived client on a
+        private event loop: fully thread-safe, one unix-socket connect per pass
+        (negligible at a 45s cadence). The client is never given a bot identity,
+        so ``_auto_register`` no-ops and it does not pollute the fleet roster.
+
+        Returns ``(hit, data)``, or ``None`` if the daemon is unreachable so the
+        caller falls back to its own direct fetch.
+        """
+        client = self._ftcache_get_client()
+        sock = getattr(client, "socket_path", None) if client is not None else None
+        if not sock:
+            return None
+        from freqtrade.ohlcv_cache.client import OhlcvCacheClient
+
+        loop = asyncio.new_event_loop()
+        tmp = OhlcvCacheClient(
+            socket_path=sock,
+            exchange_id=getattr(self, "id", ""),
+            trading_mode=getattr(client, "trading_mode", "spot"),
+        )
+        try:
+            hit, data, _ = loop.run_until_complete(tmp.get_positions(wallet_address=wallet))
+            return hit, data
+        finally:
+            try:
+                loop.run_until_complete(tmp.close())
+            except Exception:  # noqa: S110 — best-effort teardown
+                pass
+            loop.close()
+
     def _ftcache_refresh_positions_once(self) -> None:
         """One refresh pass: fetch positions via the dedicated client and update
         the local cache (monotonic-guarded). Raises on failure so the loop can
@@ -561,6 +599,26 @@ class CachedExchangeMixin:
         ) < self._BACKOFF_CCXT_BLOCK_S:
             logger.debug("[positions-refresh] IP backoff actif — skip ce tour")
             return
+        # Phase 5: prefer the daemon's central positions cache (one /info for the
+        # whole fleet). Sending our wallet_address also teaches the daemon which
+        # wallet to fetch. Fall through to our own /info only when it's a miss
+        # (daemon central fetch off/cold/failed) — that's the fallback path.
+        wallet = getattr(self._api, "walletAddress", None)
+        try:
+            res = self._positions_daemon_read(wallet)
+        except Exception as e:  # daemon unreachable/slow — fall back to own /info
+            res = None
+            logger.debug("[positions-refresh] lecture cache daemon échouée: %s", e)
+        if res is not None:
+            hit, positions = res
+            if hit and isinstance(positions, list):
+                self._ftcache_save_positions(positions, fetched_at=fetched_at)
+                self._ftcache_bump("positions_refresh_daemon")
+                logger.debug(
+                    "[positions-refresh] servi du cache daemon central (%d positions)",
+                    len(positions),
+                )
+                return
         fetcher = self._positions_refresher_fetcher()
         positions = fetcher.fetch_positions()
         self._ftcache_save_positions(positions, fetched_at=fetched_at)  # monotonic guard (I2)
