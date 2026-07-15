@@ -96,6 +96,25 @@ GLOBAL_DEFAULTS: dict = {
     # bot respawns it, but the *config* comes from resolve_global_config here).
     "positions_daemon_fetch_enabled": True,
     "positions_daemon_fetch_interval_s": 10,
+    # --- Stale-while-revalidate (SWR) for live OHLCV ---
+    # Under fleet-scale load the token bucket queue goes hundreds deep and a
+    # synchronous gap-fill waits past client_timeout_s (240s), freezing a live
+    # bot's whole cycle (the "CacheTimedOut / slow cycle: 240s candles" storm).
+    # When the daemon already holds a reasonably-fresh cached copy of a live
+    # series and only the recent tail is missing, it serves the cache
+    # IMMEDIATELY and fills the gap in the BACKGROUND instead of blocking the
+    # client. A candle at most a few periods stale is far better than a 240s
+    # frozen cycle; the bot re-requests next cycle and gets the refreshed copy.
+    "swr_enabled": True,
+    # Serve stale only while the cached series was refreshed within this many
+    # timeframe periods (e.g. 3 -> a 5m series may be served up to 15m stale).
+    "swr_max_stale_candles": 3,
+    # ...and only when the missing part is just the recent tail (cache still
+    # covers all but this many trailing candles). Guards against SWR-serving a
+    # series that is missing a large chunk of its requested range.
+    "swr_max_missing_tail_candles": 4,
+    # Floor on the stale-serve window so tiny timeframes still get useful slack.
+    "swr_min_stale_ms": 60000,
 }
 
 

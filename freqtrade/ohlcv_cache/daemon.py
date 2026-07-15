@@ -673,6 +673,7 @@ class DaemonStats:
     cache_hits: int = 0  # served fully from cache, no fetch
     cache_partial: int = 0  # partial-range: some from cache, some fetched
     cache_misses: int = 0  # nothing in cache, full fetch
+    cache_swr: int = 0  # stale-while-revalidate: served stale, refreshed in background
     fetch_errors: int = 0
     active_clients: int = 0
     last_client_disconnect_monotonic: float | None = None
@@ -966,6 +967,15 @@ class Daemon:
         self.fetchers: dict[tuple[str, str], ExchangeFetcher] = {}
         self.coordinator = RequestCoordinator()
         self.stats = DaemonStats()
+        # Stale-while-revalidate (SWR) for live OHLCV — see defaults.py.
+        self._swr_enabled = bool(global_cfg.get("swr_enabled", True))
+        self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 3))
+        self._swr_max_missing_tail_candles = int(
+            global_cfg.get("swr_max_missing_tail_candles", 4)
+        )
+        self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
+        self._swr_inflight: set = set()  # series keys with a background refresh pending
+        self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
         self.persistence = (
             FeatherPersistence(
                 root=Path(global_cfg.get("persistence_path", "")),
@@ -1375,41 +1385,42 @@ class Daemon:
                 served_from="cache",
             )
 
-        max_chunk = int(ex_cfg.get("max_candles_per_call", 1000))
-        chunks: list[Gap] = []
-        for g in gaps:
-            chunks.extend(chunk_gap(g, max_chunk, tf_ms))
-
         had_any_cache = series.n_candles > 0
-        errors = 0
-        shed_errors = 0
-        for chunk in chunks:
-            key = (
-                exchange,
-                trading_mode,
-                pair,
-                timeframe,
-                candle_type,
-                chunk.start_ms,
-                chunk.end_ms,
+
+        # Stale-while-revalidate: gaps exist, but if we already hold a
+        # reasonably-fresh cached copy and only the recent tail is missing,
+        # serve the cache NOW and fill the gap in the BACKGROUND instead of
+        # blocking the client behind a deep token-bucket queue (which would
+        # blow past client_timeout_s and freeze the bot's whole cycle — the
+        # "CacheTimedOut / slow cycle: 240s candles" storm at fleet scale).
+        if (
+            is_live
+            and self._swr_enabled
+            and had_any_cache
+            and series.range_start_ms is not None
+            and series.range_start_ms <= start_ms
+            and series.range_end_ms is not None
+            and series.range_end_ms >= end_ms - self._swr_max_missing_tail_candles * tf_ms
+            # Freshness from the DATA itself (populated on disk-load too, unlike
+            # last_live_refresh_wall_ms which is 0 for a just-restarted daemon):
+            # only serve stale while the cached tail is within a few periods of
+            # now — else fetch synchronously so we never serve ancient candles.
+            and series.range_end_ms
+            >= now_wall_ms - max(self._swr_max_stale_candles * tf_ms, self._swr_min_stale_ms)
+        ):
+            self._schedule_swr_refresh(
+                series, exchange, trading_mode, pair, timeframe, candle_type, gaps, ex_cfg, tf_ms
+            )
+            series.hits += 1
+            self.stats.cache_swr += 1
+            return self._ok(
+                req["req_id"], series, start_ms, end_ms, t0, served_from="stale"
             )
 
-            async def _do_fetch(c=chunk):
-                await self._fetch_chunk(
-                    series,
-                    c,
-                    ex_cfg,
-                    priority=priority,
-                    capital=capital,
-                )
-
-            try:
-                await self.coordinator.run(key, _do_fetch)
-            except RateLimitShed:
-                errors += 1
-                shed_errors += 1
-            except Exception:
-                errors += 1
+        errors, shed_errors = await self._fill_chunks(
+            series, exchange, trading_mode, pair, timeframe, candle_type,
+            gaps, ex_cfg, tf_ms, priority, capital,
+        )
 
         if is_live and errors == 0:
             series.last_live_refresh_wall_ms = int(time.time() * 1000)
@@ -1475,6 +1486,105 @@ class Daemon:
             "served_from": served_from,
             "latency_ms": (time.monotonic() - t0) * 1000,
         }
+
+    async def _fill_chunks(
+        self,
+        series,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
+        gaps,
+        ex_cfg: dict,
+        tf_ms: int,
+        priority: int,
+        capital: float,
+    ) -> tuple[int, int]:
+        """Fetch the missing `gaps` for a series through the coordinator +
+        token bucket. Shared by the synchronous fetch path and the SWR
+        background refresh. Returns (errors, shed_errors)."""
+        max_chunk = int(ex_cfg.get("max_candles_per_call", 1000))
+        chunks: list[Gap] = []
+        for g in gaps:
+            chunks.extend(chunk_gap(g, max_chunk, tf_ms))
+        errors = 0
+        shed_errors = 0
+        for chunk in chunks:
+            key = (
+                exchange,
+                trading_mode,
+                pair,
+                timeframe,
+                candle_type,
+                chunk.start_ms,
+                chunk.end_ms,
+            )
+
+            async def _do_fetch(c=chunk):
+                await self._fetch_chunk(
+                    series,
+                    c,
+                    ex_cfg,
+                    priority=priority,
+                    capital=capital,
+                )
+
+            try:
+                await self.coordinator.run(key, _do_fetch)
+            except RateLimitShed:
+                errors += 1
+                shed_errors += 1
+            except Exception:
+                errors += 1
+        return errors, shed_errors
+
+    def _schedule_swr_refresh(
+        self,
+        series,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
+        gaps,
+        ex_cfg: dict,
+        tf_ms: int,
+    ) -> None:
+        """Fire a background gap-fill for a series we just served stale.
+        Deduplicated per series (one refresh in flight at a time) and run at
+        LOW priority so it yields to client-blocking cold fetches and is shed
+        first under backoff — the client already has (slightly stale) data."""
+        skey = (exchange, trading_mode, pair, timeframe, candle_type)
+        if skey in self._swr_inflight:
+            return
+        self._swr_inflight.add(skey)
+
+        async def _bg() -> None:
+            try:
+                errors, _ = await self._fill_chunks(
+                    series,
+                    exchange,
+                    trading_mode,
+                    pair,
+                    timeframe,
+                    candle_type,
+                    gaps,
+                    ex_cfg,
+                    tf_ms,
+                    TokenBucket.LOW,
+                    0.0,
+                )
+                if errors == 0:
+                    series.last_live_refresh_wall_ms = int(time.time() * 1000)
+            except Exception as e:  # never let a background task escape
+                logger.debug("SWR refresh failed %s %s: %s", pair, timeframe, e)
+            finally:
+                self._swr_inflight.discard(skey)
+
+        task = asyncio.create_task(_bg())
+        self._swr_tasks.add(task)
+        task.add_done_callback(self._swr_tasks.discard)
 
     # --------- centralized rate limiter: acquire
 
@@ -2504,13 +2614,14 @@ class Daemon:
         budget_str = " | ".join(budget_lines) if budget_lines else "none"
         conn_stats = f" conn={s.total_connects}/{s.total_disconnects} peak={s.peak_clients}"
         logger.info(
-            "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) "
+            "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) swr=%d "
             "acquire=%d tickers=%d/%d pos=%d/%d pending=%d peak=%d "
             "errors=%d%s | %s",
             uptime,
             s.active_clients,
             total,
             hit_rate,
+            s.cache_swr,
             s.acquire_total,
             s.tickers_cache_hits,
             s.tickers_requests,
