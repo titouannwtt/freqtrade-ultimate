@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 SUB_STEP_SECONDS = 60
 # Warmup buffer for indicator history before the visible replay window.
 WARMUP_GUARD_CANDLES = 50
+# Seed-mode floor: never auto-advance the replay start past (end - this) days,
+# so one very-new pair can't collapse the window to nothing.
+MIN_SEED_WINDOW_DAYS = 14
 
 
 def run_replay(
@@ -155,6 +158,34 @@ def run_replay(
 
     # ── 3. Data store + validation ───────────────────────────────────────
     store = ReplayDataStore(datadir, trading_mode=trading_mode, max_candles=store_cap)
+
+    # Seed mode (dry auto-launch): short-history assets (e.g. xyz indices, listed
+    # 2026-03) may lack the strategy's warmup at the requested start_date. Seed mode
+    # then drops every such pair and aborts with "None of the bot's current pairs
+    # have local data". Instead, advance the replay start so pairs that DO have data
+    # get their full warmup. Capped by MIN_SEED_WINDOW_DAYS so a single very-new pair
+    # can't shrink the replay window to nothing (those pairs are dropped as before).
+    if seed:
+        warmup_delta = timedelta(seconds=(startup + WARMUP_GUARD_CANDLES) * tf_secs)
+        ready_starts = []
+        for p in pairs:
+            rng = store.date_range(p, tf, candle_type)
+            if rng is not None:
+                ready_starts.append(rng[0] + warmup_delta)
+        if ready_starts:
+            cap = end_dt - timedelta(days=MIN_SEED_WINDOW_DAYS)
+            want = min(max(ready_starts), cap)
+            if want > start_dt:
+                logger.info(
+                    "[replay] advancing start %s -> %s so short-history pairs get "
+                    "the strategy's %d-candle warmup",
+                    start_dt.date(),
+                    want.date(),
+                    startup,
+                )
+                start_dt = want
+                data_start = start_dt - warmup_delta
+
     data_ctx = {
         "tf": tf,
         "candle_type": candle_type,
