@@ -1105,6 +1105,32 @@ class CachedExchangeMixin:
                 self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
                 return True
 
+    def _ftcache_offline_fetch_cost(
+        self, timeframe: str, candle_type: CandleType, since_ms: int | None
+    ) -> float:
+        """Realistic HL weight for an offline (backtest/hyperopt) OHLCV fetch.
+
+        candleSnapshot costs 20 base + 1 weight per 60 candles returned (see
+        HL_WEIGHT_MAP in defaults.py).  A fixed cost of 30 under-billed large
+        warmup chunks (a 5000-candle fetch really weighs ~104): the bucket
+        thought it spent 30 while the exchange counted 104, overran the
+        per-minute budget and got the whole fleet 429'd.  Over-billing the
+        pipeline is always safe — it only makes backtests/hyperopts slower.
+        """
+        try:
+            limit = int(self.ohlcv_candle_limit(timeframe, candle_type, since_ms))
+            if since_ms:
+                from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
+
+                # Incremental fetches (recent gap-fills) return far fewer
+                # candles than the exchange cap — bill the expected count.
+                expected = int((time.time() * 1000 - since_ms) / timeframe_to_msecs(timeframe))
+                limit = max(1, min(limit, expected + 1))
+            # Cap below the bucket burst (150) so the request stays grantable.
+            return min(20.0 + limit / 60.0, 120.0)
+        except Exception:
+            return 30.0  # previous conservative default
+
     # -------------------------------------------------------------------- OHLCV
 
     _CACHEABLE_CANDLE_TYPES = frozenset(
@@ -1135,16 +1161,14 @@ class CachedExchangeMixin:
             if client is not None:
                 deadline = time.monotonic() + self._OFFLINE_ACQUIRE_MAX_S
                 attempt = 0
+                fetch_cost = self._ftcache_offline_fetch_cost(timeframe, candle_type, since_ms)
                 while True:
                     attempt += 1
                     try:
                         await asyncio.wait_for(
                             client.acquire_rate_token(
                                 priority=OhlcvCacheClient.LOW,
-                                # HL candleSnapshot: 20 base + 1/60 candles.
-                                # Offline fetches are often multi-hundred
-                                # candles, so charge a realistic average.
-                                cost=30.0,
+                                cost=fetch_cost,
                             ),
                             timeout=30.0,
                         )
