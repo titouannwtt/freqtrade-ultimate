@@ -176,6 +176,43 @@ exchange resolver (`resolvers/exchange_resolver.py`) prefers the cached variant 
 
 Setting `enabled` to `false` falls back to the native non-cached exchange subclass.
 
+**Backtests and hyperopts go through the daemon too (do not disable it).** In
+`BACKTEST` / `HYPEROPT` run modes the mixin switches to a *rate-limit-only* mode: candles are
+read from local data files as usual, but every network call the run still needs (market
+metadata at exchange init, leverage tiers, missing-candle downloads) must first acquire a
+rate token from the daemon at the **lowest priority class**. Live and dry-run bots are always
+served first; offline runs wait in the queue — they always pass, just slower. The log line
+confirming this is working:
+
+```
+[ftcache-client] [backtest/hyperopt] waiting for rate token (priority=LOW)
+                 — live bots have priority, please wait
+```
+
+Two details make this starvation-proof *and* 429-proof:
+
+- **Real-weight billing.** Offline OHLCV fetches are billed at their actual Hyperliquid
+  weight (`20 + candles/60`, capped below the bucket burst) via
+  `CachedExchangeMixin._ftcache_offline_fetch_cost()`, instead of a flat average. A
+  5,000-candle warmup chunk really weighs ~104: under-billing it let the token bucket
+  overrun the per-minute budget and got the whole fleet rate-limited.
+- **Queued, never rejected.** During a 429 backoff the daemon parks low-priority requests in
+  the queue and drains them by priority once the budget recovers — offline runs are delayed,
+  not failed.
+
+The practical rule for a large fleet (tested with ~60 bots on a single Hyperliquid IP):
+**never set `shared_ohlcv_cache.enabled: false` in a backtest or hyperopt config.** A config
+that disables it gets a bare, uncoordinated ccxt exchange whose downloads compete head-on
+with the live fleet — that was the root cause of hyperopt-triggered 429 storms. See
+`backtest_configs/hl_272pairs_mot3.json` for a reference backtest config that keeps the
+daemon enabled:
+
+```json
+{
+  "shared_ohlcv_cache": { "enabled": true }
+}
+```
+
 **CLI usage.** The daemon auto-spawns from the first bot that needs it. To verify it is
 running:
 
