@@ -92,13 +92,15 @@ class PairLocks:
         if PairLocks.use_db:
             return PairLock.query_pair_locks(pair, now, side).all()
         else:
-            # Expired locks can never become active again (backtest time is monotonic);
-            # purge them once the list grows, otherwise generated strategies that lock
-            # on every stop make this scan O(n²) over a long backtest and hyperopt
-            # epochs appear to hang (observed: single worker pinned for hours here).
+            # A lock can only ever match the scan below if it is active AND not yet
+            # expired (backtest time is monotonic, so an expired or released lock can
+            # never match again). Purge everything else once the list grows, otherwise
+            # generated strategies that lock/unlock on every stop accumulate dead locks
+            # and this scan becomes O(n²) over a long backtest — hyperopt epochs then
+            # appear to hang (observed: single worker pinned for hours here).
             if len(PairLocks.locks) > 512:
                 PairLocks.locks = [
-                    lock for lock in PairLocks.locks if lock.lock_end_time > now or not lock.active
+                    lock for lock in PairLocks.locks if lock.lock_end_time > now and lock.active
                 ]
             locks = [
                 lock
