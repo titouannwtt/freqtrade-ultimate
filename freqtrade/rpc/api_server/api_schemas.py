@@ -721,7 +721,7 @@ class ReplayRequest(BaseModel):
     strategy: str
     timerange: str  # YYYYMMDD-YYYYMMDD
     pairs: list[str]
-    wallet: float = 1000.0
+    wallet: float | None = None  # None -> use the bot config's dry_run_wallet
     slippage: float = 0.0005
     sub_step: int = 60  # intra-candle resolution in seconds (60=1m, 300=5m, 900=15m)
     reset_db: bool = False  # wipe the dry DB first (else preserve existing trades)

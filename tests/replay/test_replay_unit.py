@@ -325,3 +325,95 @@ class TestExchange:
 
     def test_get_positions_empty(self, built):
         assert built.get_positions() == {}
+
+    @staticmethod
+    def _stop_order(pair, side, trigger, limit):
+        return {
+            "id": "sl1",
+            "symbol": pair,
+            "side": side,
+            "type": "stop",
+            "ft_order_type": "stoploss",
+            "status": "open",
+            "amount": 1.0,
+            "filled": 0.0,
+            "remaining": 1.0,
+            "price": limit,
+            "stopPrice": trigger,
+            "fee": None,
+        }
+
+    def test_stoploss_fills_at_trigger_not_limit(self, built):
+        # Short position stop (buy-to-close): trigger inside the candle range,
+        # limit 1% beyond. The fill must be trigger + slippage, NOT the limit.
+        candle = built._replay_store.get_candle_ohlc(
+            self.PAIR, "15m", CandleType.FUTURES, built._replay_clock.now()
+        )
+        trigger = candle["low"] + 0.5  # crossed within the candle
+        limit = trigger * 1.01
+        order = self._stop_order(self.PAIR, "buy", trigger, limit)
+        res = built.check_dry_limit_order_filled(order)
+        assert res["status"] == "closed"
+        assert res["average"] == pytest.approx(trigger * 1.001)  # slippage_pct=0.001
+        assert res["average"] < limit
+
+    def test_stoploss_fill_long_side(self, built):
+        # Long position stop (sell-to-close): adverse slippage goes down.
+        candle = built._replay_store.get_candle_ohlc(
+            self.PAIR, "15m", CandleType.FUTURES, built._replay_clock.now()
+        )
+        trigger = candle["high"] - 0.5
+        limit = trigger * 0.99
+        order = self._stop_order(self.PAIR, "sell", trigger, limit)
+        res = built.check_dry_limit_order_filled(order)
+        assert res["status"] == "closed"
+        assert res["average"] == pytest.approx(trigger * 0.999)
+        assert res["average"] > limit
+
+    def test_stoploss_fill_capped_at_limit(self, built):
+        # If the limit sits inside the slippage band (tight stop-limit), the fill
+        # can never be worse than the limit price.
+        candle = built._replay_store.get_candle_ohlc(
+            self.PAIR, "15m", CandleType.FUTURES, built._replay_clock.now()
+        )
+        trigger = candle["low"] + 0.5
+        limit = trigger  # stop-market emulation: limit == trigger
+        order = self._stop_order(self.PAIR, "buy", trigger, limit)
+        res = built.check_dry_limit_order_filled(order)
+        assert res["status"] == "closed"
+        assert res["average"] == pytest.approx(trigger)
+
+
+class TestWalletResolution:
+    def test_falls_back_to_config_dry_run_wallet(self):
+        from freqtrade.replay.runner import _resolve_wallet
+
+        assert _resolve_wallet({"dry_run_wallet": 5000}, None) == 5000.0
+
+    def test_defaults_to_1000_without_config_value(self):
+        from freqtrade.replay.runner import _resolve_wallet
+
+        assert _resolve_wallet({}, None) == 1000.0
+
+    def test_explicit_wallet_wins_with_warning(self, caplog):
+        from freqtrade.replay.runner import _resolve_wallet
+
+        assert _resolve_wallet({"dry_run_wallet": 5000}, 2000.0) == 2000.0
+        assert "overrides the config's" in caplog.text
+
+    def test_build_cmd_omits_wallet_when_none(self):
+        from freqtrade.replay.lifecycle import build_cmd
+
+        common = dict(
+            strategy="S",
+            timerange="20260101-20260201",
+            pairs=["BTC/USDC:USDC"],
+            sub_step=60,
+            db_url="sqlite:///x.sqlite",
+            progress_file="p.json",
+            reset_db=False,
+        )
+        cfg = {"config_files": ["c.json"]}
+        assert "--wallet" not in build_cmd(cfg, wallet=None, **common)
+        cmd = build_cmd(cfg, wallet=5000.0, **common)
+        assert cmd[cmd.index("--wallet") + 1] == "5000.0"

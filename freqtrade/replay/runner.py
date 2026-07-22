@@ -51,6 +51,26 @@ WARMUP_GUARD_CANDLES = 50
 MIN_SEED_WINDOW_DAYS = 14
 
 
+def _resolve_wallet(config: dict, wallet: float | None) -> float:
+    """
+    Effective starting wallet for a replay: an explicit --wallet is authoritative;
+    without it, fall back to the config's dry_run_wallet so replay and other tools
+    run on the same capital (a silent hardcoded 1000 used to starve multi-position
+    configs). Any explicit override that diverges from the config is logged loudly.
+    """
+    config_wallet = config.get("dry_run_wallet")
+    if wallet is None:
+        return float(config_wallet) if config_wallet else 1000.0
+    if config_wallet and float(config_wallet) != wallet:
+        logger.warning(
+            "Replay wallet %.2f (explicit --wallet) overrides the config's "
+            "dry_run_wallet %.2f — results will not be capital-comparable.",
+            wallet,
+            float(config_wallet),
+        )
+    return wallet
+
+
 def run_replay(
     pairs: list[str],
     start_dt: datetime,
@@ -60,7 +80,7 @@ def run_replay(
     config: dict | None = None,
     config_path: str | None = None,
     slippage_pct: float = 0.0005,
-    wallet: float = 1000.0,
+    wallet: float | None = None,
     db_url: str | None = None,
     datadir: str | None = None,
     fresh: bool = True,
@@ -100,10 +120,9 @@ def run_replay(
         config["db_url"] = db_url
 
     # Neutralise live-only capital accounting so the simulated wallet can trade:
-    #  - dry_run_wallet in live configs is a placeholder (the bot uses the real
-    #    wallet live); --wallet is authoritative for a replay.
-    #  - available_capital / capital_withdrawal track the real account and would
-    #    otherwise zero out the deployable capital (e.g. a past withdrawal).
+    # available_capital / capital_withdrawal track the real account and would
+    # otherwise zero out the deployable capital (e.g. a past withdrawal).
+    wallet = _resolve_wallet(config, wallet)
     config["dry_run_wallet"] = wallet
     config["available_capital"] = wallet
     config["capital_withdrawal"] = 0.0

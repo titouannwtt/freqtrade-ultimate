@@ -55,8 +55,7 @@ def build_cmd(
         timerange,
         "--pairs",
         *pairs,
-        "--wallet",
-        str(wallet),
+        *(["--wallet", str(wallet)] if wallet is not None else []),
         "--sub-step",
         str(sub_step),
         "--db-url",
@@ -298,7 +297,7 @@ def maybe_autolaunch_replay(freqtrade) -> bool:
         strategy=freqtrade.strategy.get_strategy_name(),
         timerange=params["timerange"],
         pairs=pairs,
-        wallet=freqtrade.config.get("dry_run_wallet", 1000.0),
+        wallet=None,  # runner resolves the config's dry_run_wallet
         sub_step=params["resolution_s"],
         reset_db=params["reset_db"],
     )

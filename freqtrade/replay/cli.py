@@ -48,9 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--wallet",
         type=float,
-        default=1000.0,
-        help="Simulated starting wallet in stake currency (default 1000). "
-        "Overrides the live config's dry_run_wallet placeholder.",
+        default=None,
+        help="Simulated starting wallet in stake currency. If omitted, falls back to the "
+        "config's dry_run_wallet (default 1000) so replay and backtest/hyperopt stay "
+        "comparable. When given, overrides the config.",
     )
     p.add_argument("--db-url", default=None, help="sqlite URL; forced into the .replay. namespace")
     p.add_argument("--datadir", default=None, help="Feather data dir (default: from config)")
