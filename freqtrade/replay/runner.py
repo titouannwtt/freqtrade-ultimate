@@ -131,6 +131,9 @@ def run_replay(
     # positions (and the funding fees computed on them) into fantasy millions.
     # Wallets honours this flag to keep replay stakes bounded by the real capital.
     config["replay_lock_wallet"] = True
+    # Profit-history sampling stamps wall-clock time; under the virtual clock that would
+    # write misleading rows into the seeded DB - disable it for replays.
+    config["profit_history_interval_s"] = 0
 
     exchange_cfg = config.setdefault("exchange", {})
     exchange_cfg["pair_whitelist"] = list(pairs)

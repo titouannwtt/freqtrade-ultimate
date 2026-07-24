@@ -834,6 +834,15 @@ class WalletHistoryResponse(BaseModel):
     capture_start_ts: int | None = None
 
 
+class ProfitHistoryResponse(BaseModel):
+    """Fork-specific: sampled current-profit time series (see profit_history table)."""
+
+    currency: str
+    # Rows of [timestamp_ms, profit_closed_abs, profit_open_abs, open_trades]
+    data: list[list[Any]]
+    length: int
+
+
 class MarketRequest(ExchangeModePayloadMixin, BaseModel):
     base: str | None = None
     quote: str | None = None

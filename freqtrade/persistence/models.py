@@ -19,6 +19,7 @@ from freqtrade.persistence.custom_data import _CustomData
 from freqtrade.persistence.key_value_store import _KeyValueStoreModel
 from freqtrade.persistence.migrations import check_migrate
 from freqtrade.persistence.pairlock import PairLock
+from freqtrade.persistence.profit_history import ProfitHistory
 from freqtrade.persistence.trade_model import Order, Trade
 from freqtrade.persistence.wallet_history import WalletHistory
 
@@ -103,6 +104,7 @@ def init_db(db_url: str) -> None:
         sessionmaker(bind=engine, autoflush=True), scopefunc=get_request_or_thread_id
     )
     WalletHistory.session = Trade.session
+    ProfitHistory.session = Trade.session
 
     previous_tables = inspect(engine).get_table_names()
     ModelBase.metadata.create_all(engine)

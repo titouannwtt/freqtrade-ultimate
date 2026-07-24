@@ -1,9 +1,11 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.exceptions import HTTPException
 
 from freqtrade.enums import TradingMode
+from freqtrade.persistence import ProfitHistory
 from freqtrade.rpc import RPC
 from freqtrade.rpc.api_server.api_schemas import (
     AdjustTradeAmount,
@@ -30,6 +32,7 @@ from freqtrade.rpc.api_server.api_schemas import (
     PerformanceEntry,
     Profit,
     ProfitAll,
+    ProfitHistoryResponse,
     ResultMsg,
     SignalSummaryResponse,
     Stats,
@@ -122,6 +125,36 @@ def api_get_wallet_history(rpc: RPC = Depends(get_rpc)):
         "data": results.values.tolist(),
         "length": len(results),
         "capture_start_ts": capture_date_ts,
+    }
+
+
+@router.get("/profit_history", response_model=ProfitHistoryResponse, tags=["Trading-info"])
+def api_profit_history(
+    after: int = Query(0, description="Only return samples at/after this timestamp (ms)"),
+    rpc: RPC = Depends(get_rpc),
+    config=Depends(get_config),
+):
+    """
+    Fork-specific: the bot's sampled current-profit time series (closed + open unrealized),
+    recorded by the live loop every profit_history_interval_s (default 300s).
+    """
+    since = datetime.fromtimestamp(after / 1000, tz=UTC) if after else None
+    rows = ProfitHistory.get_since(since)
+    data = [
+        [
+            int(r.timestamp.replace(tzinfo=UTC).timestamp() * 1000)
+            if r.timestamp.tzinfo is None
+            else int(r.timestamp.timestamp() * 1000),
+            r.profit_closed_abs,
+            r.profit_open_abs,
+            r.open_trades,
+        ]
+        for r in rows
+    ]
+    return {
+        "currency": config["stake_currency"],
+        "data": data,
+        "length": len(data),
     }
 
 

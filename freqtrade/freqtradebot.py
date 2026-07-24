@@ -57,7 +57,7 @@ from freqtrade.fleet_coordination import PositionCoordinator
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
-from freqtrade.persistence import Order, PairLocks, Trade, init_db
+from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_db
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.plugins.protectionmanager import ProtectionManager
@@ -294,6 +294,19 @@ class FreqtradeBot(LoggingMixin):
                 max_workers=3, thread_name_prefix="snapshot-rate"
             )
 
+            # Fork-specific: periodic profit-history sampling (see _record_profit_snapshot).
+            # On by default (cheap: cached rates + one local insert); 0 disables.
+            self._profit_history_interval_s: float = self.config.get(
+                "profit_history_interval_s", 300
+            )
+            self._last_profit_history_record: float = 0.0
+            retention_days = self.config.get("profit_history_retention_days", 365)
+            self._schedule.every().day.at("00:11").do(
+                lambda: ProfitHistory.prune_older_than(
+                    dt_now() - timedelta(days=retention_days)
+                )
+            )
+
             self.strategy.ft_bot_start()
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
             self.protections = ProtectionManager(self.config, self.strategy.protections)
@@ -479,6 +492,10 @@ class FreqtradeBot(LoggingMixin):
             self._emit_trade_snapshot()
         except Exception as exc:  # never let the snapshot push break the trading loop
             logger.debug("trade snapshot emission failed: %s", exc)
+        try:
+            self._record_profit_snapshot()
+        except Exception as exc:  # never let profit sampling break the trading loop
+            logger.debug("profit history snapshot failed: %s", exc)
         _cp("snapshot")
 
         # Placed after the snapshot step (not before it) so a latency regression there
@@ -582,6 +599,38 @@ class FreqtradeBot(LoggingMixin):
         self._last_trade_snapshot_emit = now
         msg: RPCTradeSnapshotMsg = {"type": RPCMessageType.TRADE_SNAPSHOT, "data": entries}
         self.rpc.send_msg(msg)
+
+    def _record_profit_snapshot(self) -> None:
+        """
+        Fork-specific: persist a periodic sample of the bot's current profit
+        (closed + open unrealized) into the profit_history table, so FreqUI can draw a
+        time-accurate "profit including open positions" curve instead of projecting the
+        open book onto the end of the closed-profit curve. Throttled (default 300s),
+        rates are cache-first (refresh=False; warm right after exit_positions), and a
+        pricing failure for one trade only drops that trade from the sample.
+        """
+        if self._profit_history_interval_s <= 0:
+            return
+        now = time_module.monotonic()
+        if now - self._last_profit_history_record < self._profit_history_interval_s:
+            return
+
+        open_abs = 0.0
+        open_count = 0
+        for trade in Trade.get_open_trades():
+            if len(trade.select_filled_orders(trade.entry_side)) == 0:
+                continue
+            try:
+                rate = self.exchange.get_rate(
+                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
+                )
+            except (ExchangeError, PricingError):
+                continue
+            open_abs += trade.calculate_profit(rate).profit_abs
+            open_count += 1
+
+        ProfitHistory.record(Trade.get_total_closed_profit(), open_abs, open_count)
+        self._last_profit_history_record = now
 
     def process_stopped(self) -> None:
         """
