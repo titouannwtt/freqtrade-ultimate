@@ -1,6 +1,6 @@
 # Custom Hyperopt Losses and Samplers
 
-This fork extends freqtrade's hyperopt with three custom loss functions, a `--sampler` flag
+This fork extends freqtrade's hyperopt with four custom loss functions, a `--sampler` flag
 for choosing the Optuna optimization algorithm, and an auto-generated HTML report after each
 hyperopt run.
 
@@ -11,12 +11,16 @@ hyperopt run.
 | `MoutonMeanRevHyperOptLoss` | 8-metric composite loss for DCA / mean-reversion |
 | `MoutonMomentumHyperOptLoss` | 9-metric composite loss for momentum / trend-following |
 | `MyProfitDrawDownHyperOptLoss` | Simple profit-minus-drawdown baseline |
+| `WalkForwardLoss` | Multi-window robustness loss — rejects single-regime memorizers |
 | `--sampler NAME` | Override Optuna sampler (default: `NSGAIIISampler`) |
 | HTML report | Auto-generated report at `user_data/hyperopt_results/<strategy>.html` |
 
-All three custom losses use **hard filters** that reject configurations below minimum quality
-thresholds, and **multiplicative gates** that apply exponential drawdown penalties on top of
-the weighted metric score.
+The three composite losses (`MoutonMeanRev`, `MoutonMomentum`, `MyProfitDrawDown`) use **hard
+filters** that reject configurations below minimum quality thresholds, and **multiplicative
+gates** that apply exponential drawdown penalties on top of the weighted metric score.
+`WalkForwardLoss` takes a different approach: instead of scoring the whole train period as one
+block, it splits it into chronological windows and rewards **consistency across windows**,
+rejecting parameter sets that only work in a single market regime.
 
 ---
 
@@ -166,6 +170,89 @@ multi-metric weighting. There are no gates or per-metric weights.
 
 ---
 
+### WalkForwardLoss
+
+**Best for:** Final robustness validation on any strategy — filtering out parameter sets that
+overfit a single market regime.
+
+**File:** `freqtrade/optimize/hyperopt_loss/hyperopt_loss_walk_forward.py`
+
+**Class name (for `--hyperopt-loss`):** `WalkForwardLoss`
+
+#### How it works
+
+Unlike the composite losses, `WalkForwardLoss` does not weight a basket of metrics over the
+whole train period. It splits the training window into **5 contiguous chronological windows**
+and checks that the strategy produces a **consistent positive Sharpe across all of them**. A
+strategy that makes all its money in one sub-period (a regime memorizer) is rejected even if its
+overall profit looks excellent.
+
+The algorithm runs in six stages:
+
+1. **Hard rejects** (same spirit as `RobustResearchHyperOptLoss`) — see thresholds below.
+2. **Window split** — divide the train period into `WALK_FORWARD_N_WINDOWS = 5` equal-time windows.
+3. **Per-window Sharpe** — compute a Sharpe-like ratio (`mean/std × √min(n_trades, 252)`) and the
+   trade count for each window.
+4. **Coverage check** — at least **60%** of windows must contain ≥ 3 trades. Below that, the
+   strategy is concentrating on a few sub-periods → reject.
+5. **Consistency checks** — the **median** window Sharpe must be > 0, and **at most ~1/3** of the
+   valid windows may have a negative Sharpe. Otherwise the strategy is fragile across regimes → reject.
+6. **Aggregate score** — `median_sharpe − 0.5 × std_sharpe`, plus a small capped trade-count bonus
+   (`≤ +0.5`). Returned loss is `−(score + bonus)` (lower = better). The variance penalty rewards a
+   high median while discouraging Sharpe that swings wildly between windows.
+
+#### Hard filters
+
+| Filter | Threshold | Constant |
+|---|---|---|
+| Trade count | ≥ `max(hyperopt_min_trades, 5)` | `MIN_TRADES_FLOOR` |
+| Total profit | > 0 | — |
+| Total profit vs starting balance | ≥ 5% | `MIN_PROFIT_PCT` |
+| Distinct pairs | ≥ 8 | `MIN_DISTINCT_PAIRS` |
+| Max drawdown | ≤ 25% | `MAX_DRAWDOWN` |
+| Profit factor | ≥ 1.05 | `MIN_PROFIT_FACTOR` |
+
+Every reject returns a large loss with a proportional gradient (tiered by `*_000` bands) so the
+sampler can navigate away from rejected regions rather than hitting a flat wall.
+
+#### Tunable constants
+
+All defaults live at the top of the loss file:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `WALK_FORWARD_N_WINDOWS` | 5 | Number of chronological windows (2–3 = too easy to fit, 10+ = per-window noise) |
+| `MIN_TRADES_PER_WINDOW` | 3 | Minimum trades for a window to count as "valid" |
+| `MIN_WINDOW_COVERAGE` | 0.60 | Fraction of windows that must be valid |
+| `MAX_NEGATIVE_WINDOW_FRACTION` | 0.34 | Max fraction of valid windows allowed to be Sharpe-negative |
+| `VARIANCE_WEIGHT` | 0.5 | Penalty weight on cross-window Sharpe variance |
+
+#### When to use
+
+- As a **final validation loss** after a first hyperopt pass with a composite loss — to confirm the
+  chosen region is robust across sub-periods, not a single-regime peak.
+- On strategies you suspect of overfitting: if a run scores well on `MoutonMeanRev` but collapses
+  under `WalkForwardLoss`, its edge is regime-specific.
+- Sampler-agnostic — the robustness logic lives in the loss, so pair it with any sampler
+  (`NSGAIIISampler`, `TPESampler`, or `PlateauSampler` for a robustness second pass).
+
+#### When NOT to use
+
+- Short training periods. Splitting into 5 windows requires enough trades **per window** —
+  budget for ≥ 3 trades across ≥ 60% of windows or every epoch is rejected on coverage.
+- Rare-signal strategies (low trade frequency by design). They will fail the coverage check even
+  when legitimately profitable; use a composite loss with a lower trade floor instead.
+- Very early landscape exploration, where most epochs are unprofitable anyway — the hard rejects
+  make the loss surface flat and uninformative. Map first with `CalmarHyperOptLoss` / QMC.
+
+!!! note "Complementary, not a replacement for walk-forward analysis"
+    `WalkForwardLoss` embeds a consistency check **inside a single hyperopt run** (in-sample, across
+    train sub-windows). It is not a substitute for the full `freqtrade walk-forward` command, which
+    re-optimizes on rolling windows and evaluates each on genuinely **out-of-sample** data. Use the
+    loss to prune fragile candidates cheaply, then confirm survivors with walk-forward analysis.
+
+---
+
 ## Built-in Losses Quick Reference
 
 These are the upstream freqtrade losses, unchanged in this fork.
@@ -271,9 +358,15 @@ What type of strategy?
 |   Epochs: 300-500
 |
 +-- Multi-objective (explicit trade-off between 3+ metrics)
-    Loss: MultiMetricHyperOptLoss
-    Sampler: NSGAIIISampler
-    Epochs: 1000+
+|   Loss: MultiMetricHyperOptLoss
+|   Sampler: NSGAIIISampler
+|   Epochs: 1000+
+|
++-- Robustness validation (already have a promising region, want to reject regime overfits)
+    Loss: WalkForwardLoss
+    Sampler: NSGAIIISampler (or PlateauSampler for a plateau check)
+    Epochs: 500+
+    Note: needs enough trades per window (≥3 across ≥60% of 5 windows)
 ```
 
 ---

@@ -852,7 +852,7 @@ Should results not match, check the following factors:
 
 ## Custom Loss Functions & Samplers
 
-This fork provides three custom loss functions (`MoutonMeanRevHyperOptLoss`, `MoutonMomentumHyperOptLoss`, `MyProfitDrawDownHyperOptLoss`) and a `--sampler` flag for choosing the Optuna optimization algorithm. See [Custom Losses & Samplers](hyperopt-custom.md) for full documentation: metric weights, hard filters, per-sampler guidance, and the auto-generated HTML report.
+This fork provides four custom loss functions (`MoutonMeanRevHyperOptLoss`, `MoutonMomentumHyperOptLoss`, `MyProfitDrawDownHyperOptLoss`, `WalkForwardLoss`) and a `--sampler` flag for choosing the Optuna optimization algorithm. See [Custom Losses & Samplers](hyperopt-custom.md) for full documentation: metric weights, hard filters, per-sampler guidance, and the auto-generated HTML report.
 
 ## Validate with Walk-Forward Analysis
 
