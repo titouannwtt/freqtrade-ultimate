@@ -170,6 +170,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **Pairlist Cache Daemon (`ftpairlists`)** — Deduplicates pairlist filter computation between bots (pairlist refresh: 15 min → 3 min).
 - **Position Guard + Leverage Sync** — Prevents conflicting entries and unintended hedges on shared wallets.
 - **Fleet State Notifications + Auto-Restart** — Thundering-herd prevention with startup jitter, `launch_bot.sh` auto-restart loop.
+- **Position reconciliation & safe retirement** *(optional)* — `reconcile_positions.py` detects orphan/phantom positions on a netted wallet; `retire_bot.py` cuts a bot without leaving an orphan (force-exit before stop). See [docs/fleet-reconciliation.md](docs/fleet-reconciliation.md). Everything works without them.
 
 ### Hyperopt & validation
 - **PlateauSampler** — Coordinate-wise Optuna sampler for robust hyperparameter optimization (four-phase: baseline → scan → assembly → refinement).
