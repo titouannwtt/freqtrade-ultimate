@@ -100,7 +100,7 @@ The fork is grouped along the following axes:
 - **Infrastructure**: shared OHLCV cache daemon, shared pairlist cache daemon, position coordination,
   leverage sync, fleet orchestration, auto-restart.
 - **Validation**: PlateauSampler, walk-forward analysis (rolling / anchored / CPCV),
-  custom loss functions tuned for mean-reversion and momentum.
+  custom loss functions tuned for mean-reversion, momentum, and multi-window robustness.
 - **Exchange resilience**: exhaustive `ccxt.RateLimitExceeded` handling, ring-buffer
   metrics, retry-aware token re-acquisition, HTTP connection pooling, WebSocket
   staggered subscription and exponential backoff.
@@ -490,7 +490,7 @@ every WFA concept (PBO, WFE, dispersion bands, regime overlay, ...). See
 
 ### 2.4 Custom Hyperopt Loss Functions
 
-The fork ships three production-grade custom loss functions in
+The fork ships four production-grade custom loss functions in
 `freqtrade/optimize/hyperopt_loss/`:
 
 **`hyperopt_loss_mouton_meanrev.py`** (341 lines) — Tuned for **DCA / mean-reversion**.
@@ -528,16 +528,26 @@ drawdown > 50%, pairs < 5, training window < 30 days.
 Uses Sharpe (appropriate for momentum, unlike mean-reversion which is penalized by Sharpe).
 Includes consecutive-loss penalty and exponential drawdown gate.
 
+**`hyperopt_loss_walk_forward.py`** (266 lines) — **Multi-window robustness loss.** Instead of
+scoring the whole train period as one block, it splits it into 5 contiguous chronological
+windows and rewards a **consistent positive Sharpe across all of them** (score =
+`median_sharpe − 0.5 × std_sharpe`). A parameter set that makes all its money in a single
+sub-period (a regime "memorizer") is rejected on a coverage/consistency check even if its
+overall profit looks excellent. Sampler-agnostic — use it as a final robustness pass after a
+first hyperopt run. Class name: `WalkForwardLoss`. Hard filters: trades < 5, profit ≤ 0,
+profit < 5% of balance, distinct pairs < 8, drawdown > 25%, profit factor < 1.05.
+
 **`hyperopt_loss_my_profit_drawdown.py`** (54 lines) — Simple
 `-(total_profit - 3 * max_drawdown)`.
 
 ```bash
 freqtrade hyperopt --hyperopt-loss MoutonMomentumLoss --strategy MyTrend
 freqtrade hyperopt --hyperopt-loss MoutonMeanRevLoss   --strategy MyDca
+freqtrade hyperopt --hyperopt-loss WalkForwardLoss     --strategy MyStrategy
 freqtrade hyperopt --hyperopt-loss MyProfitDrawdownLoss
 ```
 
-See [docs/hyperopt-custom.md](hyperopt-custom.md) (447 lines).
+See [docs/hyperopt-custom.md](hyperopt-custom.md).
 
 ### 2.5 Hyperopt HTML Report and Console Summary
 

@@ -1,6 +1,6 @@
 # FreqUI
 
-Freqtrade provides a builtin webserver, which can serve [FreqUI](https://github.com/titouannwtt/frequi-fork), the freqtrade frontend.
+Freqtrade provides a builtin webserver, which can serve [FreqUI](https://github.com/titouannwtt/frequi-ultimate), the freqtrade frontend.
 
 By default, the UI is automatically installed as part of the installation (script, docker).
 freqUI can also be manually installed by using the `freqtrade install-ui` command.
@@ -8,8 +8,14 @@ This same command can also be used to update freqUI to new releases.
 
 Once the bot is started in trade / dry-run mode (with `freqtrade trade`) - the UI will be available under the configured API port (by default `http://127.0.0.1:8080`).
 
+!!! tip "FreqUI Ultimate — the multi-bot dashboard for this fork"
+    This fork ships against **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a redesigned multi-bot dashboard (fleet comparison, Market Pulse, Risk Overview, in-browser strategy editor, 6 languages). Its advanced widgets consume REST endpoints that **only exist in freqtrade-ultimate** (`/fleet/status`, `/rate_metrics`, `/cache_status`, `/volume_history`, `/signal_summary`, `/stratdev/*`), so the full experience needs this fork as the backend. Install it with:
+    ```bash
+    freqtrade install-ui --ui-version github://titouannwtt/frequi-ultimate
+    ```
+
 ??? Note "Looking to contribute to freqUI?"
-    Developers should not use this method, but instead clone the corresponding use the method described in the [freqUI repository](https://github.com/titouannwtt/frequi-fork) to get the source-code of freqUI. A working installation of node will be required to build the frontend.
+    Developers should not use this method, but instead clone the source using the method described in the [FreqUI Ultimate repository](https://github.com/titouannwtt/frequi-ultimate) to get the source-code of freqUI. A working installation of node will be required to build the frontend.
 
 !!! tip "freqUI is not required to run freqtrade"
     freqUI is an optional component of freqtrade, and is not required to run the bot.

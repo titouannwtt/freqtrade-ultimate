@@ -155,7 +155,7 @@ docker compose up -d
 
 ## 🎯 What is Freqtrade Ultimate?
 
-A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **35+ features** not present upstream.
+A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream.
 
 **Why this fork exists.** Running multiple Freqtrade bots in production on Hyperliquid surfaces real-world problems upstream wasn't designed for — rate-limit cascades when four bots refresh OHLCV simultaneously, ADL and liquidation handling on a DEX without traditional liquidation events, multi-bot pairlist deduplication, and statistically valid hyperopt without curve-fitting. This fork solves those.
 
@@ -175,7 +175,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **PlateauSampler** — Coordinate-wise Optuna sampler for robust hyperparameter optimization (four-phase: baseline → scan → assembly → refinement).
 - **`--sampler` CLI flag** — Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing your strategy code.
 - **Walk-Forward Analysis** (`freqtrade walk-forward`) — Rolling, anchored, and **CPCV (Combinatorial Purged Cross-Validation)** modes, plus Monte Carlo drawdown simulation, **PBO (Probability of Backtest Overfitting)** score, verdict A–F, and an interactive HTML report.
-- **Custom hyperopt losses** — `MoutonMeanRev` (mean-reversion / DCA), `MoutonMomentum` (trend / momentum), `MyProfitDrawdown` (simple baseline).
+- **Custom hyperopt losses** — `MoutonMeanRev` (mean-reversion / DCA), `MoutonMomentum` (trend / momentum), `WalkForwardLoss` (multi-window robustness — rejects single-regime overfits), `MyProfitDrawdown` (simple baseline).
 
 ### Hyperliquid-specific
 - **Liquidation detection** via user-fills monitoring (`liquidationMarkPx`).
@@ -219,11 +219,34 @@ This repository ships with public showcase strategies directly inside [`user_dat
 
 These strategies are intentionally simple and **honest about their limits**. They demonstrate the methodology (anti-overfitting, walk-forward, real drawdowns), not maximum profitability. **More advanced and live-tested strategies are reserved for [Freqtrade France](https://buymeacoffee.com/freqtrade_france) members** along with full live PnL screenshots and reproducible parameters.
 
-## 🎛️ Companion dashboard (FreqUI)
+## 🎛️ The dashboard: FreqUI Ultimate
 
-Installation is covered above — [migrate from upstream](#-already-running-freqtrade-switch-to-ultimate-without-losing-anything) or [start fresh](#-new-to-freqtrade-start-here). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
+Freqtrade Ultimate pairs with **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a ground-up redesign of the Freqtrade dashboard built for **monitoring a fleet of bots at once**. Where stock FreqUI shows one bot on a plain table, FreqUI Ultimate gives you a glassmorphism multi-bot command center: side-by-side bot comparison, live equity vs BTC benchmark, market regime context, portfolio-wide risk, and 13 cross-bot alert types.
 
-For the multi-bot UI optimized for this fork (50+ enhanced components, fleet comparison, market context):
+> 🔗 **Why it belongs here:** FreqUI Ultimate's advanced widgets (Risk Overview, Market Pulse, fleet comparison, volume/signal context, the in-browser strategy editor) are driven by **REST endpoints that only exist in Freqtrade Ultimate** — `/fleet/status`, `/fleet/events`, `/rate_metrics`, `/cache_status`, `/volume_history`, `/signal_summary`, `/stratdev/*`. Point the same UI at a stock freqtrade bot and those panels stay empty. **The full experience requires this fork as the backend.**
+
+### The multi-bot dashboard
+
+A single screen for your whole fleet: live log console, cumulative profit vs BTC benchmark, per-bot comparison table (open/closed P&L, win/loss, monthly profit, DCA escalations), and every open position with duration-health bars.
+
+![FreqUI Ultimate — multi-bot dashboard](.readme_illustrations/frequi-dashboard-overview.png)
+
+### Market Pulse & portfolio Risk Overview
+
+Context stock FreqUI never surfaces: BTC dominance, Fear & Greed, your fleet's performance vs BTC/ETH on the left — and on the right, portfolio-wide exposure, net/gross/long-short split, average leverage, largest position, worst drawdown, and correlation warnings.
+
+<p align="center">
+  <img src=".readme_illustrations/frequi-market-pulse.png" width="49%" alt="FreqUI Ultimate — Market & Performance Overview">
+  <img src=".readme_illustrations/frequi-risk-overview.png" width="49%" alt="FreqUI Ultimate — Risk Overview">
+</p>
+
+More widgets, popovers, and the embedded strategy editor are shown in the [FreqUI Ultimate repo](https://github.com/titouannwtt/frequi-ultimate).
+
+### Install it
+
+Installation of the fork itself is covered above — [migrate from upstream](#-already-running-freqtrade-switch-to-ultimate-without-losing-anything) or [start fresh](#-new-to-freqtrade-start-here). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
+
+Then install the matching dashboard (50+ enhanced components, fleet comparison, market context):
 
 ```bash
 freqtrade install-ui --ui-version github://titouannwtt/frequi-ultimate
