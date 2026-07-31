@@ -1417,6 +1417,17 @@ class CachedExchangeMixin:
         params: dict | None = None,
     ) -> list[CcxtPosition]:
         """Shared positions: first bot fetches, others read from cache."""
+        # HIP-3 (builder-dex) positions are per-bot configuration and are NOT
+        # covered by the shared, main-dex-only positions cache: a sibling bot that
+        # does not trade the builder dex populates the shared cache with main-dex
+        # positions only. Serving that cache to a builder-dex bot makes its own
+        # HIP-3 positions read as absent (0), which drives handle_onexchange_order
+        # to fabricate an external_close (no real exit order) and strand the live
+        # position on-chain — where it silently accumulates. So whenever this bot
+        # trades any HIP-3 dex, bypass the shared cache and fetch directly through
+        # the native Hyperliquid override (main dex + every configured HIP-3 dex).
+        if getattr(self, "_get_configured_hip3_dexes", lambda: [])():
+            return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
         # Phase 2: when the mixin-side refresher is active, serve from its
         # always-fresh local cache (instant, never blocks). Returns None to fall
         # through to the daemon/ccxt path when the cache is too old. Inert when the
