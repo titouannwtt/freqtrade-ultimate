@@ -163,6 +163,8 @@ class Exchange:
         "funding_fee_timeframe": "1h",
         "ccxt_futures_name": "swap",
         "needs_trading_fees": False,  # use fetch_trading_fees to cache fees
+        # ccxt "total" for the stake currency is plain wallet balance (no open-position uPnL).
+        "balance_includes_unrealized_pnl": False,
         "order_props_in_contracts": ["amount", "filled", "remaining"],
         "fetch_orders_limit_minutes": None,  # "fetch_orders" is not time-limited by default
         # Override createMarketBuyOrderRequiresPrice where ccxt has it wrong
@@ -1126,6 +1128,15 @@ class Exchange:
         """
         return self._ft_has.get(param, default)
 
+    def balance_includes_unrealized_pnl(self) -> bool:
+        """
+        Whether the stake currency's "total" balance from get_balances() is account equity
+        (wallet balance + unrealized PnL of open positions) rather than plain wallet balance.
+        When True, Wallets._strip_unrealized_pnl subtracts open-position uPnL from the stake
+        total so it is not double-counted (once in the balance, once per PositionWallet).
+        """
+        return self.get_option("balance_includes_unrealized_pnl", False)
+
     def exchange_has(self, endpoint: str) -> bool:
         """
         Checks if exchange implements a specific API endpoint.
@@ -1613,8 +1624,15 @@ class Exchange:
                     rate_for_order,
                     params,
                 )
-                if order.get("status") is None:
-                    # Map empty status to open.
+                if order.get("status") is None or (
+                    order.get("status") in ("closed", "expired")
+                    and order.get("average") is None
+                    and float(order.get("filled") or 0) != 0
+                ):
+                    # Map empty status to open — and re-map a "closed"/"expired" order that
+                    # filled but has no average price back to open, forcing a re-fetch to get
+                    # the real execution price (Hyperliquid market-order symptom). float(... or 0)
+                    # guards against filled=None on create.
                     order["status"] = "open"
 
                 if order.get("type") is None:
