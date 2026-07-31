@@ -1016,6 +1016,7 @@ class FreqtradeBot(LoggingMixin):
             prev_exit_reason = trade.exit_reason
             prev_trade_state = trade.is_open
             prev_trade_amount = trade.amount
+            order_obj: Order | None = None
             for order in orders:
                 trade_order = [o for o in trade.orders if o.order_id == order["id"]]
 
@@ -1060,13 +1061,17 @@ class FreqtradeBot(LoggingMixin):
                             f"Error checking for liquidation of {trade.pair}.",
                             exc_info=True,
                         )
-                trade.close_date = trade.date_last_filled_utc
-                self.order_close_notify(
-                    trade,
-                    order_obj,
-                    order_obj.ft_order_side == "stoploss",
-                    send_msg=prev_trade_state != trade.is_open,
-                )
+                if order_obj:
+                    # order_obj is only bound inside the orders loop above; guard
+                    # against the no-order-found case (reloaded old trade whose
+                    # fetch_orders returned empty) to avoid an unbound-local crash.
+                    trade.close_date = trade.date_last_filled_utc
+                    self.order_close_notify(
+                        trade,
+                        order_obj,
+                        order_obj.ft_order_side == "stoploss",
+                        send_msg=prev_trade_state != trade.is_open,
+                    )
             else:
                 trade.exit_reason = prev_exit_reason
                 total = (
@@ -2629,7 +2634,10 @@ class FreqtradeBot(LoggingMixin):
                 True,
             )
             Trade.commit()
-            return False
+            # Cancellation may be refused (order still open on the exchange). Return
+            # has_open_orders rather than a hard False so the caller does not place a
+            # second order on top of a surviving one (duplicate/oversized exposure).
+            return trade.has_open_orders
 
         return False
 

@@ -425,6 +425,9 @@ class Hyperliquid(Exchange):
                     if total_amount
                     else None
                 )
+                # Fill lastTradeTimestamp - used to set the order's filled date
+                # (otherwise it falls back to the order creation timestamp).
+                order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)
         return order
 
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:

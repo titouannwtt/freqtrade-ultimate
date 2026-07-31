@@ -20,6 +20,9 @@ def strip_trailing_zeros(value: str) -> str:
     :param value: Value to be stripped
     :return: Stripped value
     """
+    if "." not in value:
+        # No decimal point: stripping "0"/"." would corrupt integers ("1200" -> "12").
+        return value
     return value.rstrip("0").rstrip(".")
 
 

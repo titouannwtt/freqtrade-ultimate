@@ -578,7 +578,9 @@ class Wallets:
             wallet_records.append(position_record)
 
         for wallet in self.get_all_balances().values():
-            # TODO: (needs decision) exclude minimal balances?
+            if wallet.total == 0:
+                # Don't persist empty balances to wallet history (dust rows).
+                continue
             rate = self._exchange.get_conversion_rate(wallet.currency, self._stake_currency)
             is_bot_managed = (
                 self._stake_currency == wallet.currency or wallet.currency in open_assets

@@ -4012,6 +4012,10 @@ class Exchange:
             self._log_exchange_response("set_margin_mode", res)
         except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
+        except ccxt.MarginModeAlreadySet as e:
+            # Re-setting an already-set margin mode is a no-op, not an error.
+            # (subclass of BadRequest — must be caught before it.)
+            logger.debug(f"Margin mode already set for {pair}. Message: {e}")
         except (ccxt.BadRequest, ccxt.OperationRejected) as e:
             if not accept_fail:
                 raise TemporaryError(
