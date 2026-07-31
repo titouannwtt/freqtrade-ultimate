@@ -1426,9 +1426,17 @@ class Daemon:
             # pairs the fleet holds an OPEN POSITION on get HIGH priority so the
             # limited budget keeps position-bearing series the freshest.
             if not is_dry:
+                # Builder-dex (HIP-3) pairs are niche: each is the sole concern of
+                # one dedicated live bot, they are few, and only live bots drive
+                # these refreshes — so the extra budget is negligible. Served stale
+                # here means that bot generates entry signals on hours-old candles
+                # (it never holds an open position on the pair until it enters, so
+                # the open-position rule below can never lift it out of LOW, where
+                # it loses the rate budget to the fleet's flood). Keep them HIGH.
+                is_builder_dex = exchange == "hyperliquid" and "-" in pair.split("/", 1)[0]
                 refresh_prio = (
                     TokenBucket.HIGH
-                    if pair in self._open_position_symbols(exchange)
+                    if (is_builder_dex or pair in self._open_position_symbols(exchange))
                     else TokenBucket.LOW
                 )
                 self._schedule_swr_refresh(
