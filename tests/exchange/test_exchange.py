@@ -4034,6 +4034,7 @@ def test_cancel_order_with_result(
 def test_cancel_order_with_result_error(default_conf, mocker, exchange_name, caplog):
     default_conf["dry_run"] = False
     mocker.patch(f"{EXMS}.exchange_has", return_value=True)
+    mocker.patch("freqtrade.exchange.exchange.time_module.sleep")
     api_mock = MagicMock()
     api_mock.cancel_order = MagicMock(side_effect=ccxt.InvalidOrder("Did not find order"))
     api_mock.fetch_order = MagicMock(side_effect=ccxt.InvalidOrder("Did not find order"))
@@ -4042,8 +4043,36 @@ def test_cancel_order_with_result_error(default_conf, mocker, exchange_name, cap
     res = exchange.cancel_order_with_result("1234", "ETH/BTC", 1541)
     assert isinstance(res, dict)
     assert log_has("Could not cancel order 1234 for ETH/BTC.", caplog)
-    assert log_has("Could not fetch cancelled order 1234.", caplog)
+    assert log_has("Could not fetch cancelled order 1234 (attempt 1/3).", caplog)
+    assert log_has("Could not fetch cancelled order 1234 (attempt 3/3).", caplog)
+    # The corpse (filled=0.0) is fabricated only after all fetch retries failed.
+    assert api_mock.fetch_order.call_count == 3
     assert res["amount"] == 1541
+    assert res["filled"] == 0.0
+
+
+@pytest.mark.parametrize("exchange_name", EXCHANGES)
+def test_cancel_order_with_result_fetch_retry_finds_fill(
+    default_conf, mocker, exchange_name, caplog
+):
+    """A transient fetch error after cancel must NOT produce a filled=0 corpse:
+    if a retry reveals the order actually filled, the caller must see the fill
+    (deleting the trade on a fake zero-fill strands a live position)."""
+    default_conf["dry_run"] = False
+    mocker.patch(f"{EXMS}.exchange_has", return_value=True)
+    mocker.patch("freqtrade.exchange.exchange.time_module.sleep")
+    api_mock = MagicMock()
+    api_mock.cancel_order = MagicMock(side_effect=ccxt.InvalidOrder("Already filled"))
+    filled_order = {"id": "1234", "status": "closed", "amount": 5.0, "filled": 5.0, "fee": {}}
+    api_mock.fetch_order = MagicMock(
+        side_effect=[ccxt.InvalidOrder("hiccup"), filled_order]
+    )
+    exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange=exchange_name)
+
+    res = exchange.cancel_order_with_result("1234", "ETH/BTC", 5.0)
+    assert api_mock.fetch_order.call_count == 2
+    assert res["filled"] == 5.0
+    assert res["status"] == "closed"
 
 
 # Ensure that if not dry_run, we should call API

@@ -1992,20 +1992,33 @@ class Exchange:
                 return corder
         except InvalidOrderException:
             logger.warning(f"Could not cancel order {order_id} for {pair}.")
-        try:
-            order = self.fetch_order(order_id, pair)
-        except InvalidOrderException:
-            logger.warning(f"Could not fetch cancelled order {order_id}.")
-            order = {
-                "id": order_id,
-                "status": "canceled",
-                "amount": amount,
-                "filled": 0.0,
-                "fee": {},
-                "info": {},
-            }
-
-        return order
+        # Retry the post-cancel fetch a few times before fabricating a canceled
+        # corpse with filled=0.0: if the order actually (partially) filled and a
+        # transient error hides that, the caller will delete the trade while the
+        # position is live on the exchange — stranding it as an untracked orphan.
+        # Especially relevant on slow/illiquid venues (e.g. HIP-3 builder dexes).
+        for attempt in range(3):
+            try:
+                return self.fetch_order(order_id, pair)
+            except InvalidOrderException:
+                logger.warning(
+                    f"Could not fetch cancelled order {order_id} (attempt {attempt + 1}/3)."
+                )
+                if attempt < 2:
+                    time_module.sleep(2)
+        logger.warning(
+            f"Order {order_id} for {pair} unavailable after cancel — assuming it was "
+            "fully cancelled with no fill. If this order did fill, the position will "
+            "surface as an untracked/netted drift and must be reconciled."
+        )
+        return {
+            "id": order_id,
+            "status": "canceled",
+            "amount": amount,
+            "filled": 0.0,
+            "fee": {},
+            "info": {},
+        }
 
     def cancel_stoploss_order_with_result(
         self, order_id: str, pair: str, amount: float
