@@ -445,15 +445,19 @@ For a deep dive, see [docs/hyperopt-plateausampler.md](hyperopt-plateausampler.m
 sampler shipped with Optuna. The fork adds a `--sampler` CLI flag (propagated from
 `cli_options.py` to `config.hyperopt_sampler` in `configuration.py`) that accepts:
 
-- `TPE` — Tree-structured Parzen Estimator (Optuna default).
-- `NSGA-II` / `NSGA-III` — multi-objective evolutionary samplers.
-- `CMA-ES` — Covariance Matrix Adaptation Evolution Strategy.
-- `GP` — Gaussian Process.
-- `QMC` — Quasi-Monte Carlo.
+- `NSGAIIISampler` — multi-objective evolutionary sampler (**default**).
+- `NSGAIISampler` — multi-objective evolutionary sampler.
+- `TPESampler` — Tree-structured Parzen Estimator.
+- `CmaEsSampler` — Covariance Matrix Adaptation Evolution Strategy.
+- `GPSampler` — Gaussian Process.
+- `QMCSampler` — Quasi-Monte Carlo.
 - `PlateauSampler` — the coordinate-wise sampler described above.
 
+These are the exact values accepted by `--sampler` (they are the Optuna class names);
+any other spelling is rejected by the CLI.
+
 ```bash
-freqtrade hyperopt --strategy MyStrat --hyperopt-loss MoutonMomentumLoss \
+freqtrade hyperopt --strategy MyStrat --hyperopt-loss MoutonMomentumHyperOptLoss \
     --sampler PlateauSampler --epochs 800
 ```
 
@@ -508,7 +512,7 @@ A new run mode `RunMode.WALKFORWARD` is added to `OPTIMIZE_MODES` in `enums/runm
 ```bash
 freqtrade walk-forward \
     --strategy MyStrat \
-    --hyperopt-loss MoutonMeanRevLoss \
+    --hyperopt-loss MoutonMeanRevHyperOptLoss \
     --sampler PlateauSampler \
     --epochs 600 \
     --wf-mode rolling \
@@ -578,10 +582,10 @@ profit < 5% of balance, distinct pairs < 8, drawdown > 25%, profit factor < 1.05
 `-(total_profit - 3 * max_drawdown)`.
 
 ```bash
-freqtrade hyperopt --hyperopt-loss MoutonMomentumLoss --strategy MyTrend
-freqtrade hyperopt --hyperopt-loss MoutonMeanRevLoss   --strategy MyDca
+freqtrade hyperopt --hyperopt-loss MoutonMomentumHyperOptLoss --strategy MyTrend
+freqtrade hyperopt --hyperopt-loss MoutonMeanRevHyperOptLoss   --strategy MyDca
 freqtrade hyperopt --hyperopt-loss WalkForwardLoss     --strategy MyStrategy
-freqtrade hyperopt --hyperopt-loss MyProfitDrawdownLoss
+freqtrade hyperopt --hyperopt-loss MyProfitDrawDownHyperOptLoss
 ```
 
 See [docs/hyperopt-custom.md](hyperopt-custom.md).
@@ -1258,7 +1262,7 @@ top-level config fields. All are optional; defaults are listed below.
 
   "backtest_lock_wallet": false,
 
-  "hyperopt_sampler": "TPE",
+  "hyperopt_sampler": "NSGAIIISampler",
 
   "dry_run_replay": {
     "automatic_launch": true,
@@ -1359,7 +1363,7 @@ No DB migration is required; the SQLAlchemy schema is unchanged. The pool sizing
   coordinate-wise sampler.
 - [Walk-Forward Analysis guide](walk-forward-analysis.md) — 461-line user-facing guide.
 - [Custom hyperopt loss reference](hyperopt-custom.md) — 447-line documentation of
-  `MoutonMeanRevLoss`, `MoutonMomentumLoss`, and `MyProfitDrawdownLoss`.
+  `MoutonMeanRevHyperOptLoss`, `MoutonMomentumHyperOptLoss`, and `MyProfitDrawDownHyperOptLoss`.
 - [Dry-Run Replay guide](dry-run-replay.md) — dedicated documentation for the replay
   harness (architecture, CLI, config auto-launch, REST API).
 - [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate) — companion dashboard

@@ -29,7 +29,7 @@ This is the consolidated snapshot of all fork-specific features as of the v2026.
 - **PlateauSampler** — Coordinate-wise Optuna sampler; four-phase pipeline (baseline → scan → assembly → refinement); auto-budgeting `min_epochs = 1 + n_params × MIN_POINTS_PER_PARAM`; exports robust parameters directly to strategy JSON; hard validation block when epochs < budget.
 - **`--sampler` CLI flag** — Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing strategy code.
 - **Walk-Forward Analysis** (`freqtrade walk-forward`) — 2 652 lines of new code; rolling / anchored / CPCV (Combinatorial Purged Cross-Validation) modes; Monte Carlo drawdown simulation; multi-seed convergence testing; WFE (Walk-Forward Efficiency) and PBO (Probability of Backtest Overfitting); A–F verdict + interactive HTML report.
-- **Custom hyperopt loss functions** — `MoutonMeanRev` (8 weighted metrics for mean-reversion / DCA), `MoutonMomentum` (8 weighted metrics for trend / momentum), `MyProfitDrawdown` (baseline).
+- **Custom hyperopt loss functions** — `MoutonMeanRevHyperOptLoss` (8 weighted metrics for mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (8 weighted metrics for trend / momentum), `MyProfitDrawDownHyperOptLoss` (baseline).
 - **Hyperopt HTML report** — 6 212 lines of new code, auto-generated post-run with parameter agreement analysis and convergence chart.
 - **CLI help text** — All hyperopt options rewritten with practical guidance, per-strategy recommendations, and explicit tradeoff explanations.
 

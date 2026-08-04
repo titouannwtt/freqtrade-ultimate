@@ -176,7 +176,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **PlateauSampler** — Coordinate-wise Optuna sampler for robust hyperparameter optimization (four-phase: baseline → scan → assembly → refinement).
 - **`--sampler` CLI flag** — Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing your strategy code.
 - **Walk-Forward Analysis** (`freqtrade walk-forward`) — Rolling, anchored, and **CPCV (Combinatorial Purged Cross-Validation)** modes, plus Monte Carlo drawdown simulation, **PBO (Probability of Backtest Overfitting)** score, verdict A–F, and an interactive HTML report.
-- **Custom hyperopt losses** — `MoutonMeanRev` (mean-reversion / DCA), `MoutonMomentum` (trend / momentum), `WalkForwardLoss` (multi-window robustness — rejects single-regime overfits), `MyProfitDrawdown` (simple baseline).
+- **Custom hyperopt losses** — `MoutonMeanRevHyperOptLoss` (mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (trend / momentum), `WalkForwardLoss` (multi-window robustness — rejects single-regime overfits), `MyProfitDrawDownHyperOptLoss` (simple baseline).
 
 ### Hyperliquid-specific
 - **Liquidation detection** via user-fills monitoring (`liquidationMarkPx`).
@@ -281,7 +281,7 @@ Installation of the fork itself is covered above — [migrate from upstream](#-a
 Then install the matching dashboard (50+ enhanced components, fleet comparison, market context):
 
 ```bash
-freqtrade install-ui --ui-version github://titouannwtt/frequi-ultimate
+freqtrade install-ui
 ```
 
 Or visit [titouannwtt/frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate).

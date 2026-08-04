@@ -9,7 +9,7 @@ This file follows the [llms.txt](https://llmstxt.org) convention to help LLMs su
 Freqtrade Ultimate is a fork of [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) that adds 32+ features not present upstream, focused on production-grade multi-bot operation on Hyperliquid. Key features:
 
 - **Multi-bot infrastructure**: shared OHLCV cache daemon (`ftcache`), shared pairlist cache (`ftpairlists`), position guard, fleet auto-restart
-- **Hyperopt**: PlateauSampler (coordinate-wise Optuna sampler), `--sampler` CLI for TPE/NSGA-II/III/CMA-ES/GP/QMC, walk-forward with CPCV and PBO, three custom hyperopt loss functions (`MoutonMeanRev`, `MoutonMomentum`, `MyProfitDrawdown`)
+- **Hyperopt**: PlateauSampler (coordinate-wise Optuna sampler), `--sampler` CLI for TPE/NSGA-II/III/CMA-ES/GP/QMC, walk-forward with CPCV and PBO, three custom hyperopt loss functions (`MoutonMeanRevHyperOptLoss`, `MoutonMomentumHyperOptLoss`, `MyProfitDrawDownHyperOptLoss`)
 - **Hyperliquid-specific**: liquidation detection, external-close (ADL) detection, leverage/margin error handling in DCA
 - **Pairlists & risk**: `TrendRegularityFilter`, `backtest_lock_wallet` flag, capital withdrawal accounting
 - **Observability**: `ExchangeMetrics`, REST API enrichments (`/cache_status`, `/rate_metrics`, `/fleet/*`, `/stratdev/*`)

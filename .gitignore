@@ -278,3 +278,6 @@ config.json
 /frequi-config-*.json
 /scripts/weekly_backup.sh
 user_data/logs/
+
+# Résidu d’un promote de stratégie — expose le générateur privé, ne jamais versionner
+.uncompacted_edge_strategies_backup/

@@ -11,7 +11,7 @@ Once the bot is started in trade / dry-run mode (with `freqtrade trade`) - the U
 !!! tip "FreqUI Ultimate — the multi-bot dashboard for this fork"
     This fork ships against **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a redesigned multi-bot dashboard (fleet comparison, Market Pulse, Risk Overview, in-browser strategy editor, 6 languages). Its advanced widgets consume REST endpoints that **only exist in freqtrade-ultimate** (`/fleet/status`, `/rate_metrics`, `/cache_status`, `/volume_history`, `/signal_summary`, `/stratdev/*`), so the full experience needs this fork as the backend. Install it with:
     ```bash
-    freqtrade install-ui --ui-version github://titouannwtt/frequi-ultimate
+    freqtrade install-ui
     ```
 
 ??? Note "Looking to contribute to freqUI?"
