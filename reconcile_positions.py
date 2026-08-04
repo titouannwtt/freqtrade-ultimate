@@ -119,18 +119,37 @@ def _live_bot_positions() -> tuple[dict[str, float], dict[str, list[str]], int]:
     return net, detail, n_live
 
 
+def _hip3_dexes() -> set:
+    """Union of HIP-3 builder dexes configured across running live bots."""
+    dexes: set = set()
+    for cfg in _running_bot_configs():
+        if cfg.get("dry_run") is False:
+            dexes.update(cfg.get("exchange", {}).get("hip3_dexes", []) or [])
+    return dexes
+
+
 def _hl_positions() -> dict[str, float]:
-    """Signed net position per coin on the wallet."""
+    """Signed net position per coin on the wallet — MAIN dex + HIP-3 builder dexes.
+
+    Builder-dex positions (e.g. XYZ-KR200 on the "xyz" dex) are only returned by
+    fetch_positions when called with params={"dex": <name>}; omitting them makes
+    every builder-dex trade look like a phantom and its real position an orphan.
+    """
     import ccxt  # imported lazily so the module loads even without ccxt for --help
 
     acc = json.load(open(ACCESS))["exchange"]
     ex = ccxt.hyperliquid({"walletAddress": acc["walletAddress"], "privateKey": acc["privateKey"]})
     net = {}
-    for p in ex.fetch_positions():
-        if not p.get("contracts"):
-            continue
-        coin = p["symbol"].split("/")[0]
-        net[coin] = abs(float(p["contracts"])) if p["side"] == "long" else -abs(float(p["contracts"]))
+    batches = [ex.fetch_positions()]
+    for dex in sorted(_hip3_dexes()):
+        batches.append(ex.fetch_positions(None, params={"dex": dex}))
+    for batch in batches:
+        for p in batch:
+            if not p.get("contracts"):
+                continue
+            coin = p["symbol"].split("/")[0]
+            signed = abs(float(p["contracts"]))
+            net[coin] = net.get(coin, 0.0) + (signed if p["side"] == "long" else -signed)
     return net
 
 

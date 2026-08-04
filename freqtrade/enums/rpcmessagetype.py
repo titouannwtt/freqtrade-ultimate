@@ -24,6 +24,13 @@ class RPCMessageType(StrEnum):
     ANALYZED_DF = "analyzed_df"
     NEW_CANDLE = "new_candle"
 
+    # Fork-specific: periodic live profit snapshot for open trades, pushed over the
+    # WS message stream to let dashboards replace REST /status polling. See
+    # FreqtradeBot._emit_trade_snapshot(). Not in NO_ECHO_MESSAGES: at the default
+    # >=5s throttle this stays infrequent enough to be worth the INFO log line: if
+    # the throttle is ever lowered, add it there to avoid log spam.
+    TRADE_SNAPSHOT = "trade_snapshot"
+
     def __repr__(self):
         # TODO: do we still need to overwrite __repr__? Impact needs to be looked at in detail
         return self.value

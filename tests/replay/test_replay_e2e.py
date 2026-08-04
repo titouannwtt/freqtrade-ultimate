@@ -121,7 +121,9 @@ class TestReplayE2E:
         # next process() close, which legitimately changes the coarse result.
         # Re-frozen 2026-07-08 after the tradable_balance_ratio-with-available_capital
         # sizing fix (commit 0e82b4f1c) legitimately changed position sizes.
-        "total_profit_abs": -387.8806,
+        # Re-frozen 2026-07-10 after the replay wallet-lock (replay_lock_wallet) stopped
+        # paper profits from compounding into stake sizes.
+        "total_profit_abs": -390.9842,
         "total_profit_ratio": -1.451276,
     }
 
@@ -139,6 +141,10 @@ class TestReplayE2E:
     def test_optimisations_preserve_1m_baseline(self, datadir, tmp_path):
         # 1-minute sub-step is where the analyze short-circuit + open-trades cache are
         # most active; pin the exact result so those optimisations stay faithful.
+        # Re-frozen 2026-07-12 after the get_candles() look-ahead fix (a forming
+        # candle is now hidden until its close has passed, not just its open):
+        # the prior baseline (30 trades, +239.18) was inflated by the strategy
+        # seeing each 15m candle's future close up to 14 minutes early.
         s = run_replay(
             config=deepcopy(_config(tmp_path)),
             pairs=[PAIR],
@@ -150,8 +156,8 @@ class TestReplayE2E:
             db_url=f"sqlite:///{tmp_path / 'm1.replay.sqlite'}",
             sub_step=60,
         )
-        assert s["closed_trades"] == 30
-        assert s["total_profit_abs"] == pytest.approx(268.3742)
+        assert s["closed_trades"] == 16
+        assert s["total_profit_abs"] == pytest.approx(-26.3816)
 
     def test_seed_marker_written(self, datadir, tmp_path):
         import sqlite3

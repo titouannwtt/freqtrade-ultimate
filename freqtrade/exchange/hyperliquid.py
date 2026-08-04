@@ -52,6 +52,8 @@ class Hyperliquid(Exchange):
         "funding_fee_candle_limit": 500,
         "uses_leverage_tiers": False,
         "mark_ohlcv_price": "futures",
+        # ccxt maps HL "total" to marginSummary.accountValue, which includes unrealized PnL.
+        "balance_includes_unrealized_pnl": True,
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
@@ -425,6 +427,9 @@ class Hyperliquid(Exchange):
                     if total_amount
                     else None
                 )
+                # Fill lastTradeTimestamp - used to set the order's filled date
+                # (otherwise it falls back to the order creation timestamp).
+                order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)
         return order
 
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:

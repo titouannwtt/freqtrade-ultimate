@@ -88,6 +88,8 @@ def api_replay_seeded(config=Depends(get_config)):
         "seeded": marker is not None,
         "info": marker,
         "backup_available": bool(bak and bak.exists()),
+        # Wallet the replay will use when the request doesn't pin one (UI display).
+        "dry_run_wallet": config.get("dry_run_wallet") or 1000.0,
     }
 
 

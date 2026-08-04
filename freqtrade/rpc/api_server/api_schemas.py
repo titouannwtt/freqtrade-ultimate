@@ -721,7 +721,7 @@ class ReplayRequest(BaseModel):
     strategy: str
     timerange: str  # YYYYMMDD-YYYYMMDD
     pairs: list[str]
-    wallet: float = 1000.0
+    wallet: float | None = None  # None -> use the bot config's dry_run_wallet
     slippage: float = 0.0005
     sub_step: int = 60  # intra-candle resolution in seconds (60=1m, 300=5m, 900=15m)
     reset_db: bool = False  # wipe the dry DB first (else preserve existing trades)
@@ -832,6 +832,15 @@ class WalletHistoryResponse(BaseModel):
     # start date of the effectively captured data
     # Before this date, it's based on a reconstructed wallet history
     capture_start_ts: int | None = None
+
+
+class ProfitHistoryResponse(BaseModel):
+    """Fork-specific: sampled current-profit time series (see profit_history table)."""
+
+    currency: str
+    # Rows of [timestamp_ms, profit_closed_abs, profit_open_abs, open_trades]
+    data: list[list[Any]]
+    length: int
 
 
 class MarketRequest(ExchangeModePayloadMixin, BaseModel):

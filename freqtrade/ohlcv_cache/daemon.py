@@ -673,6 +673,7 @@ class DaemonStats:
     cache_hits: int = 0  # served fully from cache, no fetch
     cache_partial: int = 0  # partial-range: some from cache, some fetched
     cache_misses: int = 0  # nothing in cache, full fetch
+    cache_swr: int = 0  # stale-while-revalidate: served stale, refreshed in background
     fetch_errors: int = 0
     active_clients: int = 0
     last_client_disconnect_monotonic: float | None = None
@@ -796,6 +797,13 @@ class BotRegistry:
         self._bots[bot_id] = entry
         self._conn_to_bot[conn_id] = bot_id
         return entry
+
+    def is_dry(self, conn_id: int) -> bool:
+        """Whether the bot on this connection runs in dry-run mode.
+        Unknown connection -> False (treat as live = conservative)."""
+        bot_id = self._conn_to_bot.get(conn_id)
+        entry = self._bots.get(bot_id) if bot_id else None
+        return bool(entry.dry_run) if entry else False
 
     def heartbeat(self, conn_id: int) -> None:
         bot_id = self._conn_to_bot.get(conn_id)
@@ -966,6 +974,17 @@ class Daemon:
         self.fetchers: dict[tuple[str, str], ExchangeFetcher] = {}
         self.coordinator = RequestCoordinator()
         self.stats = DaemonStats()
+        # Stale-while-revalidate (SWR) for live OHLCV — see defaults.py.
+        self._swr_enabled = bool(global_cfg.get("swr_enabled", True))
+        self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 8))
+        self._swr_dry_max_stale_candles = int(global_cfg.get("swr_dry_max_stale_candles", 20))
+        self._swr_max_missing_tail_candles = int(
+            global_cfg.get("swr_max_missing_tail_candles", 4)
+        )
+        self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
+        self._swr_inflight: set = set()  # series keys with a background refresh pending
+        self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
+        self._open_pos_memo: dict[str, tuple[float, set]] = {}  # exchange -> (ts, symbols)
         self.persistence = (
             FeatherPersistence(
                 root=Path(global_cfg.get("persistence_path", "")),
@@ -992,8 +1011,27 @@ class Daemon:
         self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 30.0))
         self._tickers_inflight: dict[str, asyncio.Event] = {}
         self._positions_cache: dict[str, _PositionsCacheEntry] = {}
-        self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 3.0))
+        # Default raised 3.0 -> 15.0: all bots share one wallet, so coalescing
+        # fetch_positions to ~1 real API call per TTL window across the whole
+        # fleet cuts positions rate-limit pressure without risking staleness
+        # (bot side still forces a fresh CRITICAL fetch past 45s when holding).
+        self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 15.0))
         self._positions_inflight: dict[str, asyncio.Event] = {}
+        # Phase 5: central positions fetcher. Learn (exchange -> wallet address)
+        # from positions_get requests; a background task fetches clearinghouseState
+        # (public /info, address-only) per target and keeps _positions_cache warm.
+        # Default True: the central fetcher is dormant until a bot teaches it a
+        # (exchange -> wallet) target via positions_get, so enabling it by default
+        # is a no-op until an updated bot connects — and it sidesteps the respawn
+        # race (whichever bot respawns the daemon may still run old client code).
+        self._positions_daemon_fetch_enabled = bool(
+            global_cfg.get("positions_daemon_fetch_enabled", True)
+        )
+        self._positions_daemon_fetch_interval_s = float(
+            global_cfg.get("positions_daemon_fetch_interval_s", 10.0)
+        )
+        self._positions_fetch_targets: dict[str, str] = {}  # exchange -> wallet_address
+        self._positions_fetch_clients: dict[str, Any] = {}  # exchange -> ccxt (address-only)
         self._balances_cache: dict[str, _BalancesCacheEntry] = {}
         self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))
         self._balances_inflight: dict[str, asyncio.Event] = {}
@@ -1271,7 +1309,7 @@ class Daemon:
         # Trim if we've grown past the cap
         series.trim_to(self._max_candles_per_series)
 
-    async def _handle_fetch(self, req: dict) -> dict:
+    async def _handle_fetch(self, req: dict, conn_id: int = 0) -> dict:
         t0 = time.monotonic()
         self.stats.requests_total += 1
         exchange = req["exchange"]
@@ -1356,41 +1394,65 @@ class Daemon:
                 served_from="cache",
             )
 
-        max_chunk = int(ex_cfg.get("max_candles_per_call", 1000))
-        chunks: list[Gap] = []
-        for g in gaps:
-            chunks.extend(chunk_gap(g, max_chunk, tf_ms))
-
         had_any_cache = series.n_candles > 0
-        errors = 0
-        shed_errors = 0
-        for chunk in chunks:
-            key = (
-                exchange,
-                trading_mode,
-                pair,
-                timeframe,
-                candle_type,
-                chunk.start_ms,
-                chunk.end_ms,
+
+        # Stale-while-revalidate: gaps exist, but if we already hold a
+        # reasonably-fresh cached copy and only the recent tail is missing,
+        # serve the cache NOW and fill the gap in the BACKGROUND instead of
+        # blocking the client behind a deep token-bucket queue (which would
+        # blow past client_timeout_s and freeze the bot's whole cycle — the
+        # "CacheTimedOut / slow cycle: 240s candles" storm at fleet scale).
+        is_dry = self.registry.is_dry(conn_id)
+        # Dry bots tolerate more staleness: they piggyback on the cache the live
+        # bots keep warm and should almost never spend fetch budget themselves.
+        stale_candles = self._swr_dry_max_stale_candles if is_dry else self._swr_max_stale_candles
+        serve_cap_ms = max(stale_candles * tf_ms, self._swr_min_stale_ms)
+        if (
+            is_live
+            and self._swr_enabled
+            and had_any_cache
+            and series.range_start_ms is not None
+            and series.range_start_ms <= start_ms
+            and series.range_end_ms is not None
+            and series.range_end_ms >= end_ms - self._swr_max_missing_tail_candles * tf_ms
+            # Freshness from the DATA itself (populated on disk-load too). Serve
+            # stale up to serve_cap; beyond it fetch synchronously so we never
+            # serve ancient candles.
+            and series.range_end_ms >= now_wall_ms - serve_cap_ms
+        ):
+            # Only LIVE bots drive background refreshes: the dry bots (majority of
+            # the fleet) piggyback on the cache the live bots keep warm, so they
+            # stop consuming the scarce IP fetch budget entirely. Refreshes for
+            # pairs the fleet holds an OPEN POSITION on get HIGH priority so the
+            # limited budget keeps position-bearing series the freshest.
+            if not is_dry:
+                # Builder-dex (HIP-3) pairs are niche: each is the sole concern of
+                # one dedicated live bot, they are few, and only live bots drive
+                # these refreshes — so the extra budget is negligible. Served stale
+                # here means that bot generates entry signals on hours-old candles
+                # (it never holds an open position on the pair until it enters, so
+                # the open-position rule below can never lift it out of LOW, where
+                # it loses the rate budget to the fleet's flood). Keep them HIGH.
+                is_builder_dex = exchange == "hyperliquid" and "-" in pair.split("/", 1)[0]
+                refresh_prio = (
+                    TokenBucket.HIGH
+                    if (is_builder_dex or pair in self._open_position_symbols(exchange))
+                    else TokenBucket.LOW
+                )
+                self._schedule_swr_refresh(
+                    series, exchange, trading_mode, pair, timeframe,
+                    candle_type, gaps, ex_cfg, tf_ms, refresh_prio,
+                )
+            series.hits += 1
+            self.stats.cache_swr += 1
+            return self._ok(
+                req["req_id"], series, start_ms, end_ms, t0, served_from="stale"
             )
 
-            async def _do_fetch(c=chunk):
-                await self._fetch_chunk(
-                    series,
-                    c,
-                    ex_cfg,
-                    priority=priority,
-                    capital=capital,
-                )
-
-            try:
-                await self.coordinator.run(key, _do_fetch)
-            except RateLimitShed:
-                errors += 1
-                shed_errors += 1
-            except Exception:
-                errors += 1
+        errors, shed_errors = await self._fill_chunks(
+            series, exchange, trading_mode, pair, timeframe, candle_type,
+            gaps, ex_cfg, tf_ms, priority, capital,
+        )
 
         if is_live and errors == 0:
             series.last_live_refresh_wall_ms = int(time.time() * 1000)
@@ -1456,6 +1518,129 @@ class Daemon:
             "served_from": served_from,
             "latency_ms": (time.monotonic() - t0) * 1000,
         }
+
+    async def _fill_chunks(
+        self,
+        series,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
+        gaps,
+        ex_cfg: dict,
+        tf_ms: int,
+        priority: int,
+        capital: float,
+    ) -> tuple[int, int]:
+        """Fetch the missing `gaps` for a series through the coordinator +
+        token bucket. Shared by the synchronous fetch path and the SWR
+        background refresh. Returns (errors, shed_errors)."""
+        max_chunk = int(ex_cfg.get("max_candles_per_call", 1000))
+        chunks: list[Gap] = []
+        for g in gaps:
+            chunks.extend(chunk_gap(g, max_chunk, tf_ms))
+        errors = 0
+        shed_errors = 0
+        for chunk in chunks:
+            key = (
+                exchange,
+                trading_mode,
+                pair,
+                timeframe,
+                candle_type,
+                chunk.start_ms,
+                chunk.end_ms,
+            )
+
+            async def _do_fetch(c=chunk):
+                await self._fetch_chunk(
+                    series,
+                    c,
+                    ex_cfg,
+                    priority=priority,
+                    capital=capital,
+                )
+
+            try:
+                await self.coordinator.run(key, _do_fetch)
+            except RateLimitShed:
+                errors += 1
+                shed_errors += 1
+            except Exception:
+                errors += 1
+        return errors, shed_errors
+
+    def _open_position_symbols(self, exchange: str) -> set:
+        """Symbols the fleet currently holds an open position on, from the
+        phase-5 central positions cache. Memoised for a few seconds so it's
+        cheap to consult on every fetch. Empty set if positions unknown."""
+        now = time.monotonic()
+        cached = self._open_pos_memo.get(exchange)
+        if cached is not None and (now - cached[0]) < 5.0:
+            return cached[1]
+        syms: set = set()
+        entry = self._positions_cache.get(exchange)
+        if entry is not None:
+            for p in entry.data:
+                try:
+                    if p.get("contracts") and float(p.get("contracts") or 0) != 0:
+                        sym = p.get("symbol")
+                        if sym:
+                            syms.add(sym)
+                except (TypeError, ValueError):
+                    continue
+        self._open_pos_memo[exchange] = (now, syms)
+        return syms
+
+    def _schedule_swr_refresh(
+        self,
+        series,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
+        gaps,
+        ex_cfg: dict,
+        tf_ms: int,
+        priority: int = TokenBucket.LOW,
+    ) -> None:
+        """Fire a background gap-fill for a series we just served stale.
+        Deduplicated per series (one refresh in flight at a time). Runs at LOW
+        priority by default so it yields to client-blocking cold fetches and is
+        shed first under backoff — the client already has (slightly stale) data;
+        HIGH is used for pairs the fleet holds an open position on."""
+        skey = (exchange, trading_mode, pair, timeframe, candle_type)
+        if skey in self._swr_inflight:
+            return
+        self._swr_inflight.add(skey)
+
+        async def _bg() -> None:
+            try:
+                errors, _ = await self._fill_chunks(
+                    series,
+                    exchange,
+                    trading_mode,
+                    pair,
+                    timeframe,
+                    candle_type,
+                    gaps,
+                    ex_cfg,
+                    tf_ms,
+                    priority,
+                    0.0,
+                )
+                if errors == 0:
+                    series.last_live_refresh_wall_ms = int(time.time() * 1000)
+            except Exception as e:  # never let a background task escape
+                logger.debug("SWR refresh failed %s %s: %s", pair, timeframe, e)
+            finally:
+                self._swr_inflight.discard(skey)
+
+        task = asyncio.create_task(_bg())
+        self._swr_tasks.add(task)
+        task.add_done_callback(self._swr_tasks.discard)
 
     # --------- centralized rate limiter: acquire
 
@@ -1667,6 +1852,17 @@ class Daemon:
         exchange = req.get("exchange", "hyperliquid")
         cache_key = exchange
         self.stats.positions_gets += 1
+        # Phase 5: learn the wallet address so the central fetcher can serve this
+        # exchange. Bots send it on every positions_get; recording is idempotent.
+        wallet = req.get("wallet_address")
+        if wallet and self._positions_fetch_targets.get(exchange) != wallet:
+            self._positions_fetch_targets[exchange] = wallet
+            logger.info(
+                "positions central fetch: learned %s wallet %s…%s",
+                exchange,
+                str(wallet)[:6],
+                str(wallet)[-4:],
+            )
         entry = self._positions_cache.get(cache_key)
         if entry and (time.monotonic() - entry.pushed_at) < self._positions_ttl_s:
             self.stats.positions_cache_hits += 1
@@ -2267,7 +2463,7 @@ class Daemon:
                     self.coordinator.active_count(),
                 )
             try:
-                resp = await self._handle_fetch(req)
+                resp = await self._handle_fetch(req, conn_id)
                 resp["pending_fetches"] = self._pending_fetches
                 return resp
             except Exception as e:
@@ -2392,6 +2588,50 @@ class Daemon:
                 self._shutdown_event.set()
                 return
 
+    async def _positions_fetch_client(self, exchange: str, wallet: str) -> Any:
+        """Lazily build an address-only async ccxt client for the central
+        positions fetch. No private key — clearinghouseState/info is public."""
+        client = self._positions_fetch_clients.get(exchange)
+        if client is not None:
+            return client
+        import ccxt.async_support as ccxt_async
+
+        cfg: dict[str, Any] = {"enableRateLimit": True, "walletAddress": wallet}
+        dt = ExchangeFetcher._DEFAULT_TYPE_MAP.get(exchange)
+        if dt:
+            cfg["options"] = {"defaultType": dt}
+        client = getattr(ccxt_async, exchange)(cfg)
+        self._positions_fetch_clients[exchange] = client
+        logger.info("central positions client created for %s (address-only)", exchange)
+        return client
+
+    async def _periodic_positions_fetch(self) -> None:
+        """Phase 5: fetch positions ONCE per (exchange, wallet) on a timer and
+        keep _positions_cache warm, so every bot's positions_get is a cache hit
+        instead of an /info call. Runs independently of the OHLCV fetch queue."""
+        if not self._positions_daemon_fetch_enabled:
+            return
+        interval = self._positions_daemon_fetch_interval_s
+        logger.info("central positions fetcher started (interval=%.0fs)", interval)
+        while not self._shutdown_event.is_set():
+            for exchange, wallet in list(self._positions_fetch_targets.items()):
+                try:
+                    client = await self._positions_fetch_client(exchange, wallet)
+                    positions = await client.fetch_positions()
+                    self._positions_cache[exchange] = _PositionsCacheEntry(
+                        data=positions, pushed_at=time.monotonic()
+                    )
+                    ev = self._positions_inflight.pop(exchange, None)
+                    if ev is not None:
+                        ev.set()
+                    self.stats.positions_puts += 1
+                except Exception as e:  # keep the loop alive; bots fall back locally
+                    logger.warning("central positions fetch failed for %s: %s", exchange, e)
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
+
     async def _periodic_stats(self) -> None:
         stats_interval = float(self.global_cfg.get("stats_interval_s", 60))
         while not self._shutdown_event.is_set():
@@ -2430,13 +2670,14 @@ class Daemon:
         budget_str = " | ".join(budget_lines) if budget_lines else "none"
         conn_stats = f" conn={s.total_connects}/{s.total_disconnects} peak={s.peak_clients}"
         logger.info(
-            "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) "
+            "STATS uptime=%.0fs clients=%d ohlcv=%d(%.0f%% hit) swr=%d "
             "acquire=%d tickers=%d/%d pos=%d/%d pending=%d peak=%d "
             "errors=%d%s | %s",
             uptime,
             s.active_clients,
             total,
             hit_rate,
+            s.cache_swr,
             s.acquire_total,
             s.tickers_cache_hits,
             s.tickers_requests,
@@ -2502,10 +2743,17 @@ class Daemon:
         watchdog_task = asyncio.create_task(self._idle_watchdog())
         flush_task = asyncio.create_task(self._periodic_flush())
         stats_task = asyncio.create_task(self._periodic_stats())
+        positions_task = asyncio.create_task(self._periodic_positions_fetch())
 
         try:
             await self._shutdown_event.wait()
         finally:
+            positions_task.cancel()
+            for _c in self._positions_fetch_clients.values():
+                try:
+                    await _c.close()
+                except Exception:  # noqa: S110
+                    pass
             watchdog_task.cancel()
             flush_task.cancel()
             stats_task.cancel()

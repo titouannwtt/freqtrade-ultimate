@@ -47,9 +47,14 @@ GLOBAL_DEFAULTS: dict = {
     # 40 pairs x multiple timeframes, the token bucket queue can be very
     # deep on cold start. A short timeout causes cascade failure: client
     # falls back to direct ccxt, adds API pressure, 429, daemon backs
-    # off, more timeouts. 900s (15 min) lets the daemon's centralized
-    # rate limiter drain the queue even under heavy contention (100+ bots).
-    "client_timeout_s": 900,
+    # off, more timeouts.
+    # Lowered 900s -> 240s: at 900s a single "daemon busy" spike froze live
+    # bots for a full 15 min (no heartbeat, no pricing, no exit evaluation).
+    # 240s caps that stall at 4 min before falling back to direct ccxt, which
+    # is a much better failure mode for live bots than a 15-min freeze. Trade-off:
+    # on a *cold start* (all bots restarting at once, very deep queue) a lower
+    # timeout can trigger fallback-to-ccxt cascade — stagger restarts to avoid it.
+    "client_timeout_s": 240,
     "client_spawn_timeout_s": 15,
     # Maximum random startup delay (seconds) applied once per client
     # singleton to stagger initial connections and avoid thundering herd
@@ -57,6 +62,66 @@ GLOBAL_DEFAULTS: dict = {
     "client_stagger_s": 30,
     # Feather flush cadence (seconds). Only writes dirty series.
     "flush_interval_s": 30,
+    # Shared positions cache TTL (seconds). All bots share one wallet, so the
+    # daemon coalesces fetch_positions into one real API call per TTL window and
+    # serves it to every bot. 15s (vs the old 3s) cuts positions API pressure
+    # ~5x while staying well under the bot-side 45s staleness guard
+    # (mixin _STALE_POSITIONS_MAX_AGE_S), which still forces a fresh CRITICAL
+    # fetch whenever a bot actually holds an open position.
+    "positions_cache_ttl_s": 15,
+    # --- Mixin-side positions refresher (see docs/dev/positions_refresher_plan_v2.md) ---
+    # A per-bot background thread that keeps the local positions cache fresh,
+    # decoupled from the OHLCV backoff, so a "daemon busy" spike can't freeze a
+    # live bot for the whole client_timeout window. Phase 1 ships the config +
+    # the monotonic cache guard; the thread/circuit-breaker land in later phases.
+    "positions_refresh_enabled": False,  # master flag — off until the refresher lands + is piloted
+    "positions_refresh_interval_s": 10,  # nominal cadence
+    "positions_refresh_jitter_pct": 0.3,  # +/-30% to desync the fleet
+    "positions_refresh_backoff_max_s": 120,  # cap on the adaptive backoff after consecutive failures
+    "positions_soft_stale_s": 45,  # cache older than this -> best-effort direct fetch
+    "positions_hard_stale_s": 90,  # circuit breaker: older than this -> refuse risky actions
+    "positions_equiv_check_interval_s": 3600,  # HL public-vs-signed field cross-check cadence
+    "positions_report_to_daemon": True,  # push refreshed positions to the shared cache (non-blocking)
+    # --- Phase 5: daemon-side central positions fetch ---
+    # The daemon fetches clearinghouseState ONCE per wallet on a timer (public
+    # /info, address-only — no private key) and serves it to every bot, instead
+    # of each bot hitting /info itself. Collapses N identical /info calls into 1,
+    # which is what saturates the endpoint once the refresher is fleet-wide. The
+    # per-bot refresher stays as the fallback (fires only if the daemon cache is
+    # stale), so there's no single point of failure. Opt-in; the daemon learns
+    # the (exchange -> wallet) target from the first positions_get carrying it.
+    # Enabled by default but DORMANT until an updated bot teaches it a wallet, so
+    # it's a no-op on daemons that only serve old-code bots (and it sidesteps the
+    # respawn race: the daemon runs whatever code is on disk regardless of which
+    # bot respawns it, but the *config* comes from resolve_global_config here).
+    "positions_daemon_fetch_enabled": True,
+    "positions_daemon_fetch_interval_s": 10,
+    # --- Stale-while-revalidate (SWR) for live OHLCV ---
+    # Under fleet-scale load the token bucket queue goes hundreds deep and a
+    # synchronous gap-fill waits past client_timeout_s (240s), freezing a live
+    # bot's whole cycle (the "CacheTimedOut / slow cycle: 240s candles" storm).
+    # When the daemon already holds a reasonably-fresh cached copy of a live
+    # series and only the recent tail is missing, it serves the cache
+    # IMMEDIATELY and fills the gap in the BACKGROUND instead of blocking the
+    # client. A candle at most a few periods stale is far better than a 240s
+    # frozen cycle; the bot re-requests next cycle and gets the refreshed copy.
+    "swr_enabled": True,
+    # Serve stale while the cached series is within this many timeframe periods
+    # of now (e.g. 8 -> a 5m series may be served up to 40m stale before a
+    # synchronous refetch). Bigger = more headroom against the client ever
+    # blocking on a fetch (the slow-cycle cause), at the cost of staler data.
+    "swr_max_stale_candles": 8,
+    # Dry-run bots tolerate more staleness: they piggyback on the cache the live
+    # bots keep warm and (below) never drive background refreshes, so they stop
+    # consuming the scarce IP fetch budget. Only a dry-EXCLUSIVE series (no live
+    # bot watching it) drifts this stale before a lazy LOW-priority refetch.
+    "swr_dry_max_stale_candles": 20,
+    # ...and only when the missing part is just the recent tail (cache still
+    # covers all but this many trailing candles). Guards against SWR-serving a
+    # series that is missing a large chunk of its requested range.
+    "swr_max_missing_tail_candles": 4,
+    # Floor on the stale-serve window so tiny timeframes still get useful slack.
+    "swr_min_stale_ms": 60000,
 }
 
 

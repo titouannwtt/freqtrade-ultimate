@@ -109,19 +109,28 @@ class DataProvider:
             and "date" in dataframe.columns
             and self._config.get("runmode") not in (RunMode.BACKTEST, RunMode.HYPEROPT)
         ):
-            last_candle_ts = dataframe.iloc[-1]["date"]
-            if hasattr(last_candle_ts, "timestamp"):
-                now = datetime.now(UTC)
-                age_seconds = (now - last_candle_ts.to_pydatetime()).total_seconds()
-                tf_seconds = timeframe_to_seconds(timeframe)
-                if age_seconds > tf_seconds * 2:
-                    last_warned = self.__last_stale_warning.get(pair_key)
-                    if last_warned is None or (now - last_warned).total_seconds() >= 3600:
-                        logger.warning(
-                            "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
-                            pair, timeframe, age_seconds, age_seconds / tf_seconds,
-                        )
-                        self.__last_stale_warning[pair_key] = now
+            # Purely cosmetic check — it must NEVER be able to break the analyze path.
+            # Incident 2026-08-02: offset-naive last_candle_ts under the replay virtual
+            # clock raised TypeError here on every tick, silently zeroing whole seeds.
+            try:
+                last_candle_ts = dataframe.iloc[-1]["date"]
+                if hasattr(last_candle_ts, "timestamp"):
+                    ts = last_candle_ts.to_pydatetime()
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    now = datetime.now(UTC)
+                    age_seconds = (now - ts).total_seconds()
+                    tf_seconds = timeframe_to_seconds(timeframe)
+                    if age_seconds > tf_seconds * 2:
+                        last_warned = self.__last_stale_warning.get(pair_key)
+                        if last_warned is None or (now - last_warned).total_seconds() >= 3600:
+                            logger.warning(
+                                "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
+                                pair, timeframe, age_seconds, age_seconds / tf_seconds,
+                            )
+                            self.__last_stale_warning[pair_key] = now
+            except Exception:
+                pass
         with self.__cached_pairs_lock:
             self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
 

@@ -6,6 +6,7 @@ import logging
 import os
 import time as time_module
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
@@ -18,7 +19,14 @@ from schedule import Scheduler
 
 from freqtrade import constants
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
-from freqtrade.constants import BuySell, Config, EntryExecuteMode, ExchangeConfig, LongShort
+from freqtrade.constants import (
+    PROCESS_THROTTLE_SECS,
+    BuySell,
+    Config,
+    EntryExecuteMode,
+    ExchangeConfig,
+    LongShort,
+)
 from freqtrade.data.converter import order_book_to_dataframe
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.enums import (
@@ -49,7 +57,7 @@ from freqtrade.fleet_coordination import PositionCoordinator
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
-from freqtrade.persistence import Order, PairLocks, Trade, init_db
+from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_db
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.plugins.protectionmanager import ProtectionManager
@@ -63,6 +71,8 @@ from freqtrade.rpc.rpc_types import (
     RPCExitCancelMsg,
     RPCExitMsg,
     RPCProtectionMsg,
+    RPCTradeSnapshotEntry,
+    RPCTradeSnapshotMsg,
 )
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
@@ -245,6 +255,58 @@ class FreqtradeBot(LoggingMixin):
             self._schedule.every().day.at("00:02").do(self.exchange.ws_connection_reset)
             self._schedule.every().day.at("00:07").do(self.wallets.record_wallet_state)
 
+            # Fork-specific: periodic WS trade-snapshot emission (see _emit_trade_snapshot).
+            # Opt-in and off by default - a bot's config must explicitly enable it.
+            api_server_conf = self.config.get("api_server", {})
+            self._trade_snapshot_enabled: bool = api_server_conf.get(
+                "ws_trade_snapshot_enabled", False
+            )
+            # Floor matches PROCESS_THROTTLE_SECS so a misconfigured (too-low/zero/negative)
+            # value can't turn this into an every-cycle emission.
+            self._trade_snapshot_throttle_secs: float = max(
+                PROCESS_THROTTLE_SECS, api_server_conf.get("ws_trade_snapshot_throttle_secs", 10)
+            )
+            self._last_trade_snapshot_emit: float = 0.0
+            # Bounds each per-trade get_rate() call in _emit_trade_snapshot(). Observed in
+            # production (2026-07-10, dry_pipeline_bb_sroc_fade_dual_v1): under fleet-wide
+            # DDosProtection, the retrier's daemon-queue wait path can legitimately take up
+            # to ~120s per retry without ever raising - so a plain except (ExchangeError,
+            # PricingError) never triggers and the call can block far longer than the
+            # cache-hit case this feature was designed around (one observed cycle stalled
+            # 620s this way). Run each call in its own thread and give up after this many
+            # seconds; the underlying call is left to finish in the background (harmless,
+            # read-only) rather than blocking the trading loop. 15s comfortably covers the
+            # slow-but-legitimate range already seen during congestion (up to ~57s total
+            # across 2-3 trades, so ~15-20s/trade) while capping the pathological case.
+            self._trade_snapshot_rate_timeout: float = 15.0
+            # Bounds the Trade.get_open_trades() call. A local, read-only SQLite query -
+            # 10s is already generous; if it takes that long the host itself is under
+            # severe strain (observed 2026-07-10: ~155s unaccounted for in one call during
+            # a fleet-wide host/DB contention episode - see _emit_trade_snapshot).
+            self._trade_snapshot_db_timeout: float = 10.0
+            # Overall ceiling for the per-trade pricing loop, independent of open-trade
+            # count, so a bot with many open trades (each hitting its own
+            # _trade_snapshot_rate_timeout) can't scale this step unboundedly. 90s covers
+            # 6 trades all timing out individually - comfortably above any bot in this
+            # fleet's max_open_trades today, purely a defense-in-depth ceiling.
+            self._trade_snapshot_loop_budget_secs: float = 90.0
+            self._trade_snapshot_executor = ThreadPoolExecutor(
+                max_workers=3, thread_name_prefix="snapshot-rate"
+            )
+
+            # Fork-specific: periodic profit-history sampling (see _record_profit_snapshot).
+            # On by default (cheap: cached rates + one local insert); 0 disables.
+            self._profit_history_interval_s: float = self.config.get(
+                "profit_history_interval_s", 300
+            )
+            self._last_profit_history_record: float = 0.0
+            retention_days = self.config.get("profit_history_retention_days", 365)
+            self._schedule.every().day.at("00:11").do(
+                lambda: ProfitHistory.prune_older_than(
+                    dt_now() - timedelta(days=retention_days)
+                )
+            )
+
             self.strategy.ft_bot_start()
             # Initialize protections AFTER bot start - otherwise parameters are not loaded.
             self.protections = ProtectionManager(self.config, self.strategy.protections)
@@ -293,6 +355,10 @@ class FreqtradeBot(LoggingMixin):
             if getattr(self, "strategy", None):
                 self.strategy.ft_bot_cleanup()
 
+        if getattr(self, "_trade_snapshot_executor", None):
+            # Don't wait for in-flight get_rate() calls - they may themselves be stuck in
+            # the same daemon-queue wait this timeout exists to route around.
+            self._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
         if getattr(self, "rpc", None):
             self.rpc.cleanup()
         if hasattr(self, "emc") and self.emc:
@@ -419,6 +485,21 @@ class FreqtradeBot(LoggingMixin):
         with self._exit_lock:
             self._schedule.run_pending()
 
+        Trade.commit()
+        self.rpc.process_msg_queue(self.dataprovider._msg_queue)
+
+        try:
+            self._emit_trade_snapshot()
+        except Exception as exc:  # never let the snapshot push break the trading loop
+            logger.debug("trade snapshot emission failed: %s", exc)
+        try:
+            self._record_profit_snapshot()
+        except Exception as exc:  # never let profit sampling break the trading loop
+            logger.debug("profit history snapshot failed: %s", exc)
+        _cp("snapshot")
+
+        # Placed after the snapshot step (not before it) so a latency regression there
+        # would actually trip this warning instead of being invisible to it.
         cycle_total = time_module.monotonic() - _cycle_t0
         if cycle_total > 10.0:
             prev = _cycle_t0
@@ -429,9 +510,127 @@ class FreqtradeBot(LoggingMixin):
             logger.warning(
                 "[cycle] slow cycle: %.1fs — %s", cycle_total, ", ".join(parts),
             )
-        Trade.commit()
-        self.rpc.process_msg_queue(self.dataprovider._msg_queue)
         self.last_process = datetime.now(UTC)
+
+    def _emit_trade_snapshot(self) -> None:
+        """
+        Fork-specific: push a periodic live profit snapshot for all open trades over the
+        WS message stream (RPCMessageType.TRADE_SNAPSHOT), throttled, so a dashboard can
+        replace REST /status polling. Opt-in via api_server.ws_trade_snapshot_enabled.
+
+        Every trade is priced independently, bounded by _trade_snapshot_rate_timeout, and
+        a pricing failure or timeout for one trade only drops that trade from the snapshot
+        - it never aborts the whole emission, and this method is only ever called from
+        within process()'s own try/except, so it can never affect trade execution
+        regardless of what goes wrong here.
+
+        Trade.get_open_trades() and the overall per-trade loop are also bounded (see
+        _trade_snapshot_db_timeout / _trade_snapshot_loop_budget_secs in __init__) -
+        observed in production (2026-07-10 23:59, dry_pipeline_bb_sroc_fade_dual_v1): a
+        single get_open_trades() call absorbed ~155s of unaccounted time during a severe,
+        fleet-wide (not snapshot-specific - another bot without this feature hit the same
+        pattern in its candle-refresh phase minutes later) host/DB contention episode,
+        pushing the whole method to 202.7s despite every get_rate() call individually
+        respecting its 15s cap. orders is eager-loaded (lazy="selectin" on Trade.orders),
+        so select_filled_orders() below is pure in-memory filtering once trades is in hand
+        - the DB call is the only other unbounded piece worth guarding.
+        """
+        if not self._trade_snapshot_enabled:
+            return
+        now = time_module.monotonic()
+        if now - self._last_trade_snapshot_emit < self._trade_snapshot_throttle_secs:
+            return
+
+        try:
+            trades_future = self._trade_snapshot_executor.submit(Trade.get_open_trades)
+            trades = trades_future.result(timeout=self._trade_snapshot_db_timeout)
+        except Exception:
+            # Can't even list open trades within budget - nothing to report this cycle.
+            return
+
+        entries: list[RPCTradeSnapshotEntry] = []
+        loop_deadline = time_module.monotonic() + self._trade_snapshot_loop_budget_secs
+        for trade in trades:
+            if time_module.monotonic() >= loop_deadline:
+                # Overall per-cycle budget exhausted (e.g. many open trades each hitting
+                # their individual timeout) - emit whatever was gathered so far rather
+                # than let this loop scale unboundedly with open-trade count.
+                break
+            if len(trade.select_filled_orders(trade.entry_side)) == 0:
+                # Entry order not filled yet - nothing meaningful to report.
+                continue
+            try:
+                # Same refresh=False semantics as _notify_exit/_rpc_trade_status: usually
+                # a cache hit, but on a cold cache (e.g. a trade sitting behind an
+                # exchange-side stoploss) this can fall through to a real ticker/orderbook
+                # call, same as the existing REST /status endpoint already does today.
+                # Bounded via the executor below: under fleet-wide rate pressure this call
+                # can legitimately take minutes without raising (daemon-queue wait), so a
+                # bare try/except on exception type alone doesn't cap the wait - see
+                # _trade_snapshot_rate_timeout's docstring in __init__.
+                future = self._trade_snapshot_executor.submit(
+                    self.exchange.get_rate,
+                    trade.pair,
+                    side="exit",
+                    is_short=trade.is_short,
+                    refresh=False,
+                )
+                current_rate = future.result(timeout=self._trade_snapshot_rate_timeout)
+            except (ExchangeError, PricingError, TimeoutError):
+                # If that call fails or times out, drop just this trade from the snapshot
+                # rather than the whole batch - this is a best-effort dashboard feed, not
+                # trade-critical. On timeout the underlying call keeps running to
+                # completion in its own thread (harmless - it's read-only) instead of
+                # blocking the trading loop.
+                continue
+            prof = trade.calculate_profit(current_rate)
+            entries.append(
+                {
+                    "trade_id": trade.id,
+                    "pair": trade.pair,
+                    "current_rate": current_rate,
+                    "profit_ratio": prof.profit_ratio,
+                    "profit_abs": prof.profit_abs,
+                    "total_profit_abs": prof.total_profit,
+                    "total_profit_ratio": prof.total_profit_ratio,
+                }
+            )
+
+        self._last_trade_snapshot_emit = now
+        msg: RPCTradeSnapshotMsg = {"type": RPCMessageType.TRADE_SNAPSHOT, "data": entries}
+        self.rpc.send_msg(msg)
+
+    def _record_profit_snapshot(self) -> None:
+        """
+        Fork-specific: persist a periodic sample of the bot's current profit
+        (closed + open unrealized) into the profit_history table, so FreqUI can draw a
+        time-accurate "profit including open positions" curve instead of projecting the
+        open book onto the end of the closed-profit curve. Throttled (default 300s),
+        rates are cache-first (refresh=False; warm right after exit_positions), and a
+        pricing failure for one trade only drops that trade from the sample.
+        """
+        if self._profit_history_interval_s <= 0:
+            return
+        now = time_module.monotonic()
+        if now - self._last_profit_history_record < self._profit_history_interval_s:
+            return
+
+        open_abs = 0.0
+        open_count = 0
+        for trade in Trade.get_open_trades():
+            if len(trade.select_filled_orders(trade.entry_side)) == 0:
+                continue
+            try:
+                rate = self.exchange.get_rate(
+                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
+                )
+            except (ExchangeError, PricingError):
+                continue
+            open_abs += trade.calculate_profit(rate).profit_abs
+            open_count += 1
+
+        ProfitHistory.record(Trade.get_total_closed_profit(), open_abs, open_count)
+        self._last_profit_history_record = now
 
     def process_stopped(self) -> None:
         """
@@ -817,6 +1016,7 @@ class FreqtradeBot(LoggingMixin):
             prev_exit_reason = trade.exit_reason
             prev_trade_state = trade.is_open
             prev_trade_amount = trade.amount
+            order_obj: Order | None = None
             for order in orders:
                 trade_order = [o for o in trade.orders if o.order_id == order["id"]]
 
@@ -861,13 +1061,17 @@ class FreqtradeBot(LoggingMixin):
                             f"Error checking for liquidation of {trade.pair}.",
                             exc_info=True,
                         )
-                trade.close_date = trade.date_last_filled_utc
-                self.order_close_notify(
-                    trade,
-                    order_obj,
-                    order_obj.ft_order_side == "stoploss",
-                    send_msg=prev_trade_state != trade.is_open,
-                )
+                if order_obj:
+                    # order_obj is only bound inside the orders loop above; guard
+                    # against the no-order-found case (reloaded old trade whose
+                    # fetch_orders returned empty) to avoid an unbound-local crash.
+                    trade.close_date = trade.date_last_filled_utc
+                    self.order_close_notify(
+                        trade,
+                        order_obj,
+                        order_obj.ft_order_side == "stoploss",
+                        send_msg=prev_trade_state != trade.is_open,
+                    )
             else:
                 trade.exit_reason = prev_exit_reason
                 total = (
@@ -1032,6 +1236,11 @@ class FreqtradeBot(LoggingMixin):
         :param trade: Trade to close
         :return: True if handled, False otherwise
         """
+        # Circuit breaker: a "position gone" reading on stale data may be a false
+        # positive (429 storm froze the cache). Don't fabricate an external close
+        # until positions are fresh — the reconciliation retries next cycle.
+        if self._positions_circuit_open(f"external close {trade.pair}"):
+            return False
         try:
             # Try to find the actual close price from recent trades on exchange
             close_price = None
@@ -1170,6 +1379,48 @@ class FreqtradeBot(LoggingMixin):
 
         return trades_created
 
+    def _positions_circuit_open(self, context: str) -> bool:
+        """Circuit breaker: True when the position cache is too stale to safely
+        take a risky action (a new entry, a fabricated external close). It is a
+        no-op — returns False — unless the mixin-side positions refresher is
+        active and its cache has aged past the hard-stale threshold (e.g. during a
+        429 storm). Exits are never gated by this: we must always be able to close.
+        """
+        check = getattr(self.exchange, "positions_are_trustworthy", None)
+        if check is None:
+            return False
+        # Fail open on anything that isn't a clean (bool, number) verdict — a
+        # circuit breaker must never block trading because of a mock/garbage
+        # value; it only engages on an explicit "not trustworthy" from a live
+        # refresher.
+        try:
+            result = check()
+        except Exception:
+            return False
+        if not (isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool)):
+            return False
+        ok, age = result
+        if ok:
+            return False
+        now = time_module.monotonic()
+        if now - getattr(self, "_pos_cb_last_warn", 0.0) > 60.0:
+            logger.warning(
+                "Positions too stale (age=%.0fs) — %s blocked until fresh", age, context
+            )
+            self._pos_cb_last_warn = now
+        req = getattr(self.exchange, "request_positions_refresh", None)
+        if req is not None:
+            req()
+        return True
+
+    def _request_positions_refresh(self) -> None:
+        """Event-driven freshness: nudge the mixin-side refresher to fetch now
+        (after an order placement the wallet position is about to change). No-op
+        when the refresher is inactive."""
+        req = getattr(self.exchange, "request_positions_refresh", None)
+        if req is not None:
+            req()
+
     def create_trade(self, pair: str) -> bool:
         """
         Check the implemented trading strategy for entry signals.
@@ -1180,6 +1431,10 @@ class FreqtradeBot(LoggingMixin):
         :return: True if a trade has been created.
         """
         logger.debug(f"create_trade for pair {pair}")
+        # Circuit breaker: never open a NEW position on stale position data — on a
+        # shared/netted wallet that risks double-entering or wrong netting.
+        if self._positions_circuit_open(f"entry {pair}"):
+            return False
 
         analyzed_df, _ = self.dataprovider.get_analyzed_dataframe(pair, self.strategy.timeframe)
         nowtime = analyzed_df.iloc[-1]["date"] if len(analyzed_df) > 0 else None
@@ -1470,6 +1725,7 @@ class FreqtradeBot(LoggingMixin):
         order_id = order["id"]
         order_status = order.get("status")
         logger.info(f"Order {order_id} was created for {pair} and status is {order_status}.")
+        self._request_positions_refresh()  # entry placed — position about to change
 
         # we assume the order is executed at the price requested
         enter_limit_filled_price = enter_limit_requested
@@ -2378,7 +2634,10 @@ class FreqtradeBot(LoggingMixin):
                 True,
             )
             Trade.commit()
-            return False
+            # Cancellation may be refused (order still open on the exchange). Return
+            # has_open_orders rather than a hard False so the caller does not place a
+            # second order on top of a surviving one (duplicate/oversized exposure).
+            return trade.has_open_orders
 
         return False
 
@@ -2701,6 +2960,7 @@ class FreqtradeBot(LoggingMixin):
         trade.exit_reason = exit_reason
 
         self._notify_exit(trade, order_type, sub_trade=bool(sub_trade_amt), order=order_obj)
+        self._request_positions_refresh()  # exit placed — position about to change
         # In case of market exit orders the order can be closed immediately
         if order.get("status", "unknown") in ("closed", "expired"):
             self.update_trade_state(trade, order_obj.order_id, order)

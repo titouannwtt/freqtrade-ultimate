@@ -163,6 +163,8 @@ class Exchange:
         "funding_fee_timeframe": "1h",
         "ccxt_futures_name": "swap",
         "needs_trading_fees": False,  # use fetch_trading_fees to cache fees
+        # ccxt "total" for the stake currency is plain wallet balance (no open-position uPnL).
+        "balance_includes_unrealized_pnl": False,
         "order_props_in_contracts": ["amount", "filled", "remaining"],
         "fetch_orders_limit_minutes": None,  # "fetch_orders" is not time-limited by default
         # Override createMarketBuyOrderRequiresPrice where ccxt has it wrong
@@ -1126,6 +1128,15 @@ class Exchange:
         """
         return self._ft_has.get(param, default)
 
+    def balance_includes_unrealized_pnl(self) -> bool:
+        """
+        Whether the stake currency's "total" balance from get_balances() is account equity
+        (wallet balance + unrealized PnL of open positions) rather than plain wallet balance.
+        When True, Wallets._strip_unrealized_pnl subtracts open-position uPnL from the stake
+        total so it is not double-counted (once in the balance, once per PositionWallet).
+        """
+        return self.get_option("balance_includes_unrealized_pnl", False)
+
     def exchange_has(self, endpoint: str) -> bool:
         """
         Checks if exchange implements a specific API endpoint.
@@ -1613,8 +1624,15 @@ class Exchange:
                     rate_for_order,
                     params,
                 )
-                if order.get("status") is None:
-                    # Map empty status to open.
+                if order.get("status") is None or (
+                    order.get("status") in ("closed", "expired")
+                    and order.get("average") is None
+                    and float(order.get("filled") or 0) != 0
+                ):
+                    # Map empty status to open — and re-map a "closed"/"expired" order that
+                    # filled but has no average price back to open, forcing a re-fetch to get
+                    # the real execution price (Hyperliquid market-order symptom). float(... or 0)
+                    # guards against filled=None on create.
                     order["status"] = "open"
 
                 if order.get("type") is None:
@@ -1974,20 +1992,33 @@ class Exchange:
                 return corder
         except InvalidOrderException:
             logger.warning(f"Could not cancel order {order_id} for {pair}.")
-        try:
-            order = self.fetch_order(order_id, pair)
-        except InvalidOrderException:
-            logger.warning(f"Could not fetch cancelled order {order_id}.")
-            order = {
-                "id": order_id,
-                "status": "canceled",
-                "amount": amount,
-                "filled": 0.0,
-                "fee": {},
-                "info": {},
-            }
-
-        return order
+        # Retry the post-cancel fetch a few times before fabricating a canceled
+        # corpse with filled=0.0: if the order actually (partially) filled and a
+        # transient error hides that, the caller will delete the trade while the
+        # position is live on the exchange — stranding it as an untracked orphan.
+        # Especially relevant on slow/illiquid venues (e.g. HIP-3 builder dexes).
+        for attempt in range(3):
+            try:
+                return self.fetch_order(order_id, pair)
+            except InvalidOrderException:
+                logger.warning(
+                    f"Could not fetch cancelled order {order_id} (attempt {attempt + 1}/3)."
+                )
+                if attempt < 2:
+                    time_module.sleep(2)
+        logger.warning(
+            f"Order {order_id} for {pair} unavailable after cancel — assuming it was "
+            "fully cancelled with no fill. If this order did fill, the position will "
+            "surface as an untracked/netted drift and must be reconciled."
+        )
+        return {
+            "id": order_id,
+            "status": "canceled",
+            "amount": amount,
+            "filled": 0.0,
+            "fee": {},
+            "info": {},
+        }
 
     def cancel_stoploss_order_with_result(
         self, order_id: str, pair: str, amount: float
@@ -4012,6 +4043,10 @@ class Exchange:
             self._log_exchange_response("set_margin_mode", res)
         except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
             raise DDosProtection(e) from e
+        except ccxt.MarginModeAlreadySet as e:
+            # Re-setting an already-set margin mode is a no-op, not an error.
+            # (subclass of BadRequest — must be caught before it.)
+            logger.debug(f"Margin mode already set for {pair}. Message: {e}")
         except (ccxt.BadRequest, ccxt.OperationRejected) as e:
             if not accept_fail:
                 raise TemporaryError(

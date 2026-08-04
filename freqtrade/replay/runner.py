@@ -46,6 +46,29 @@ logger = logging.getLogger(__name__)
 SUB_STEP_SECONDS = 60
 # Warmup buffer for indicator history before the visible replay window.
 WARMUP_GUARD_CANDLES = 50
+# Seed-mode floor: never auto-advance the replay start past (end - this) days,
+# so one very-new pair can't collapse the window to nothing.
+MIN_SEED_WINDOW_DAYS = 14
+
+
+def _resolve_wallet(config: dict, wallet: float | None) -> float:
+    """
+    Effective starting wallet for a replay: an explicit --wallet is authoritative;
+    without it, fall back to the config's dry_run_wallet so replay and other tools
+    run on the same capital (a silent hardcoded 1000 used to starve multi-position
+    configs). Any explicit override that diverges from the config is logged loudly.
+    """
+    config_wallet = config.get("dry_run_wallet")
+    if wallet is None:
+        return float(config_wallet) if config_wallet else 1000.0
+    if config_wallet and float(config_wallet) != wallet:
+        logger.warning(
+            "Replay wallet %.2f (explicit --wallet) overrides the config's "
+            "dry_run_wallet %.2f — results will not be capital-comparable.",
+            wallet,
+            float(config_wallet),
+        )
+    return wallet
 
 
 def run_replay(
@@ -57,7 +80,7 @@ def run_replay(
     config: dict | None = None,
     config_path: str | None = None,
     slippage_pct: float = 0.0005,
-    wallet: float = 1000.0,
+    wallet: float | None = None,
     db_url: str | None = None,
     datadir: str | None = None,
     fresh: bool = True,
@@ -97,13 +120,20 @@ def run_replay(
         config["db_url"] = db_url
 
     # Neutralise live-only capital accounting so the simulated wallet can trade:
-    #  - dry_run_wallet in live configs is a placeholder (the bot uses the real
-    #    wallet live); --wallet is authoritative for a replay.
-    #  - available_capital / capital_withdrawal track the real account and would
-    #    otherwise zero out the deployable capital (e.g. a past withdrawal).
+    # available_capital / capital_withdrawal track the real account and would
+    # otherwise zero out the deployable capital (e.g. a past withdrawal).
+    wallet = _resolve_wallet(config, wallet)
     config["dry_run_wallet"] = wallet
     config["available_capital"] = wallet
     config["capital_withdrawal"] = 0.0
+    # Freeze the sizing wallet: without this, paper profits over months of replay
+    # compound into total_closed_profit -> available_amount -> stake, ballooning
+    # positions (and the funding fees computed on them) into fantasy millions.
+    # Wallets honours this flag to keep replay stakes bounded by the real capital.
+    config["replay_lock_wallet"] = True
+    # Profit-history sampling stamps wall-clock time; under the virtual clock that would
+    # write misleading rows into the seeded DB - disable it for replays.
+    config["profit_history_interval_s"] = 0
 
     exchange_cfg = config.setdefault("exchange", {})
     exchange_cfg["pair_whitelist"] = list(pairs)
@@ -150,6 +180,34 @@ def run_replay(
 
     # ── 3. Data store + validation ───────────────────────────────────────
     store = ReplayDataStore(datadir, trading_mode=trading_mode, max_candles=store_cap)
+
+    # Seed mode (dry auto-launch): short-history assets (e.g. xyz indices, listed
+    # 2026-03) may lack the strategy's warmup at the requested start_date. Seed mode
+    # then drops every such pair and aborts with "None of the bot's current pairs
+    # have local data". Instead, advance the replay start so pairs that DO have data
+    # get their full warmup. Capped by MIN_SEED_WINDOW_DAYS so a single very-new pair
+    # can't shrink the replay window to nothing (those pairs are dropped as before).
+    if seed:
+        warmup_delta = timedelta(seconds=(startup + WARMUP_GUARD_CANDLES) * tf_secs)
+        ready_starts = []
+        for p in pairs:
+            rng = store.date_range(p, tf, candle_type)
+            if rng is not None:
+                ready_starts.append(rng[0] + warmup_delta)
+        if ready_starts:
+            cap = end_dt - timedelta(days=MIN_SEED_WINDOW_DAYS)
+            want = min(max(ready_starts), cap)
+            if want > start_dt:
+                logger.info(
+                    "[replay] advancing start %s -> %s so short-history pairs get "
+                    "the strategy's %d-candle warmup",
+                    start_dt.date(),
+                    want.date(),
+                    startup,
+                )
+                start_dt = want
+                data_start = start_dt - warmup_delta
+
     data_ctx = {
         "tf": tf,
         "candle_type": candle_type,
@@ -306,12 +364,19 @@ def _drive_loop(
     processed = 0
     wall_start = wall_clock()
     total_sim = (end_dt - start_dt).total_seconds()
+    ticks = 0
+    failed_ticks = 0
+    first_tick_error: Exception | None = None
 
     while current < end_dt:
         clock.advance_to(current)
+        ticks += 1
         try:
             bot.process()
         except Exception as exc:  # keep going; one bad tick shouldn't abort the run
+            failed_ticks += 1
+            if first_tick_error is None:
+                first_tick_error = exc
             logger.warning(
                 "[dry-run replay] bot.process() raised at %s: %s", current, exc, exc_info=True
             )
@@ -349,6 +414,15 @@ def _drive_loop(
                     )
 
         current += timedelta(seconds=sub_step)
+
+    # Honest completion: a run where (nearly) every tick raised is NOT "done" —
+    # it silently produced an empty book (incident 2026-08-02: 7 seeds "done" with
+    # 0 trades, 100% of ticks failing on the same exception). Fail loudly instead.
+    if ticks >= 100 and failed_ticks / ticks > 0.5:
+        raise RuntimeError(
+            f"[dry-run replay] {failed_ticks}/{ticks} ticks raised — run is not trustworthy. "
+            f"First error: {first_tick_error!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +557,14 @@ def _install_precomputed_analyze(bot, store, pairs, tf, candle_type):
             # First touch: recompute for real (also caches it), then validate the slice.
             original(pair)
             live_df = dp.get_analyzed_dataframe(pair, tf)[0]
-            sliced = _slice_to_window(full, live_df) if isinstance(live_df, pd.DataFrame) else None
+            # Guard: if the real analyze failed/produced nothing, live_df is empty and
+            # _slice_to_window would IndexError on iloc[0] — fall through to the
+            # mismatch path (per-candle recompute) instead of blowing up the tick.
+            sliced = (
+                _slice_to_window(full, live_df)
+                if isinstance(live_df, pd.DataFrame) and not live_df.empty
+                else None
+            )
             if _last_row_matches(sliced, live_df):
                 verified.add(pair)
             else:

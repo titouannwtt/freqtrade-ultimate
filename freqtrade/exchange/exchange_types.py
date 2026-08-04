@@ -58,6 +58,9 @@ class FtHas(TypedDict, total=False):
     floor_leverage: bool
     uses_leverage_tiers: bool
     needs_trading_fees: bool
+    # Whether get_balances()' stake-currency "total" is account equity (wallet balance +
+    # unrealized PnL of open positions) rather than plain wallet balance.
+    balance_includes_unrealized_pnl: bool
     order_props_in_contracts: list[Literal["amount", "cost", "filled", "remaining"]]
 
     proxy_coin_mapping: dict[str, str]

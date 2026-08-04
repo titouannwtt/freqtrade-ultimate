@@ -100,15 +100,23 @@ def detect_hyperopt_cores() -> int:
 
 
 def _parse_job_workers(args: list[str], ncpu: int) -> int:
-    """``-j N`` / ``--job-workers N`` / ``--job-workers=N`` → N; missing or negative → ncpu."""
+    """``-j N`` / ``--job-workers N`` / ``--job-workers=N`` → workers réels.
+
+    Negative values follow the joblib semantics used by hyperopt
+    (``n_jobs=-16`` → ``ncpu + 1 - 16 = 17`` workers on 32 cores), NOT "all cores".
+    Counting them as ncpu froze capacity at 0 whenever the generator ran with
+    ``-j -16`` (incident 2026-08-04: seeds starved/paused indefinitely).
+    """
     jobs: int | None = None
     for i, a in enumerate(args):
         if a in ("-j", "--job-workers") and i + 1 < len(args):
             jobs = _safe_int(args[i + 1])
         elif a.startswith("--job-workers="):
             jobs = _safe_int(a.split("=", 1)[1])
-    if jobs is None or jobs < 0:
+    if jobs is None:
         return ncpu
+    if jobs < 0:
+        return max(1, min(ncpu, ncpu + 1 + jobs))
     return min(jobs, ncpu)
 
 

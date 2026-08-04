@@ -321,8 +321,11 @@ class ReplayExchangeMixin:
             "nonce": 0,
         }
 
-        # Stoploss orders: fill at the stop price (with slippage already applied),
-        # not at candle-high which the parent's market-fill helper would use.
+        # Stoploss orders: fill at the trigger price degraded by realistic slippage.
+        # order["price"] is the stop-limit safety price (stoploss_on_exchange_limit_ratio,
+        # ~1% beyond the trigger) — live fills only reach it on violent gaps, so using it
+        # as the fill price inflated every stopped loss systematically. It remains the
+        # worst-case cap: a limit order can never fill beyond its own limit.
         if order.get("ft_order_type") == "stoploss" and order.get("status") != "closed":
             from freqtrade.misc import safe_value_fallback
 
@@ -332,7 +335,17 @@ class ReplayExchangeMixin:
             if self._dry_is_price_crossed(
                 pair, order["side"], stop_trigger, candle_book, is_stop=True
             ):
-                fill_price = order["price"]
+                adverse = (
+                    1 + self._slippage_pct if order["side"] == "buy" else 1 - self._slippage_pct
+                )
+                fill_price = stop_trigger * adverse
+                limit_price = order.get("price")
+                if limit_price:
+                    fill_price = (
+                        min(fill_price, limit_price)
+                        if order["side"] == "buy"
+                        else max(fill_price, limit_price)
+                    )
                 order.update(
                     {
                         "status": "closed",

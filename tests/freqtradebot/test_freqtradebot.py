@@ -6000,3 +6000,268 @@ def test_check_and_call_adjust_trade_position(mocker, default_conf_usdt, fee, ca
     trade = Trade.get_trades(trade_filter=[Trade.id == 5]).first()
     assert trade.orders[-1].ft_order_tag == "partial_exit_c"
     assert trade.is_open
+
+
+def _make_open_trade(fee, pair: str, order: dict) -> Trade:
+    trade = Trade(
+        pair=pair,
+        stake_amount=20.0,
+        amount=1.0,
+        amount_requested=1.0,
+        fee_open=fee.return_value,
+        fee_close=fee.return_value,
+        open_date=dt_now() - timedelta(minutes=10),
+        is_open=True,
+        open_rate=50000.0,
+        exchange="binance",
+        strategy="StrategyTestV2",
+        timeframe=5,
+        is_short=False,
+    )
+    o = Order.parse_from_ccxt_object(order, pair, "buy")
+    trade.orders.append(o)
+    Trade.session.add(trade)
+    return trade
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_gating_and_per_trade_isolation(mocker, default_conf_usdt, fee) -> None:
+    """
+    _emit_trade_snapshot() must:
+    - be a complete no-op when the feature isn't explicitly enabled (default)
+    - skip trades with no filled entry order
+    - skip a trade whose rate lookup fails, without dropping the other trades' snapshots
+    """
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+
+    def get_rate_side_effect(pair, *args, **kwargs):
+        if pair == "BTC/USDT":
+            raise PricingError("no orderbook data")
+        return 50000.0
+
+    mocker.patch(f"{EXMS}.get_rate", side_effect=get_rate_side_effect)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()  # drop the init-time WHITELIST message, irrelevant here
+
+    filled_entry = {
+        "id": "1",
+        "status": "closed",
+        "side": "buy",
+        "type": "limit",
+        "price": 50000.0,
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+    }
+    unfilled_entry = dict(filled_entry, status="open", filled=0.0, remaining=1.0)
+
+    _make_open_trade(fee, "ETH/USDT", filled_entry)  # should appear in the snapshot
+    _make_open_trade(fee, "BTC/USDT", filled_entry)  # filled, but pricing fails -> skipped
+    _make_open_trade(fee, "XRP/USDT", unfilled_entry)  # no filled entry -> skipped
+    Trade.commit()
+
+    # Disabled by default (opt-in): must not emit anything, even with open trades present.
+    assert freqtrade._trade_snapshot_enabled is False
+    freqtrade._emit_trade_snapshot()
+    rpc_mock.assert_not_called()
+
+    freqtrade._trade_snapshot_enabled = True
+    freqtrade._emit_trade_snapshot()
+
+    assert rpc_mock.call_count == 1
+    msg = rpc_mock.call_args_list[0][0][0]
+    assert msg["type"] == RPCMessageType.TRADE_SNAPSHOT
+    assert len(msg["data"]) == 1
+    assert msg["data"][0]["pair"] == "ETH/USDT"
+    assert msg["data"][0]["current_rate"] == 50000.0
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_throttle(mocker, default_conf_usdt, fee) -> None:
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch(f"{EXMS}.get_rate", return_value=50000.0)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()  # drop the init-time WHITELIST message, irrelevant here
+    freqtrade._trade_snapshot_enabled = True
+    # Comfortably longer than this test's own execution time.
+    freqtrade._trade_snapshot_throttle_secs = 100
+
+    _make_open_trade(
+        fee,
+        "ETH/USDT",
+        {
+            "id": "1",
+            "status": "closed",
+            "side": "buy",
+            "type": "limit",
+            "price": 50000.0,
+            "amount": 1.0,
+            "filled": 1.0,
+            "remaining": 0.0,
+        },
+    )
+    Trade.commit()
+
+    freqtrade._emit_trade_snapshot()
+    assert rpc_mock.call_count == 1
+
+    # A second call within the throttle window must be a no-op.
+    freqtrade._emit_trade_snapshot()
+    assert rpc_mock.call_count == 1
+
+    # Simulate the throttle window having elapsed.
+    freqtrade._last_trade_snapshot_emit = 0.0
+    freqtrade._emit_trade_snapshot()
+    assert rpc_mock.call_count == 2
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_rate_lookup_timeout(mocker, default_conf_usdt, fee) -> None:
+    """
+    A get_rate() call that hangs (e.g. stuck in the daemon-queue wait path under
+    exchange-wide rate pressure, as observed in production) must not block
+    _emit_trade_snapshot() for anywhere near that long - it should give up after
+    _trade_snapshot_rate_timeout, drop just that trade, and still emit the others.
+    """
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+
+    def get_rate_side_effect(pair, *args, **kwargs):
+        if pair == "BTC/USDT":
+            time.sleep(2)  # never raises - just very slow, like the real incident
+            return 50000.0
+        return 50000.0
+
+    mocker.patch(f"{EXMS}.get_rate", side_effect=get_rate_side_effect)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()
+    freqtrade._trade_snapshot_enabled = True
+    freqtrade._trade_snapshot_rate_timeout = 0.2  # keep the test fast
+
+    filled_entry = {
+        "id": "1",
+        "status": "closed",
+        "side": "buy",
+        "type": "limit",
+        "price": 50000.0,
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+    }
+    _make_open_trade(fee, "ETH/USDT", filled_entry)  # fast lookup -> should appear
+    _make_open_trade(fee, "BTC/USDT", filled_entry)  # slow lookup -> should be dropped
+    Trade.commit()
+
+    t0 = time.monotonic()
+    freqtrade._emit_trade_snapshot()
+    elapsed = time.monotonic() - t0
+
+    # Bounded by the timeout, not by the 2s the slow trade takes to "resolve".
+    assert elapsed < 1.5
+
+    assert rpc_mock.call_count == 1
+    msg = rpc_mock.call_args_list[0][0][0]
+    assert msg["type"] == RPCMessageType.TRADE_SNAPSHOT
+    assert len(msg["data"]) == 1
+    assert msg["data"][0]["pair"] == "ETH/USDT"
+
+    freqtrade._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_db_lookup_timeout(mocker, default_conf_usdt, fee) -> None:
+    """
+    A Trade.get_open_trades() call that hangs (e.g. severe host/DB contention, as
+    observed in production alongside a fleet-wide candle-refresh stall on an unrelated
+    bot) must not block _emit_trade_snapshot() for anywhere near that long - it should
+    give up after _trade_snapshot_db_timeout and emit nothing for that cycle, rather
+    than the whole method scaling with however long the DB call happens to take.
+    """
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch(f"{EXMS}.get_rate", return_value=50000.0)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()
+    freqtrade._trade_snapshot_enabled = True
+    freqtrade._trade_snapshot_db_timeout = 0.2  # keep the test fast
+
+    _make_open_trade(
+        fee,
+        "ETH/USDT",
+        {
+            "id": "1",
+            "status": "closed",
+            "side": "buy",
+            "type": "limit",
+            "price": 50000.0,
+            "amount": 1.0,
+            "filled": 1.0,
+            "remaining": 0.0,
+        },
+    )
+    Trade.commit()
+
+    def slow_get_open_trades():
+        time.sleep(2)
+        return Trade.get_trades_proxy(is_open=True)
+
+    mocker.patch(
+        "freqtrade.freqtradebot.Trade.get_open_trades", side_effect=slow_get_open_trades
+    )
+
+    t0 = time.monotonic()
+    freqtrade._emit_trade_snapshot()
+    elapsed = time.monotonic() - t0
+
+    # Bounded by the DB timeout, not by the 2s the lookup takes to "resolve".
+    assert elapsed < 1.5
+    rpc_mock.assert_not_called()
+
+    freqtrade._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_emit_trade_snapshot_loop_budget(mocker, default_conf_usdt, fee) -> None:
+    """
+    The overall per-trade loop must stop once _trade_snapshot_loop_budget_secs is
+    exhausted, rather than scale unboundedly with the number of open trades each
+    hitting their own per-trade timeout.
+    """
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch(f"{EXMS}.get_rate", side_effect=lambda *a, **k: time.sleep(0.3) or 50000.0)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    rpc_mock.reset_mock()
+    freqtrade._trade_snapshot_enabled = True
+    freqtrade._trade_snapshot_rate_timeout = 5.0  # would never fire on its own here
+    freqtrade._trade_snapshot_loop_budget_secs = 0.5  # exhausted after ~1-2 trades
+
+    filled_entry = {
+        "id": "1",
+        "status": "closed",
+        "side": "buy",
+        "type": "limit",
+        "price": 50000.0,
+        "amount": 1.0,
+        "filled": 1.0,
+        "remaining": 0.0,
+    }
+    for pair in ("ETH/USDT", "BTC/USDT", "LTC/USDT", "XRP/USDT"):
+        _make_open_trade(fee, pair, filled_entry)
+    Trade.commit()
+
+    freqtrade._emit_trade_snapshot()
+
+    assert rpc_mock.call_count == 1
+    msg = rpc_mock.call_args_list[0][0][0]
+    # The budget should have cut this off well before all 4 trades were priced.
+    assert len(msg["data"]) < 4
+
+    freqtrade._trade_snapshot_executor.shutdown(wait=False, cancel_futures=True)
