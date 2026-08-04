@@ -1,11 +1,12 @@
-site_name: Freqtrade
+site_name: Freqtrade Ultimate
 site_url: !ENV [READTHEDOCS_CANONICAL_URL, 'https://www.freqtrade.io/en/']
 site_description: Freqtrade is a free and open source crypto trading bot written in Python, designed to support all major exchanges and be controlled via Telegram or builtin Web UI
-repo_url: https://github.com/freqtrade/freqtrade
-edit_uri: edit/develop/docs/
+repo_url: https://github.com/titouannwtt/freqtrade-ultimate
+edit_uri: edit/main/docs/
 use_directory_urls: True
 nav:
     - Home: index.md
+    - Fork Features: FEATURES.md
     - Quickstart with Docker: docker_quickstart.md
     - Installation: installation.md
     - Freqtrade Basics: bot-basics.md
@@ -23,8 +24,10 @@ nav:
         - Web Hook: webhook-config.md
     - Data Downloading: data-download.md
     - Backtesting: backtesting.md
+    - Dry-Run Replay: dry-run-replay.md
     - Hyperopt: hyperopt.md
     - Custom Losses & Samplers: hyperopt-custom.md
+    - PlateauSampler: hyperopt-plateausampler.md
     - Walk-Forward Analysis: walk-forward-analysis.md
     - FreqAI:
         - Introduction: freqai.md
@@ -36,6 +39,7 @@ nav:
         - Developer guide: freqai-developers.md
     - Short / Leverage: leverage.md
     - Utility Sub-commands: utils.md
+    - AI Copilots: AI_USAGE.md
     - Plotting: plotting.md
     - Exchange-specific Notes: exchanges.md
     - Data Analysis:
