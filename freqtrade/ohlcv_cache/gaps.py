@@ -12,6 +12,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Gap:
     """Half-open aligned range [start_ms, end_ms) we still need to fetch."""
+
     start_ms: int
     end_ms: int  # exclusive
 
@@ -69,9 +70,7 @@ def compute_gaps(
 
     # ----- prefix gap (we need ts older than cache)
     if requested_start_ms < cached_start_ms:
-        gaps.append(
-            Gap(requested_start_ms, min(cached_start_ms, requested_end_ms))
-        )
+        gaps.append(Gap(requested_start_ms, min(cached_start_ms, requested_end_ms)))
 
     # ----- suffix gap (we need ts newer than cache) + refresh overlap
     if cached_end_exclusive < requested_end_ms:

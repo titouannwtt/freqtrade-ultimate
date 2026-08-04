@@ -8,12 +8,13 @@ Possible to change `DRAWDOWN_MULT` to penalize drawdown objective for
 individual needs.
 """
 
-import math
 from datetime import datetime
+
+from pandas import DataFrame
 
 from freqtrade.data.metrics import calculate_max_drawdown, calculate_underwater
 from freqtrade.optimize.hyperopt import IHyperOptLoss
-from pandas import DataFrame, date_range
+
 
 # smaller numbers penalize drawdowns more severely
 DRAWDOWN_MULT = 0.0025

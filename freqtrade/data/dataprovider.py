@@ -126,7 +126,10 @@ class DataProvider:
                         if last_warned is None or (now - last_warned).total_seconds() >= 3600:
                             logger.warning(
                                 "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
-                                pair, timeframe, age_seconds, age_seconds / tf_seconds,
+                                pair,
+                                timeframe,
+                                age_seconds,
+                                age_seconds / tf_seconds,
                             )
                             self.__last_stale_warning[pair_key] = now
             except Exception:

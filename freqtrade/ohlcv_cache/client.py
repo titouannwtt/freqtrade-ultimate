@@ -702,7 +702,7 @@ def _sync_ping_daemon(socket_path: str, timeout_s: float = 3.0) -> float | None:
         resp = json.loads(buf.split(b"\n", 1)[0])
         if resp.get("ok"):
             return float(resp.get("uptime_s", 0))
-    except Exception:
+    except Exception:  # noqa: S110 - probing a daemon that may simply be down
         pass
     finally:
         try:

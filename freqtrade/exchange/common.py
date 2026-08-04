@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 def _record_metric(
-    args: tuple, method_name: str, elapsed_s: float, *,
-    success: bool, error_type: str | None = None,
+    args: tuple,
+    method_name: str,
+    elapsed_s: float,
+    *,
+    success: bool,
+    error_type: str | None = None,
 ) -> None:
     if not args or not method_name:
         return
@@ -25,15 +29,17 @@ def _record_metric(
     try:
         from freqtrade.exchange.exchange_metrics import ApiCall
 
-        metrics.record(ApiCall(
-            ts=time.time(),
-            method=method_name,
-            exchange=getattr(exchange_obj, "name", "unknown"),
-            latency_ms=elapsed_s * 1000,
-            cached=False,
-            success=success,
-            error_type=error_type,
-        ))
+        metrics.record(
+            ApiCall(
+                ts=time.time(),
+                method=method_name,
+                exchange=getattr(exchange_obj, "name", "unknown"),
+                latency_ms=elapsed_s * 1000,
+                cached=False,
+                success=success,
+                error_type=error_type,
+            )
+        )
     except Exception:  # noqa: S110
         pass
 
@@ -156,7 +162,7 @@ def _report_429_to_daemon(exchange_obj, method_name: str = "") -> bool:
     try:
         report_fn(method=method_name)
         return True
-    except Exception:  # noqa: S110
+    except Exception:
         return False
 
 
@@ -189,7 +195,7 @@ async def _report_429_to_daemon_async(exchange_obj, method_name: str = "") -> bo
             timeout=5.0,
         )
         return True
-    except Exception:  # noqa: S110
+    except Exception:
         return False
 
 
@@ -227,8 +233,11 @@ def retrier_async(f):
         except TemporaryError as ex:
             error_type = "429" if isinstance(ex, DDosProtection) else "error"
             _record_metric(
-                args, _fname, time.monotonic() - t0,
-                success=False, error_type=error_type,
+                args,
+                _fname,
+                time.monotonic() - t0,
+                success=False,
+                error_type=error_type,
             )
             msg = f'{f.__name__}() returned exception: "{ex}". '
             if count > 0:
@@ -245,7 +254,8 @@ def retrier_async(f):
                         msg = ""
                     else:
                         daemon_notified = await _report_429_to_daemon_async(
-                            args[0], _fname,
+                            args[0],
+                            _fname,
                         )
                         if daemon_notified:
                             logger.info(
@@ -255,8 +265,8 @@ def retrier_async(f):
                         else:
                             backoff_delay = calculate_backoff(count + 1, API_RETRY_COUNT)
                             logger.info(
-                                "Applying DDosProtection backoff delay: "
-                                "%s (no daemon)", backoff_delay,
+                                "Applying DDosProtection backoff delay: %s (no daemon)",
+                                backoff_delay,
                             )
                             await asyncio.sleep(backoff_delay)
                 if msg:
@@ -299,14 +309,20 @@ def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
             try:
                 result = f(*args, **kwargs)
                 _record_metric(
-                    args, _fname, time.monotonic() - t0, success=True,
+                    args,
+                    _fname,
+                    time.monotonic() - t0,
+                    success=True,
                 )
                 return result
             except (TemporaryError, RetryableOrderError) as ex:
                 error_type = "429" if isinstance(ex, DDosProtection) else "error"
                 _record_metric(
-                    args, _fname, time.monotonic() - t0,
-                    success=False, error_type=error_type,
+                    args,
+                    _fname,
+                    time.monotonic() - t0,
+                    success=False,
+                    error_type=error_type,
                 )
                 msg = f'{f.__name__}() returned exception: "{ex}". '
                 if count > 0:
@@ -323,8 +339,8 @@ def retrier(_func: F | None = None, *, retries=API_RETRY_COUNT):
                         else:
                             backoff_delay = calculate_backoff(count + 1, retries)
                             logger.info(
-                                "Applying DDosProtection backoff delay: "
-                                "%s (no daemon)", backoff_delay,
+                                "Applying DDosProtection backoff delay: %s (no daemon)",
+                                backoff_delay,
                             )
                             time.sleep(backoff_delay)
                     elif isinstance(ex, RetryableOrderError):

@@ -194,25 +194,45 @@ def api_get_replay(config=Depends(get_config)):
     state = bs.get("state", "none")
 
     if state == "none":
-        return {"status": "not_started", "running": False,
-                "status_msg": "No replay has been started", "progress": 0.0}
+        return {
+            "status": "not_started",
+            "running": False,
+            "status_msg": "No replay has been started",
+            "progress": 0.0,
+        }
     if state in ("running", "queued", "paused"):
         return {
-            "status": state, "running": state == "running",
-            "status_msg": _RUNNING_MSG[state], "progress": bs.get("progress", 0.0),
-            "step": bs.get("step", ""), "db_url": bs.get("db_url"),
-            "elapsed_s": bs.get("elapsed_s"), "eta_s": bs.get("eta_s"),
+            "status": state,
+            "running": state == "running",
+            "status_msg": _RUNNING_MSG[state],
+            "progress": bs.get("progress", 0.0),
+            "step": bs.get("step", ""),
+            "db_url": bs.get("db_url"),
+            "elapsed_s": bs.get("elapsed_s"),
+            "eta_s": bs.get("eta_s"),
         }
     if state == "error":
-        return {"status": "error", "running": False,
-                "status_msg": bs.get("error") or "Replay failed",
-                "progress": bs.get("progress", 0.0), "db_url": bs.get("db_url")}
+        return {
+            "status": "error",
+            "running": False,
+            "status_msg": bs.get("error") or "Replay failed",
+            "progress": bs.get("progress", 0.0),
+            "db_url": bs.get("db_url"),
+        }
     if state == "cancelled":
-        return {"status": "not_started", "running": False,
-                "status_msg": "Replay cancelled", "progress": 0.0}
+        return {
+            "status": "not_started",
+            "running": False,
+            "status_msg": "Replay cancelled",
+            "progress": 0.0,
+        }
     return {  # done
-        "status": "done", "running": False, "status_msg": "Replay finished",
-        "progress": 1.0, "step": "finished", "db_url": bs.get("db_url"),
+        "status": "done",
+        "running": False,
+        "status_msg": "Replay finished",
+        "progress": 1.0,
+        "step": "finished",
+        "db_url": bs.get("db_url"),
         "result": bs.get("result"),
     }
 
@@ -222,8 +242,12 @@ def api_stop_replay(rpc=Depends(get_rpc)):
     """Cancel this bot's replay and resume the bot."""
     logger.info("[dry-run replay] stopping seed (user requested)")
     lifecycle.cancel_replay(rpc._freqtrade)
-    return {"status": "not_started", "running": False,
-            "status_msg": "Replay stopped/reset", "progress": 0.0}
+    return {
+        "status": "not_started",
+        "running": False,
+        "status_msg": "Replay stopped/reset",
+        "progress": 0.0,
+    }
 
 
 @router.get("/replay/queue")
@@ -238,8 +262,12 @@ def api_replay_reprioritize(req: ReplayReprioritizeRequest):
     res = cc.reprioritize(req.bot_id, req.priority)
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=res.get("error", "not found"))
-    return {"status": res.get("state", "queued"), "running": res.get("state") == "running",
-            "status_msg": "Priority updated", "progress": 0.0}
+    return {
+        "status": res.get("state", "queued"),
+        "running": res.get("state") == "running",
+        "status_msg": "Priority updated",
+        "progress": 0.0,
+    }
 
 
 @router.post("/replay/restore", response_model=ReplayResponse)

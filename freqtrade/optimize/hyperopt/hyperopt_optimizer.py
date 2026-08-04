@@ -54,6 +54,7 @@ MAX_LOSS = 100000  # just a big enough number to be bad result in loss optimizat
 
 from freqtrade.optimize.hyperopt.plateau_sampler import PlateauSampler
 
+
 optuna_samplers_dict = {
     "TPESampler": optuna.samplers.TPESampler,
     "GPSampler": optuna.samplers.GPSampler,
@@ -69,8 +70,10 @@ log_queue: Any
 
 class _NoOpLock:
     """Picklable no-op context manager replacing threading.Lock for worker processes."""
+
     def __enter__(self):
         return self
+
     def __exit__(self, *args):
         pass
 
@@ -157,15 +160,15 @@ class HyperOptimizer:
         self.backtesting.exchange.loop = None  # type: ignore
         self.backtesting.exchange._loop_lock = None  # type: ignore
         self.backtesting.exchange._cache_lock = None  # type: ignore
-        if hasattr(self.backtesting.exchange, '_metrics'):
+        if hasattr(self.backtesting.exchange, "_metrics"):
             self.backtesting.exchange._metrics._lock = None  # type: ignore
-        if hasattr(self.backtesting.exchange, '_ftcache_client'):
+        if hasattr(self.backtesting.exchange, "_ftcache_client"):
             self.backtesting.exchange._ftcache_client = None
         # self.backtesting.exchange = None  # type: ignore
         self.backtesting.pairlists = None  # type: ignore
-        if hasattr(self.backtesting.dataprovider, '_DataProvider__cached_pairs_lock'):
+        if hasattr(self.backtesting.dataprovider, "_DataProvider__cached_pairs_lock"):
             self.backtesting.dataprovider._DataProvider__cached_pairs_lock = _NoOpLock()  # type: ignore
-        if hasattr(self.backtesting.dataprovider, '_pairlists'):
+        if hasattr(self.backtesting.dataprovider, "_pairlists"):
             self.backtesting.dataprovider._pairlists = None  # type: ignore
 
     def get_strategy_name(self) -> str:
@@ -502,6 +505,7 @@ class HyperOptimizer:
                     from freqtrade.optimize.hyperopt.plateau_sampler import (
                         MIN_POINTS_PER_PARAM as CW_MIN_POINTS,
                     )
+
                     n_params_cw = len(self.dimensions)
                     epochs_cw = self.config.get("epochs", 0) or 0
                     min_budget = 1 + n_params_cw * CW_MIN_POINTS

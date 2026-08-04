@@ -111,9 +111,9 @@ logger = logging.getLogger(__name__)
 # easily (floor kicks in); a volatile param needs more leeway (fraction kicks
 # in); a peaked param (huge loss change) gets clipped to the ceiling so we
 # don't absorb clearly-worse values into a "plateau".
-PLATEAU_FLOOR = 0.01     # 1% of |loss_baseline|
+PLATEAU_FLOOR = 0.01  # 1% of |loss_baseline|
 PLATEAU_FRACTION = 0.30  # 30% of max observed loss change
-PLATEAU_CEILING = 0.15   # 15% of |loss_baseline|
+PLATEAU_CEILING = 0.15  # 15% of |loss_baseline|
 # Number of scan trials per param to consider before first tolerance
 # calibration (default ±1, ±2 = 4 trials). Tolerance is then recomputed on
 # every subsequent scan trial for that param (continuous calibration).
@@ -162,12 +162,13 @@ DEFAULT_SCAN_BUDGET_RATIO = 0.6  # → assembly gets 1 - this = 40%
 # The Top-K window is loss-relative: take all trials with loss within
 # TOP_K_LOSS_TOLERANCE × |baseline_loss| of the absolute best.
 EXPORT_TOP_K_TOLERANCE = 0.20  # 20% of |baseline_loss| of slack from best
-EXPORT_CHANGE_EPSILON = 0.01   # 1% of param range = "no change"
+EXPORT_CHANGE_EPSILON = 0.01  # 1% of param range = "no change"
 
 
 @dataclass
 class ScanMeasure:
     """A single scan trial's outcome for one parameter."""
+
     value: Any
     loss: float
     n_trades: int
@@ -178,6 +179,7 @@ class ScanMeasure:
 @dataclass
 class ParamProfile:
     """Result of the scan phase for one parameter."""
+
     name: str
     kind: str  # "ACTIVE_PLATEAU" | "FROZEN_BOWL" | "FROZEN_MONOTONIC" | "FROZEN_CATEGORICAL"
     default: Any
@@ -478,8 +480,7 @@ class PlateauSampler(BaseSampler):
         if self._total_epochs:
             assembly_target = self._total_epochs - 1 - n_scan  # 1 = baseline
             budget_msg = (
-                f" (max scan slots = {n_scan}, assembly target = "
-                f"{max(0, assembly_target)} trials)"
+                f" (max scan slots = {n_scan}, assembly target = {max(0, assembly_target)} trials)"
             )
             if assembly_target < self._assembly_random_warmup:
                 logger.warning(
@@ -528,9 +529,7 @@ class PlateauSampler(BaseSampler):
 
         return slots
 
-    def _scan_value(
-        self, dist: BaseDistribution, default: Any, step: float, offset: int
-    ) -> Any:
+    def _scan_value(self, dist: BaseDistribution, default: Any, step: float, offset: int) -> Any:
         """Compute the scan value for the given offset; None if out of range."""
         if isinstance(dist, IntDistribution):
             value = int(default) + round(offset * step)
@@ -612,7 +611,8 @@ class PlateauSampler(BaseSampler):
         # Look at completed trials in the same direction (same sign of offset)
         sign = 1 if offset > 0 else -1
         same_direction = [
-            m for m in completed
+            m
+            for m in completed
             if self._offset_for_value(param, m.value) is not None
             and (self._offset_for_value(param, m.value) or 0) * sign > 0
         ]
@@ -623,10 +623,9 @@ class PlateauSampler(BaseSampler):
         same_direction.sort(key=lambda m: abs(self._offset_for_value(param, m.value) or 0))
         for m in same_direction:
             m_offset = self._offset_for_value(param, m.value) or 0
-            in_plateau = (
-                self._is_in_plateau_loss(m.loss, tolerance)
-                and self._passes_activity_floor(m.n_trades)
-            )
+            in_plateau = self._is_in_plateau_loss(
+                m.loss, tolerance
+            ) and self._passes_activity_floor(m.n_trades)
             if not in_plateau and abs(m_offset) < abs(offset):
                 # Boundary found at m_offset, further trials in this direction are useless
                 return True
@@ -645,8 +644,9 @@ class PlateauSampler(BaseSampler):
 
         Idempotent — only adds trials not yet recorded.
         """
-        already_recorded = {m.trial_number for measures in self._scan_completed.values()
-                            for m in measures}
+        already_recorded = {
+            m.trial_number for measures in self._scan_completed.values() for m in measures
+        }
         for t in study.get_trials(deepcopy=False, states=[TrialState.COMPLETE]):
             if t.number == 0 or t.values is None:
                 continue
@@ -696,8 +696,11 @@ class PlateauSampler(BaseSampler):
         # Filter: only trials passing the activity floor contribute to tolerance
         # (low-trade trials have unreliable losses and can artificially constrain
         # the tolerance, leading to over-tight plateau detection).
-        eligible = [m for m in self._scan_completed.get(param, [])
-                    if self._passes_activity_floor(m.n_trades)]
+        eligible = [
+            m
+            for m in self._scan_completed.get(param, [])
+            if self._passes_activity_floor(m.n_trades)
+        ]
         if not eligible:
             return floor  # nothing usable observed yet → use minimum
 
@@ -744,8 +747,12 @@ class PlateauSampler(BaseSampler):
         if not measures:
             # No scan data — keep default
             return ParamProfile(
-                name=name, kind="FROZEN_BOWL", default=default,
-                low=default, high=default, best_value=default,
+                name=name,
+                kind="FROZEN_BOWL",
+                default=default,
+                low=default,
+                high=default,
+                best_value=default,
                 best_loss=baseline_loss,
             )
 
@@ -753,10 +760,9 @@ class PlateauSampler(BaseSampler):
 
         # Mark in_plateau on each measure
         for m in measures:
-            m.in_plateau = (
-                self._is_in_plateau_loss(m.loss, tolerance)
-                and self._passes_activity_floor(m.n_trades)
-            )
+            m.in_plateau = self._is_in_plateau_loss(
+                m.loss, tolerance
+            ) and self._passes_activity_floor(m.n_trades)
 
         # Baseline is by definition in its own plateau
         in_plateau_values: list[Any] = [default]
@@ -774,9 +780,15 @@ class PlateauSampler(BaseSampler):
             ]
             best_value, best_loss = min(candidates, key=lambda x: x[1])
             return ParamProfile(
-                name=name, kind="ACTIVE_PLATEAU", default=default,
-                low=low, high=high, best_value=best_value, best_loss=best_loss,
-                tolerance_used=tolerance, scan_measures=measures,
+                name=name,
+                kind="ACTIVE_PLATEAU",
+                default=default,
+                low=low,
+                high=high,
+                best_value=best_value,
+                best_loss=best_loss,
+                tolerance_used=tolerance,
+                scan_measures=measures,
             )
 
         # FROZEN_BOWL: all non-default values worse than baseline → keep default
@@ -788,23 +800,38 @@ class PlateauSampler(BaseSampler):
         # Treating these as ACTIVE with default-to-best range lets TPE explore the
         # interpolation cube; baseline + scan + assembly trials all enter the
         # candidate pool and the best-loss WITH activity floor wins.
-        better_neighbors = [m for m in measures if m.loss < baseline_loss
-                            and self._passes_activity_floor(m.n_trades)]
+        better_neighbors = [
+            m
+            for m in measures
+            if m.loss < baseline_loss and self._passes_activity_floor(m.n_trades)
+        ]
         if better_neighbors:
             best = min(better_neighbors, key=lambda m: m.loss)
             low = min(default, best.value) if isinstance(default, (int, float)) else default
             high = max(default, best.value) if isinstance(default, (int, float)) else default
             return ParamProfile(
-                name=name, kind="ACTIVE_PLATEAU", default=default,
-                low=low, high=high, best_value=best.value, best_loss=best.loss,
-                tolerance_used=tolerance, scan_measures=measures,
+                name=name,
+                kind="ACTIVE_PLATEAU",
+                default=default,
+                low=low,
+                high=high,
+                best_value=best.value,
+                best_loss=best.loss,
+                tolerance_used=tolerance,
+                scan_measures=measures,
             )
 
         # FROZEN_BOWL
         return ParamProfile(
-            name=name, kind="FROZEN_BOWL", default=default,
-            low=default, high=default, best_value=default,
-            best_loss=baseline_loss, tolerance_used=tolerance, scan_measures=measures,
+            name=name,
+            kind="FROZEN_BOWL",
+            default=default,
+            low=default,
+            high=default,
+            best_value=default,
+            best_loss=baseline_loss,
+            tolerance_used=tolerance,
+            scan_measures=measures,
         )
 
     def _classify_categorical(
@@ -816,19 +843,28 @@ class PlateauSampler(BaseSampler):
     ) -> ParamProfile:
         # For categoricals: best choice = whichever has lowest loss (incl. baseline)
         candidates = [(default, baseline_loss)] + [
-            (m.value, m.loss) for m in measures
-            if self._passes_activity_floor(m.n_trades)
+            (m.value, m.loss) for m in measures if self._passes_activity_floor(m.n_trades)
         ]
         if not candidates:
             return ParamProfile(
-                name=name, kind="FROZEN_CATEGORICAL", default=default,
-                low=default, high=default, best_value=default, best_loss=baseline_loss,
+                name=name,
+                kind="FROZEN_CATEGORICAL",
+                default=default,
+                low=default,
+                high=default,
+                best_value=default,
+                best_loss=baseline_loss,
                 scan_measures=measures,
             )
         best_value, best_loss = min(candidates, key=lambda x: x[1])
         return ParamProfile(
-            name=name, kind="FROZEN_CATEGORICAL", default=default,
-            low=best_value, high=best_value, best_value=best_value, best_loss=best_loss,
+            name=name,
+            kind="FROZEN_CATEGORICAL",
+            default=default,
+            low=best_value,
+            high=best_value,
+            best_value=best_value,
+            best_loss=best_loss,
             scan_measures=measures,
         )
 
@@ -843,8 +879,9 @@ class PlateauSampler(BaseSampler):
             if not isinstance(dist, CategoricalDistribution):
                 continue
             choices = list(dist.choices)
-            all_numeric = all(isinstance(c, (int, float)) and not isinstance(c, bool)
-                              for c in choices)
+            all_numeric = all(
+                isinstance(c, (int, float)) and not isinstance(c, bool) for c in choices
+            )
             if all_numeric:
                 logger.warning(
                     f"PlateauSampler: parameter '{name}' is a CategoricalParameter with "
@@ -885,6 +922,7 @@ class PlateauSampler(BaseSampler):
         # a diverse pool that doesn't converge to a peak; the export logic
         # then applies Occam regularization to pick a robust trial.
         from optuna.samplers import RandomSampler
+
         self._tpe_sampler = RandomSampler(seed=self._seed)
         self._tpe_study = optuna.create_study(sampler=self._tpe_sampler, direction="minimize")
 
@@ -909,7 +947,10 @@ class PlateauSampler(BaseSampler):
             if new_low >= new_high:
                 return None
             return FloatDistribution(
-                low=new_low, high=new_high, step=dist.step, log=dist.log,
+                low=new_low,
+                high=new_high,
+                step=dist.step,
+                log=dist.log,
             )
         return None  # categoricals are frozen, never in sub_distributions
 
@@ -1005,10 +1046,15 @@ class PlateauSampler(BaseSampler):
             params.update(t.params)
             loss = float(t.values[0])
             n_changes = self._count_param_changes(params)
-            candidates.append({
-                "loss": loss, "n_changes": n_changes, "trial_number": t.number,
-                "n_trades": n_trades, "params": params,
-            })
+            candidates.append(
+                {
+                    "loss": loss,
+                    "n_changes": n_changes,
+                    "trial_number": t.number,
+                    "n_trades": n_trades,
+                    "params": params,
+                }
+            )
 
         if not candidates:
             logger.warning(
@@ -1105,8 +1151,7 @@ class PlateauSampler(BaseSampler):
         with default winning). For backward compat with the export pipeline.
         """
         return sum(
-            1 for p in self._param_profiles.values()
-            if p.is_frozen and p.best_value == p.default
+            1 for p in self._param_profiles.values() if p.is_frozen and p.best_value == p.default
         )
 
     # ── Export helpers (called by hyperopt.py) ────────────────────────

@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 from freqtrade.constants import Config
 from freqtrade.data.btanalysis.bt_fileutils import load_backtest_stats
@@ -61,7 +60,9 @@ def compute_plot_dataframe(
         else:
             return {"error": "strategy_not_found"}
 
-    trades = [t for t in strat_data.get("trades", []) if isinstance(t, dict) and t.get("pair") == pair]
+    trades = [
+        t for t in strat_data.get("trades", []) if isinstance(t, dict) and t.get("pair") == pair
+    ]
     timeframe = strat_data.get("timeframe", "5m")
     timerange_str = strat_data.get("timerange", "")
 
@@ -183,7 +184,9 @@ def compute_plot_dataframe(
 
 
 def get_backtest_pairs(
-    bt_dir: Path, filename: str, strategy: str,
+    bt_dir: Path,
+    filename: str,
+    strategy: str,
 ) -> dict[str, Any]:
     zip_path = bt_dir / f"{filename}.zip"
     json_path = bt_dir / f"{filename}.json"

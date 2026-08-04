@@ -336,9 +336,7 @@ class Hyperliquid(Exchange):
         return 0.0
 
     @retrier
-    def fetch_liquidation_fills(
-        self, pair: str, since: datetime
-    ) -> list[dict]:
+    def fetch_liquidation_fills(self, pair: str, since: datetime) -> list[dict]:
         """
         Fetch user fills for a pair and return only liquidation fills.
         On Hyperliquid, a liquidation fill has a non-null 'liquidationMarkPx' in the raw data.
@@ -363,9 +361,15 @@ class Hyperliquid(Exchange):
                         price = float(trade.get("price", liq_mark_px))
                         amount = float(trade.get("amount", 0))
                         import math
-                        if (math.isnan(liq_price) or liq_price <= 0
-                                or math.isnan(price) or price <= 0
-                                or math.isnan(amount) or amount <= 0):
+
+                        if (
+                            math.isnan(liq_price)
+                            or liq_price <= 0
+                            or math.isnan(price)
+                            or price <= 0
+                            or math.isnan(amount)
+                            or amount <= 0
+                        ):
                             logger.warning(
                                 f"Skipping malformed liquidation fill for {pair}: "
                                 f"liq_price={liq_price}, price={price}, amount={amount}"
@@ -374,19 +378,19 @@ class Hyperliquid(Exchange):
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Invalid liquidation fill data for {pair}: {e}")
                         continue
-                    liquidation_fills.append({
-                        "price": price,
-                        "amount": amount,
-                        "timestamp": trade.get("timestamp"),
-                        "side": trade.get("side"),
-                        "liq_mark_price": liq_price,
-                        "info": info,
-                    })
+                    liquidation_fills.append(
+                        {
+                            "price": price,
+                            "amount": amount,
+                            "timestamp": trade.get("timestamp"),
+                            "side": trade.get("side"),
+                            "liq_mark_price": liq_price,
+                            "info": info,
+                        }
+                    )
 
             if liquidation_fills:
-                logger.info(
-                    f"Found {len(liquidation_fills)} liquidation fill(s) for {pair}."
-                )
+                logger.info(f"Found {len(liquidation_fills)} liquidation fill(s) for {pair}.")
             return liquidation_fills
 
         except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:

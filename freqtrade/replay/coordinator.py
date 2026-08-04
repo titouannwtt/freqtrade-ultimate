@@ -562,6 +562,7 @@ def main() -> int:
 
     server = _Server(sock, _Handler)
     logger.info("listening on %s (cores=%d reserve=%d)", sock, n_cores(), CORE_RESERVE)
+
     # shutdown() must run off the main thread (it blocks until serve_forever returns);
     # calling it directly from the signal handler deadlocks → the daemon would ignore
     # SIGTERM/SIGINT and need SIGKILL. Spawn a thread to drive the graceful shutdown.

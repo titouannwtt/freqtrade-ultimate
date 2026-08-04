@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 def migrate_db(session_target: SessionType):
-
     trade_count = 0
     pairlock_count = 0
     kv_count = 0

@@ -15,12 +15,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-_DAEMON_FMT = (
-    "%(asctime)s [ftcache] %(levelname)s %(name)s: %(message)s"
-)
-_CLIENT_FMT = (
-    "%(asctime)s [ftcache-client] %(levelname)s %(name)s: %(message)s"
-)
+_DAEMON_FMT = "%(asctime)s [ftcache] %(levelname)s %(name)s: %(message)s"
+_CLIENT_FMT = "%(asctime)s [ftcache-client] %(levelname)s %(name)s: %(message)s"
 
 
 def setup_daemon_logger(log_path: str | Path | None, level: str = "INFO") -> logging.Logger:
@@ -35,7 +31,10 @@ def setup_daemon_logger(log_path: str | Path | None, level: str = "INFO") -> log
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         fh = RotatingFileHandler(
-            p, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
+            p,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
         )
         fh.setFormatter(fmt)
         logger.addHandler(fh)
@@ -53,6 +52,7 @@ def get_client_logger() -> logging.Logger:
     but prefixes records with [ftcache-client] via a custom Filter."""
     logger = logging.getLogger("ftcache.client")
     if not getattr(logger, "_ftcache_configured", False):
+
         class _PrefixFilter(logging.Filter):
             def filter(self, record: logging.LogRecord) -> bool:
                 if not record.msg.startswith("[ftcache-client]"):

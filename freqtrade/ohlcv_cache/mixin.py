@@ -158,7 +158,7 @@ class CachedExchangeMixin:
     # _pos_refresher_active (False here) so this code is inert until the lifecycle
     # wiring (phase 3) creates the thread/lock/event and flips the flag.
     _pos_refresher_active: bool = False
-    _pos_source: str = "signed"           # "hl_public" | "signed" (telemetry/creds hint)
+    _pos_source: str = "signed"  # "hl_public" | "signed" (telemetry/creds hint)
     _pos_consecutive_fail: int = 0
     _pos_interval: float = 10.0
     _pos_jitter_pct: float = 0.3
@@ -166,11 +166,11 @@ class CachedExchangeMixin:
     _pos_soft_stale: float = 45.0
     _pos_hard_stale: float = 90.0
     _pos_report_to_daemon: bool = True
-    _pos_stop: Any = None                 # threading.Event (created at start)
-    _pos_force_event: Any = None          # threading.Event (created at start)
-    _pos_lock: Any = None                 # threading.Lock (created at start)
-    _pos_thread: Any = None               # threading.Thread (created at start)
-    _pos_fetcher_api: Any = None          # dedicated ccxt client for the refresh thread
+    _pos_stop: Any = None  # threading.Event (created at start)
+    _pos_force_event: Any = None  # threading.Event (created at start)
+    _pos_lock: Any = None  # threading.Lock (created at start)
+    _pos_thread: Any = None  # threading.Thread (created at start)
+    _pos_fetcher_api: Any = None  # dedicated ccxt client for the refresh thread
     _ftcache_tickers_fresh_ts: float = 0.0
     _ftcache_last_balances: dict | None = None
     _ftcache_last_backoff_active: bool = False
@@ -448,9 +448,7 @@ class CachedExchangeMixin:
             )
         return stats
 
-    def _ftcache_save_positions(
-        self, positions: list, *, fetched_at: float | None = None
-    ) -> None:
+    def _ftcache_save_positions(self, positions: list, *, fetched_at: float | None = None) -> None:
         """Store the latest positions, rejecting out-of-order writes.
 
         ``fetched_at`` is the monotonic time captured *before* the fetch that
@@ -594,9 +592,10 @@ class CachedExchangeMixin:
         fetched_at = time.monotonic()
         # Share the IP-level backoff: the public /info call still hits the same IP
         # as the OHLCV fetches, so back off with the daemon rather than pile on.
-        if self._ftcache_last_backoff_active and (
-            time.monotonic() - self._ftcache_last_backoff_ts
-        ) < self._BACKOFF_CCXT_BLOCK_S:
+        if (
+            self._ftcache_last_backoff_active
+            and (time.monotonic() - self._ftcache_last_backoff_ts) < self._BACKOFF_CCXT_BLOCK_S
+        ):
             logger.debug("[positions-refresh] IP backoff actif — skip ce tour")
             return
         # Phase 5: prefer the daemon's central positions cache (one /info for the
@@ -672,7 +671,7 @@ class CachedExchangeMixin:
             base = self._pos_interval
             if self._pos_consecutive_fail:
                 base = min(
-                    self._pos_interval * (2 ** self._pos_consecutive_fail),
+                    self._pos_interval * (2**self._pos_consecutive_fail),
                     self._pos_backoff_max,
                 )
             jitter = base * self._pos_jitter_pct * random.uniform(-1.0, 1.0)  # noqa: S311
@@ -1000,7 +999,8 @@ class CachedExchangeMixin:
                                 self._OFFLINE_ACQUIRE_MAX_S,
                             )
                             self._ftcache_get_local_limiter().acquire(
-                                cost=cost, priority=priority,
+                                cost=cost,
+                                priority=priority,
                             )
                             return True
                         time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
@@ -1028,7 +1028,8 @@ class CachedExchangeMixin:
                             self._OFFLINE_ACQUIRE_MAX_S,
                         )
                         self._ftcache_get_local_limiter().acquire(
-                            cost=cost, priority=priority,
+                            cost=cost,
+                            priority=priority,
                         )
                         return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
@@ -1046,7 +1047,8 @@ class CachedExchangeMixin:
                             self._OFFLINE_ACQUIRE_MAX_S,
                         )
                         self._ftcache_get_local_limiter().acquire(
-                            cost=cost, priority=priority,
+                            cost=cost,
+                            priority=priority,
                         )
                         return True
                     logger.info(
@@ -1070,12 +1072,12 @@ class CachedExchangeMixin:
                 if is_offline:
                     if time.monotonic() > deadline:
                         logger.warning(
-                            "daemon unavailable after %.0fs"
-                            " — falling back to local limiter",
+                            "daemon unavailable after %.0fs — falling back to local limiter",
                             self._OFFLINE_ACQUIRE_MAX_S,
                         )
                         self._ftcache_get_local_limiter().acquire(
-                            cost=cost, priority=priority,
+                            cost=cost,
+                            priority=priority,
                         )
                         return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
@@ -1093,10 +1095,12 @@ class CachedExchangeMixin:
                         logger.warning(
                             "rate token acquire failed after %.0fs: %s"
                             " — falling back to local limiter",
-                            self._OFFLINE_ACQUIRE_MAX_S, e,
+                            self._OFFLINE_ACQUIRE_MAX_S,
+                            e,
                         )
                         self._ftcache_get_local_limiter().acquire(
-                            cost=cost, priority=priority,
+                            cost=cost,
+                            priority=priority,
                         )
                         return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
@@ -1178,11 +1182,14 @@ class CachedExchangeMixin:
                             logger.warning(
                                 "OHLCV rate token for %s failed after %.0fs"
                                 " — falling back to local limiter",
-                                pair, self._OFFLINE_ACQUIRE_MAX_S,
+                                pair,
+                                self._OFFLINE_ACQUIRE_MAX_S,
                             )
                             limiter = self._ftcache_get_local_limiter()
                             await asyncio.to_thread(
-                                limiter.acquire, 4.0, OhlcvCacheClient.LOW,
+                                limiter.acquire,
+                                4.0,
+                                OhlcvCacheClient.LOW,
                             )
                             break
                         now = time.monotonic()
@@ -1759,9 +1766,7 @@ class CachedExchangeMixin:
                 priority=OhlcvCacheClient.HIGH, cost=20.0
             ):
                 return super().fetch_ticker(pair)  # type: ignore[misc]
-            raise DDosProtection(
-                f"fetch_ticker blocked for {pair} during backoff (no stale data)"
-            )
+            raise DDosProtection(f"fetch_ticker blocked for {pair} during backoff (no stale data)")
         prio_tick = self._ftcache_init_priority(base_prio)
         if not self._ftcache_acquire_sync(priority=prio_tick, cost=20.0):
             cache_key = "fetch_tickers"

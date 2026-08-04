@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Literal, NamedTuple
 
+
 logger = logging.getLogger(__name__)
 
 from freqtrade.constants import UNLIMITED_STAKE_AMOUNT, Config, IntOrInf
@@ -58,7 +59,8 @@ class Wallets:
         except Exception as e:
             logger.warning(
                 "wallet init failed (%s) — proceeding with empty wallets, "
-                "will retry on first process cycle", e,
+                "will retry on first process cycle",
+                e,
             )
 
     def __repr__(self) -> str:
@@ -193,6 +195,7 @@ class Wallets:
 
     def _update_live(self) -> None:
         import time as _time
+
         _t0 = _time.monotonic()
         try:
             balances = self._exchange.get_balances()
@@ -214,15 +217,15 @@ class Wallets:
         try:
             positions = self._exchange.fetch_positions()
         except Exception:
-            logger.warning(
-                "Failed to fetch positions, keeping stale wallet data.", exc_info=True
-            )
+            logger.warning("Failed to fetch positions, keeping stale wallet data.", exc_info=True)
             return
         _t2 = _time.monotonic()
         if (_t2 - _t0) > 2.0:
             logger.info(
                 "[wallets] _update_live: get_balances=%.1fs, fetch_positions=%.1fs, total=%.1fs",
-                _t1 - _t0, _t2 - _t1, _t2 - _t0,
+                _t1 - _t0,
+                _t2 - _t1,
+                _t2 - _t0,
             )
         _parsed_positions = {}
         for position in positions:
@@ -352,6 +355,7 @@ class Wallets:
             logger.error(f"capital_withdrawal must be a number, got {type(val).__name__}. Using 0.")
             return 0.0
         import math
+
         if math.isnan(val) or math.isinf(val):
             logger.error(f"capital_withdrawal is {val}. Using 0.")
             return 0.0

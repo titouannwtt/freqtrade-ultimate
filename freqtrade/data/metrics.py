@@ -667,7 +667,6 @@ def calculate_pvalue(trades: pd.DataFrame) -> float:
         return 1.0
 
     # Local import: scipy is a heavy dependency, keep module import cheap.
-    from scipy import stats
 
     # One-sided test: H0 mean <= 0 vs H1 mean > 0.
     pvalue = float(stats.ttest_1samp(returns, 0.0, alternative="greater").pvalue)
@@ -694,7 +693,6 @@ def calculate_p_value(trades: pd.DataFrame, starting_balance: float) -> float:
     returns = trades["profit_abs"] / starting_balance
     if returns.std() == 0:
         return 1.0
-    from scipy import stats
 
     _, p_value = stats.ttest_1samp(returns, popmean=0)
     return float(p_value)

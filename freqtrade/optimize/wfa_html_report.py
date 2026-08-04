@@ -135,10 +135,7 @@ class WFAHTMLReport:
         if tip_fr:
             tip_body += f'<span lang="fr">{tip_fr}</span>'
         safe = display if "<" in display else html.escape(display)
-        return (
-            f'<span class="tooltip">{safe}'
-            f'<span class="tip-text">{tip_body}</span></span>'
-        )
+        return f'<span class="tooltip">{safe}<span class="tip-text">{tip_body}</span></span>'
 
     @staticmethod
     def _threshold_badge(slug: str, value: float) -> str:
@@ -1120,11 +1117,7 @@ margin-bottom:6px">{label}</div>
         tip_calmar = self._tip("calmar", "Calmar")
         tip_dd = self._tip("dd", "Max DD")
         tip_wfe = self._tip("wfe", "WFE")
-        n_profit = sum(
-            1
-            for w in windows
-            if w.get("test_metrics", {}).get("profit_pct", 0) > 0
-        )
+        n_profit = sum(1 for w in windows if w.get("test_metrics", {}).get("profit_pct", 0) > 0)
         pct_profit = n_profit / len(windows) if windows else 0
         if pct_profit >= 0.8:
             adv = self._advisory(
@@ -1402,8 +1395,7 @@ margin-bottom:6px">{label}</div>
             )
         return self._advisory(
             "warn",
-            f"Average profit degradation {avg:+.0%} — "
-            f"moderate. Some in-sample edge is lost OOS.",
+            f"Average profit degradation {avg:+.0%} — moderate. Some in-sample edge is lost OOS.",
             f"Dégradation profit moyenne {avg:+.0%} — "
             f"modérée. Une partie de l'edge in-sample "
             f"est perdue OOS.",
@@ -1471,9 +1463,7 @@ margin-bottom:6px">{label}</div>
 {self._holdout_advisory(profit, bm)}
 </div>"""
 
-    def _holdout_advisory(
-        self, profit: float, bm: dict
-    ) -> str:
+    def _holdout_advisory(self, profit: float, bm: dict) -> str:
         bp = bm.get("profit_pct", 0) if bm else 0
         if profit > 0 and profit > bp:
             return self._advisory(
@@ -1589,9 +1579,7 @@ margin-bottom:6px">{label}</div>
 {self._oos_aggregate_advisory(sqn, total_trades)}
 </div>"""
 
-    def _oos_aggregate_advisory(
-        self, sqn: float, total_trades: int
-    ) -> str:
+    def _oos_aggregate_advisory(self, sqn: float, total_trades: int) -> str:
         if total_trades < 50:
             return self._advisory(
                 "bad",
@@ -1617,21 +1605,15 @@ margin-bottom:6px">{label}</div>
             parts_en = []
             parts_fr = []
             if total_trades < 100:
-                parts_en.append(
-                    f"{total_trades} trades (ideally 100+)"
-                )
-                parts_fr.append(
-                    f"{total_trades} trades (ideal 100+)"
-                )
+                parts_en.append(f"{total_trades} trades (ideally 100+)")
+                parts_fr.append(f"{total_trades} trades (ideal 100+)")
             if sqn < 2:
                 parts_en.append(f"SQN {sqn:.1f} (good > 2)")
                 parts_fr.append(f"SQN {sqn:.1f} (bon > 2)")
             return self._advisory(
                 "warn",
-                "Marginal: " + ", ".join(parts_en)
-                + " (Van Tharp).",
-                "Marginal : " + ", ".join(parts_fr)
-                + " (Van Tharp).",
+                "Marginal: " + ", ".join(parts_en) + " (Van Tharp).",
+                "Marginal : " + ", ".join(parts_fr) + " (Van Tharp).",
             )
         if sqn > 5:
             return self._advisory(
@@ -1730,10 +1712,8 @@ margin-bottom:6px">{label}</div>
         if k < 0:
             return self._advisory(
                 "bad",
-                f"K-ratio {k:.2f} — equity curve trends "
-                f"downward. The strategy loses money OOS.",
-                f"K-ratio {k:.2f} — la courbe d'equity "
-                f"tend a la baisse. La strategie perd OOS.",
+                f"K-ratio {k:.2f} — equity curve trends downward. The strategy loses money OOS.",
+                f"K-ratio {k:.2f} — la courbe d'equity tend a la baisse. La strategie perd OOS.",
             )
         return self._advisory(
             "warn",
@@ -2100,9 +2080,7 @@ margin-bottom:6px">{label}</div>
 {self._regime_advisory(dep, worst)}
 </div>"""
 
-    def _regime_advisory(
-        self, dep: bool, worst: str
-    ) -> str:
+    def _regime_advisory(self, dep: bool, worst: str) -> str:
         if not dep:
             return self._advisory(
                 "good",
@@ -2349,9 +2327,7 @@ p5/p50/p95</span><br>
 {self._cpcv_advisory(prob, sharpe)}
 </div>"""
 
-    def _cpcv_advisory(
-        self, prob: float, sharpe: float
-    ) -> str:
+    def _cpcv_advisory(self, prob: float, sharpe: float) -> str:
         if prob < 0.2 and sharpe > 0.5:
             return self._advisory(
                 "good",
@@ -2494,19 +2470,12 @@ p5/p50/p95</span><br>
 {self._param_stability_advisory(stability)}
 </div>"""
 
-    def _param_stability_advisory(
-        self, stability: dict
-    ) -> str:
+    def _param_stability_advisory(self, stability: dict) -> str:
         if not stability:
             return ""
         n_total = len(stability)
-        n_stable = sum(
-            1 for v in stability.values() if v.get("stable")
-        )
-        n_unstable = sum(
-            1 for v in stability.values()
-            if v.get("unstable")
-        )
+        n_stable = sum(1 for v in stability.values() if v.get("stable"))
+        n_unstable = sum(1 for v in stability.values() if v.get("unstable"))
         ratio = n_stable / n_total if n_total else 0
         if ratio >= 0.7 and n_unstable == 0:
             return self._advisory(

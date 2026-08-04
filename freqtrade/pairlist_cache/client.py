@@ -65,15 +65,17 @@ class PairlistCacheClient:
             self._close()
             raise
 
-    def mget(
-        self, method: str, params_hash: str, pairs: list[str]
-    ) -> dict[str, dict | None]:
+    def mget(self, method: str, params_hash: str, pairs: list[str]) -> dict[str, dict | None]:
         """Batch get. Returns {pair: value_dict_or_None}."""
         try:
-            resp = self._request({
-                "op": "mget", "method": method,
-                "params_hash": params_hash, "pairs": pairs,
-            })
+            resp = self._request(
+                {
+                    "op": "mget",
+                    "method": method,
+                    "params_hash": params_hash,
+                    "pairs": pairs,
+                }
+            )
         except Exception as e:
             logger.debug("mget failed (%s), returning all misses", e)
             return {p: None for p in pairs}
@@ -88,16 +90,23 @@ class PairlistCacheClient:
         return out
 
     def mput(
-        self, method: str, params_hash: str,
-        entries: dict[str, dict], ttl: int,
+        self,
+        method: str,
+        params_hash: str,
+        entries: dict[str, dict],
+        ttl: int,
     ) -> None:
         """Batch put. entries = {pair: value_dict}."""
         try:
-            self._request({
-                "op": "mput", "method": method,
-                "params_hash": params_hash,
-                "entries": entries, "ttl": ttl,
-            })
+            self._request(
+                {
+                    "op": "mput",
+                    "method": method,
+                    "params_hash": params_hash,
+                    "entries": entries,
+                    "ttl": ttl,
+                }
+            )
         except Exception as e:
             logger.debug("mput failed (%s), ignoring", e)
 
@@ -140,6 +149,7 @@ class PairlistCacheClient:
 def _spawn_daemon(socket_path: str) -> None:
     lock_path = default_lock_path()
     import fcntl
+
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -151,9 +161,9 @@ def _spawn_daemon(socket_path: str) -> None:
 
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "freqtrade.pairlist_cache.daemon",
-             "--socket", socket_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sys.executable, "-m", "freqtrade.pairlist_cache.daemon", "--socket", socket_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
         _wait_for_socket(socket_path)

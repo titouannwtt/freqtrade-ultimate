@@ -213,9 +213,9 @@ class WFADashboard:
             trades = rm.get("total_trades", 0)
             dd = rm.get("max_drawdown_account", 0) * 100
             loss = self._ho_best.get("loss", 0)
-            best_str = f"+{profit:.1f}%  {trades} trades" f"  DD {dd:.1f}%  loss {loss:.5f}"
+            best_str = f"+{profit:.1f}%  {trades} trades  DD {dd:.1f}%  loss {loss:.5f}"
 
-        info = Text(f"  Hyperopt: {self._ho_epoch}/{self._ho_total}" f"  |  Best: {best_str}")
+        info = Text(f"  Hyperopt: {self._ho_epoch}/{self._ho_total}  |  Best: {best_str}")
 
         pbar = Progress(
             BarColumn(bar_width=None),
@@ -311,7 +311,8 @@ class WFADashboard:
         avg_calmar = float(np.mean(calmars))
 
         beats_baseline = sum(
-            1 for r in self._completed
+            1
+            for r in self._completed
             if r.test_metrics.get("profit_pct", 0)
             > r.baseline_metrics.get("profit_pct", float("-inf"))
         )
@@ -329,25 +330,25 @@ class WFADashboard:
         p_style = "green" if avg_profit > 0 else "red"
         c_style = "green" if avg_calmar > 1 else "yellow" if avg_calmar > 0 else "red"
         lines.append(Text(""))
-        lines.append(Text.assemble(
-            "  Avg profit: ",
-            (f"{avg_profit:+.1f}%", p_style),
-            "  |  Avg Calmar: ",
-            (f"{avg_calmar:.2f}", c_style),
-            f"  |  Beats baseline: {beats_baseline}/{n}",
-        ))
+        lines.append(
+            Text.assemble(
+                "  Avg profit: ",
+                (f"{avg_profit:+.1f}%", p_style),
+                "  |  Avg Calmar: ",
+                (f"{avg_calmar:.2f}", c_style),
+                f"  |  Beats baseline: {beats_baseline}/{n}",
+            )
+        )
 
         # Concentration alerts
-        high_hhi = [
-            r for r in self._completed
-            if r.test_metrics.get("hhi", 0) > 0.15
-        ]
+        high_hhi = [r for r in self._completed if r.test_metrics.get("hhi", 0) > 0.15]
         if high_hhi:
-            lines.append(Text(
-                f"  [!] {len(high_hhi)} window(s) with concentrated"
-                f" profit (HHI > 0.15)",
-                style="yellow",
-            ))
+            lines.append(
+                Text(
+                    f"  [!] {len(high_hhi)} window(s) with concentrated profit (HHI > 0.15)",
+                    style="yellow",
+                )
+            )
 
         # Emerging consensus params (top 5 most stable)
         if n >= 2:
@@ -375,9 +376,7 @@ class WFADashboard:
         if not all_params:
             return None
 
-        table = Table(
-            show_header=True, box=None, padding=(0, 2), expand=True
-        )
+        table = Table(show_header=True, box=None, padding=(0, 2), expand=True)
         table.add_column("Param", style="cyan")
         table.add_column("Median", justify="right")
         table.add_column("Spread", justify="right")

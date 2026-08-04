@@ -1305,6 +1305,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         offset = self.config.get("exchange", {}).get("outdated_offset", 5)
         if latest_date < (dt_now() - timedelta(minutes=timeframe_minutes * 2 + offset)):
             import time
+
             now_ts = time.monotonic()
             last_warned = self._outdated_warned.get(pair, 0.0)
             if now_ts - last_warned >= 3600:

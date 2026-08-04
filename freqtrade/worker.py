@@ -344,7 +344,7 @@ class Worker:
                     "Bot will retry next cycle.",
                     msg_type=RPCMessageType.EXCEPTION,
                 )
-            except Exception:
+            except Exception:  # noqa: S110 - already handling an error; never mask it
                 pass
             time.sleep(RETRY_TIMEOUT)
 

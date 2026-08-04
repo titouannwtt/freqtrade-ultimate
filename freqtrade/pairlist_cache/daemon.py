@@ -173,9 +173,7 @@ class PairlistCacheDaemon:
             method = req["method"]
             self._stats["puts"] += 1
             self._bump_method(method, "puts")
-            self._put(
-                method, req["params_hash"], req["pair"], req["value"], req.get("ttl", 3600)
-            )
+            self._put(method, req["params_hash"], req["pair"], req["value"], req.get("ttl", 3600))
             return {"req_id": rid, "ok": True}
 
         if op == "mget":
@@ -281,9 +279,16 @@ class PairlistCacheDaemon:
                 "STATS uptime=%ds clients=%d entries=%d "
                 "gets=%d hits=%d(%s%%) puts=%d "
                 "delta(gets=%d hits=%d puts=%d)",
-                uptime, self._active_clients, total_entries,
-                gets, hits, hit_pct, puts,
-                d_gets, d_hits, d_puts,
+                uptime,
+                self._active_clients,
+                total_entries,
+                gets,
+                hits,
+                hit_pct,
+                puts,
+                d_gets,
+                d_hits,
+                d_puts,
             )
 
     async def _gc(self) -> None:

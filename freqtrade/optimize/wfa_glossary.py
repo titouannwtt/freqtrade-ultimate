@@ -713,8 +713,7 @@ SAMPLER_GLOSSARY: dict[str, dict] = {
         "one_liner": "Genetic multi-objective, less diverse than III.",
         "one_liner_fr": "Génétique multi-objectif, moins divers que III.",
         "explanation": (
-            "Predecessor of NSGA-III with less sophisticated "
-            "diversity maintenance. Rarely better."
+            "Predecessor of NSGA-III with less sophisticated diversity maintenance. Rarely better."
         ),
         "explanation_fr": (
             "Prédécesseur de NSGA-III avec un maintien de "
@@ -788,12 +787,10 @@ SAMPLER_GLOSSARY: dict[str, dict] = {
             "mais lent avec beaucoup de paramètres (>10)."
         ),
         "when_to_use": (
-            "Best for strategies with few parameters (<8) "
-            "where each epoch is expensive."
+            "Best for strategies with few parameters (<8) where each epoch is expensive."
         ),
         "when_to_use_fr": (
-            "Idéal pour les stratégies avec peu de paramètres "
-            "(<8) où chaque epoch est coûteux."
+            "Idéal pour les stratégies avec peu de paramètres (<8) où chaque epoch est coûteux."
         ),
     },
     "QMCSampler": {
@@ -811,8 +808,7 @@ SAMPLER_GLOSSARY: dict[str, dict] = {
             "N'apprend pas des résultats précédents."
         ),
         "when_to_use": (
-            "Use for initial landscape mapping before "
-            "switching to a learning sampler."
+            "Use for initial landscape mapping before switching to a learning sampler."
         ),
         "when_to_use_fr": (
             "Pour cartographier l'espace de recherche "

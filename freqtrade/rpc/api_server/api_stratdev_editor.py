@@ -4,6 +4,7 @@ Strategy Dev Editor — read/write/validate config & strategy files.
 Provides file editing capabilities for the FreqUI job launcher,
 including JSON schema-driven autocompletion hints and syntax validation.
 """
+
 from __future__ import annotations
 
 import ast
@@ -25,12 +26,18 @@ router = APIRouter()
 _SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_\-\./]+$")
 
 _WRITABLE_DIRS = {
-    "custom_configs", "user_data/strategies", "live_configs", "backtest_configs",
+    "custom_configs",
+    "user_data/strategies",
+    "live_configs",
+    "backtest_configs",
 }
 
 _READABLE_DIRS = {
-    "backtest_configs", "config_examples", "live_configs",
-    "user_data", "custom_configs",
+    "backtest_configs",
+    "config_examples",
+    "live_configs",
+    "user_data",
+    "custom_configs",
 }
 
 # Config keys that hold credentials/secrets. These are redacted before the merged
@@ -38,9 +45,16 @@ _READABLE_DIRS = {
 # Format: (parent_key, leaf_key) — leaf_key None means redact the whole sub-tree.
 _SECRET_PATHS = {
     "exchange": {
-        "key", "secret", "password", "uid", "account_id",
-        "wallet_address", "private_key",
-        "ccxt_config", "ccxt_async_config", "ccxt_sync_config",
+        "key",
+        "secret",
+        "password",
+        "uid",
+        "account_id",
+        "wallet_address",
+        "private_key",
+        "ccxt_config",
+        "ccxt_async_config",
+        "ccxt_sync_config",
     },
     "telegram": {"token", "chat_id", "topic_id"},
     "api_server": {"username", "password", "jwt_secret_key", "ws_token"},
@@ -316,18 +330,21 @@ def validate_content(req: ValidateRequest):
         try:
             parsed = json.loads(req.content)
         except json.JSONDecodeError as e:
-            errors.append(DiagnosticItem(
-                line=e.lineno or 1,
-                column=e.colno or 1,
-                message=e.msg,
-                severity="error",
-            ))
+            errors.append(
+                DiagnosticItem(
+                    line=e.lineno or 1,
+                    column=e.colno or 1,
+                    message=e.msg,
+                    severity="error",
+                )
+            )
             return ValidationResult(valid=False, errors=errors)
 
         try:
             import jsonschema
 
             from freqtrade.config_schema.config_schema import CONF_SCHEMA
+
             # A config that pulls in `add_config_files` is a *partial* config: required
             # keys (exchange.name, the api_server block, …) are supplied by the inherited
             # files when freqtrade merges them at load time. Validating the entry file
@@ -340,12 +357,14 @@ def validate_content(req: ValidateRequest):
                 if inherits and err.validator == "required":
                     continue
                 path_str = ".".join(str(p) for p in err.absolute_path) or "(root)"
-                errors.append(DiagnosticItem(
-                    line=_find_key_line(req.content, err.absolute_path),
-                    column=1,
-                    message=f"{path_str}: {err.message}",
-                    severity="warning",
-                ))
+                errors.append(
+                    DiagnosticItem(
+                        line=_find_key_line(req.content, err.absolute_path),
+                        column=1,
+                        message=f"{path_str}: {err.message}",
+                        severity="warning",
+                    )
+                )
         except ImportError:
             pass
 
@@ -353,22 +372,27 @@ def validate_content(req: ValidateRequest):
         try:
             ast.parse(req.content)
         except SyntaxError as e:
-            errors.append(DiagnosticItem(
-                line=e.lineno or 1,
-                column=e.offset or 1,
-                message=e.msg,
-                severity="error",
-            ))
+            errors.append(
+                DiagnosticItem(
+                    line=e.lineno or 1,
+                    column=e.offset or 1,
+                    message=e.msg,
+                    severity="error",
+                )
+            )
             return ValidationResult(valid=False, errors=errors)
 
         lines = req.content.split("\n")
         has_istrategy = any("IStrategy" in l for l in lines)
         if not has_istrategy:
-            errors.append(DiagnosticItem(
-                line=1, column=1,
-                message="No IStrategy class found — this may not be a valid freqtrade strategy",
-                severity="warning",
-            ))
+            errors.append(
+                DiagnosticItem(
+                    line=1,
+                    column=1,
+                    message="No IStrategy class found — this may not be a valid freqtrade strategy",
+                    severity="warning",
+                )
+            )
 
     return ValidationResult(valid=len(errors) == 0, errors=errors)
 
@@ -417,32 +441,122 @@ def get_config_schema():
 def get_strategy_hints():
     return {
         "hooks": [
-            {"name": "populate_indicators", "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame", "doc": "Add technical indicators to the dataframe"},
-            {"name": "populate_entry_trend", "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame", "doc": "Define entry signal conditions"},
-            {"name": "populate_exit_trend", "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame", "doc": "Define exit signal conditions"},
-            {"name": "bot_start", "signature": "(self, **kwargs) -> None", "doc": "Called once when the bot starts"},
-            {"name": "bot_loop_start", "signature": "(self, current_time: datetime, **kwargs) -> None", "doc": "Called at the start of each trading loop iteration"},
-            {"name": "custom_stake_amount", "signature": "(self, pair: str, current_time: datetime, current_rate: float, proposed_stake: float, min_stake: float | None, max_stake: float, leverage: float, entry_tag: str | None, side: str, **kwargs) -> float", "doc": "Customize the stake amount for each trade"},
-            {"name": "custom_exit", "signature": "(self, pair: str, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, **kwargs) -> str | bool | None", "doc": "Custom exit signal logic"},
-            {"name": "adjust_trade_position", "signature": "(self, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, min_stake: float | None, max_stake: float, current_entry_rate: float, current_exit_rate: float, current_entry_profit: float, current_exit_profit: float, **kwargs) -> float | None | tuple[float | None, str | None]", "doc": "DCA: adjust position size for open trades"},
-            {"name": "confirm_trade_entry", "signature": "(self, pair: str, order_type: str, amount: float, rate: float, time_in_force: str, current_time: datetime, entry_tag: str | None, side: str, **kwargs) -> bool", "doc": "Confirm or reject a trade entry"},
-            {"name": "confirm_trade_exit", "signature": "(self, pair: str, trade: Trade, order_type: str, amount: float, rate: float, time_in_force: str, exit_reason: str, current_time: datetime, **kwargs) -> bool", "doc": "Confirm or reject a trade exit"},
-            {"name": "custom_stoploss", "signature": "(self, pair: str, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, after_fill: bool, **kwargs) -> float | None", "doc": "Dynamic stoploss based on trade state"},
-            {"name": "custom_entry_price", "signature": "(self, pair: str, trade: Trade | None, current_time: datetime, proposed_rate: float, entry_tag: str | None, side: str, **kwargs) -> float", "doc": "Custom entry price for limit orders"},
-            {"name": "custom_exit_price", "signature": "(self, pair: str, trade: Trade, current_time: datetime, proposed_rate: float, current_profit: float, exit_tag: str | None, **kwargs) -> float", "doc": "Custom exit price for limit orders"},
-            {"name": "leverage", "signature": "(self, pair: str, current_time: datetime, current_rate: float, proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str, **kwargs) -> float", "doc": "Custom leverage for futures trading"},
-            {"name": "informative_pairs", "signature": "(self) -> list[tuple[str, str]]", "doc": "Define additional pairs/timeframes to download"},
+            {
+                "name": "populate_indicators",
+                "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame",
+                "doc": "Add technical indicators to the dataframe",
+            },
+            {
+                "name": "populate_entry_trend",
+                "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame",
+                "doc": "Define entry signal conditions",
+            },
+            {
+                "name": "populate_exit_trend",
+                "signature": "(self, dataframe: DataFrame, metadata: dict) -> DataFrame",
+                "doc": "Define exit signal conditions",
+            },
+            {
+                "name": "bot_start",
+                "signature": "(self, **kwargs) -> None",
+                "doc": "Called once when the bot starts",
+            },
+            {
+                "name": "bot_loop_start",
+                "signature": "(self, current_time: datetime, **kwargs) -> None",
+                "doc": "Called at the start of each trading loop iteration",
+            },
+            {
+                "name": "custom_stake_amount",
+                "signature": "(self, pair: str, current_time: datetime, current_rate: float, proposed_stake: float, min_stake: float | None, max_stake: float, leverage: float, entry_tag: str | None, side: str, **kwargs) -> float",
+                "doc": "Customize the stake amount for each trade",
+            },
+            {
+                "name": "custom_exit",
+                "signature": "(self, pair: str, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, **kwargs) -> str | bool | None",
+                "doc": "Custom exit signal logic",
+            },
+            {
+                "name": "adjust_trade_position",
+                "signature": "(self, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, min_stake: float | None, max_stake: float, current_entry_rate: float, current_exit_rate: float, current_entry_profit: float, current_exit_profit: float, **kwargs) -> float | None | tuple[float | None, str | None]",
+                "doc": "DCA: adjust position size for open trades",
+            },
+            {
+                "name": "confirm_trade_entry",
+                "signature": "(self, pair: str, order_type: str, amount: float, rate: float, time_in_force: str, current_time: datetime, entry_tag: str | None, side: str, **kwargs) -> bool",
+                "doc": "Confirm or reject a trade entry",
+            },
+            {
+                "name": "confirm_trade_exit",
+                "signature": "(self, pair: str, trade: Trade, order_type: str, amount: float, rate: float, time_in_force: str, exit_reason: str, current_time: datetime, **kwargs) -> bool",
+                "doc": "Confirm or reject a trade exit",
+            },
+            {
+                "name": "custom_stoploss",
+                "signature": "(self, pair: str, trade: Trade, current_time: datetime, current_rate: float, current_profit: float, after_fill: bool, **kwargs) -> float | None",
+                "doc": "Dynamic stoploss based on trade state",
+            },
+            {
+                "name": "custom_entry_price",
+                "signature": "(self, pair: str, trade: Trade | None, current_time: datetime, proposed_rate: float, entry_tag: str | None, side: str, **kwargs) -> float",
+                "doc": "Custom entry price for limit orders",
+            },
+            {
+                "name": "custom_exit_price",
+                "signature": "(self, pair: str, trade: Trade, current_time: datetime, proposed_rate: float, current_profit: float, exit_tag: str | None, **kwargs) -> float",
+                "doc": "Custom exit price for limit orders",
+            },
+            {
+                "name": "leverage",
+                "signature": "(self, pair: str, current_time: datetime, current_rate: float, proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str, **kwargs) -> float",
+                "doc": "Custom leverage for futures trading",
+            },
+            {
+                "name": "informative_pairs",
+                "signature": "(self) -> list[tuple[str, str]]",
+                "doc": "Define additional pairs/timeframes to download",
+            },
         ],
         "dataframe_columns": [
-            "open", "high", "low", "close", "volume", "date",
-            "enter_long", "exit_long", "enter_short", "exit_short",
-            "enter_tag", "exit_tag",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "date",
+            "enter_long",
+            "exit_long",
+            "enter_short",
+            "exit_short",
+            "enter_tag",
+            "exit_tag",
         ],
         "common_indicators": [
-            "rsi", "ema", "sma", "wma", "dema", "tema", "kama",
-            "bollinger", "bbands", "macd", "atr", "adx", "cci",
-            "mfi", "obv", "willr", "stoch", "stochrsi", "roc",
-            "mom", "trix", "psar", "ichimoku", "vwap", "supertrend",
+            "rsi",
+            "ema",
+            "sma",
+            "wma",
+            "dema",
+            "tema",
+            "kama",
+            "bollinger",
+            "bbands",
+            "macd",
+            "atr",
+            "adx",
+            "cci",
+            "mfi",
+            "obv",
+            "willr",
+            "stoch",
+            "stochrsi",
+            "roc",
+            "mom",
+            "trix",
+            "psar",
+            "ichimoku",
+            "vwap",
+            "supertrend",
         ],
         "parameters": {
             "DecimalParameter": "(default, low, high, decimals=3, space='buy', optimize=True)",

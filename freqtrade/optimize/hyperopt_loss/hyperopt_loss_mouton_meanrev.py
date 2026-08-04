@@ -74,6 +74,7 @@ REJECT = 1e6
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _annualized_return(total_profit: float, starting_balance: float, days: int) -> float:
     if days < 30 or total_profit <= 0 or starting_balance <= 0:
         return 0.0
@@ -91,7 +92,7 @@ def _k_ratio(arr: np.ndarray) -> float:
     if slope <= 0:
         return 0.0
     residuals = arr - (slope * x + intercept)
-    ss_res = np.sum(residuals ** 2)
+    ss_res = np.sum(residuals**2)
     se_slope = np.sqrt(ss_res / (n - 2)) / np.sqrt(np.sum((x - x.mean()) ** 2))
     if se_slope < 1e-10:
         return 20.0
@@ -198,9 +199,7 @@ def _pair_diversity_score(results: DataFrame) -> float:
 
     corr_discount = 1.0
     try:
-        daily = results.assign(
-            _day=pd.to_datetime(results["close_date"], utc=True).dt.date
-        )
+        daily = results.assign(_day=pd.to_datetime(results["close_date"], utc=True).dt.date)
         pivot = daily.pivot_table(
             values="profit_abs", index="_day", columns="pair", aggfunc="sum"
         ).fillna(0)
@@ -219,6 +218,7 @@ def _pair_diversity_score(results: DataFrame) -> float:
 # ---------------------------------------------------------------------------
 # Normalisers
 # ---------------------------------------------------------------------------
+
 
 def _norm_return(v: float) -> float:
     if v <= 0:
@@ -248,6 +248,7 @@ def _norm_payoff(v: float) -> float:
 # Main class
 # ---------------------------------------------------------------------------
 
+
 class MoutonMeanRevHyperOptLoss(IHyperOptLoss):
     """
     Hyperopt loss tailored for DCA / mean-reversion strategies.
@@ -267,7 +268,6 @@ class MoutonMeanRevHyperOptLoss(IHyperOptLoss):
         starting_balance: float = 1000,
         **kwargs: Any,
     ) -> float:
-
         # --- Hard filters (with gradient for TPE) ---
         if trade_count < MIN_TRADES:
             return REJECT + (MIN_TRADES - trade_count) * 10
@@ -315,9 +315,7 @@ class MoutonMeanRevHyperOptLoss(IHyperOptLoss):
         tuw = _max_time_underwater(results, starting_balance)
         tuw_score = float(np.clip(1.0 - max(0.0, tuw - 45) / 135, 0.0, 1.0))
 
-        confidence = float(np.clip(
-            1.0 - 1.0 / np.sqrt(trade_count / MIN_TRADES), 0.0, 1.0
-        ))
+        confidence = float(np.clip(1.0 - 1.0 / np.sqrt(trade_count / MIN_TRADES), 0.0, 1.0))
 
         # --- Weighted additive composite (honest weights) ---
         composite = (

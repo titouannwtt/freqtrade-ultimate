@@ -26,6 +26,7 @@ def _get_sorted_epochs(fthypt_path: str, mtime: float) -> list[dict[str, Any]]:
     all_epochs.sort(key=lambda e: e.get("loss", 1e6))
     return all_epochs
 
+
 HYPER_PARAMS_FILE_FORMAT = rapidjson.NM_NATIVE | rapidjson.NM_NAN
 
 _FTHYPT_NAME_RE = re.compile(r"^strategy_(.+?)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.fthypt$")
@@ -38,7 +39,7 @@ def get_hyperopt_resultlist(
 ) -> dict[str, Any]:
     all_files = sorted(dirname.glob("*.fthypt"), reverse=True)
     total = len(all_files)
-    sliced = all_files[offset:offset + limit] if limit else all_files[offset:]
+    sliced = all_files[offset : offset + limit] if limit else all_files[offset:]
 
     results: list[dict[str, Any]] = []
     for fthypt in sliced:
@@ -187,7 +188,8 @@ def get_epoch_detail(dirname: Path, filename: str, rank: int) -> dict[str, Any]:
 
 
 def _compute_analytics_for_epoch(
-    epoch: dict[str, Any], rank: int = 1,
+    epoch: dict[str, Any],
+    rank: int = 1,
 ) -> dict[str, Any]:
     rm = epoch.get("results_metrics", {})
     result: dict[str, Any] = {
@@ -250,7 +252,9 @@ def _compute_analytics_for_epoch(
     if daily_profit:
         result["risk_metrics"] = _compute_risk_metrics(daily_profit, starting_balance)
         result["drawdown_calendar"] = _compute_drawdown_calendar(
-            daily_profit, starting_balance, trades,
+            daily_profit,
+            starting_balance,
+            trades,
         )
     if trades:
         result["trade_pnl_distribution"] = _compute_trade_pnl_distribution(trades)
@@ -317,7 +321,9 @@ def _compute_analytics_for_epoch(
         if not max_open:
             max_open = rm.get("max_open_trades_setting", 0) or 5
         result["capital_utilization"] = _compute_capital_utilization(
-            trades, starting_balance, int(max_open),
+            trades,
+            starting_balance,
+            int(max_open),
         )
 
     pair_data = rm.get("results_per_pair", [])
@@ -348,7 +354,9 @@ def compute_advanced_analytics(dirname: Path, filename: str) -> dict[str, Any]:
 
 
 def compute_epoch_advanced_analytics(
-    dirname: Path, filename: str, rank: int,
+    dirname: Path,
+    filename: str,
+    rank: int,
 ) -> dict[str, Any]:
     fthypt = dirname / f"{filename}.fthypt"
     if not fthypt.exists():
@@ -364,11 +372,7 @@ def compute_epoch_advanced_analytics(
     return _compute_analytics_for_epoch(all_epochs[idx], rank=rank)
 
 
-def _compute_top_drawdowns(
-    equity: list[dict], dd_series: list[dict]
-) -> list[dict[str, Any]]:
-    import math
-
+def _compute_top_drawdowns(equity: list[dict], dd_series: list[dict]) -> list[dict[str, Any]]:
     drawdowns: list[dict[str, Any]] = []
     in_dd = False
     dd_start = ""
@@ -393,27 +397,32 @@ def _compute_top_drawdowns(
                 dd_valley = date
         elif dd_pct == 0 and in_dd:
             in_dd = False
-            drawdowns.append({
-                "start": dd_start,
-                "valley": dd_valley,
-                "end": date,
-                "depth_pct": round(dd_max_depth, 2),
-            })
+            drawdowns.append(
+                {
+                    "start": dd_start,
+                    "valley": dd_valley,
+                    "end": date,
+                    "depth_pct": round(dd_max_depth, 2),
+                }
+            )
 
     if in_dd and dd_start:
-        drawdowns.append({
-            "start": dd_start,
-            "valley": dd_valley,
-            "end": dd_series[-1]["date"],
-            "depth_pct": round(dd_max_depth, 2),
-            "active": True,
-        })
+        drawdowns.append(
+            {
+                "start": dd_start,
+                "valley": dd_valley,
+                "end": dd_series[-1]["date"],
+                "depth_pct": round(dd_max_depth, 2),
+                "active": True,
+            }
+        )
 
     drawdowns.sort(key=lambda d: d["depth_pct"], reverse=True)
 
     for dd in drawdowns[:5]:
         try:
             from datetime import datetime
+
             fmt = "%Y-%m-%d"
             s = datetime.strptime(dd["start"], fmt)
             v = datetime.strptime(dd["valley"], fmt)
@@ -441,22 +450,25 @@ def _build_monthly_heatmap(monthly_data: list[dict]) -> list[dict]:
             if len(parts) >= 2:
                 year, month = int(parts[0]), int(parts[1])
         if year > 0 and month > 0:
-            results.append({
-                "year": year,
-                "month": month,
-                "profit_abs": m.get("profit_abs", 0),
-                "trades": m.get("trades", 0),
-            })
+            results.append(
+                {
+                    "year": year,
+                    "month": month,
+                    "profit_abs": m.get("profit_abs", 0),
+                    "trades": m.get("trades", 0),
+                }
+            )
     return results
 
 
 def _build_monthly_heatmap_from_daily(
-    daily_profit: list, starting_balance: float, trades: list | None = None,
+    daily_profit: list,
+    starting_balance: float,
+    trades: list | None = None,
 ) -> list[dict]:
     from collections import defaultdict
-    monthly: dict[tuple[int, int], dict] = defaultdict(
-        lambda: {"profit_abs": 0.0, "trades": 0}
-    )
+
+    monthly: dict[tuple[int, int], dict] = defaultdict(lambda: {"profit_abs": 0.0, "trades": 0})
     for date_str, pnl in daily_profit:
         parts = date_str.split("-")
         if len(parts) >= 2:
@@ -474,17 +486,24 @@ def _build_monthly_heatmap_from_daily(
                     monthly[key]["trades"] += 1
             elif isinstance(cd, (int, float)):
                 from datetime import datetime
+
                 dt = datetime.fromtimestamp(cd / 1000 if cd > 1e12 else cd)
                 monthly[(dt.year, dt.month)]["trades"] += 1
     return [
-        {"year": k[0], "month": k[1], "profit_abs": round(v["profit_abs"], 2),
-         "trades": v["trades"]}
+        {
+            "year": k[0],
+            "month": k[1],
+            "profit_abs": round(v["profit_abs"], 2),
+            "trades": v["trades"],
+        }
         for k, v in sorted(monthly.items())
     ]
 
 
 def _compute_rolling_metrics(
-    daily_profit: list, starting_balance: float, window: int = 30,
+    daily_profit: list,
+    starting_balance: float,
+    window: int = 30,
 ) -> dict[str, list]:
     import math
 
@@ -503,7 +522,7 @@ def _compute_rolling_metrics(
     rolling_volatility = []
 
     for i in range(window, n):
-        w = daily_returns[i - window: i]
+        w = daily_returns[i - window : i]
         mean_r = sum(w) / len(w)
         var_r = sum((r - mean_r) ** 2 for r in w) / len(w)
         std_r = math.sqrt(var_r) if var_r > 0 else 1e-10
@@ -512,7 +531,7 @@ def _compute_rolling_metrics(
         sharpe = (mean_r / std_r) * ann_factor if std_r > 1e-10 else 0
 
         downside = [r for r in w if r < 0]
-        ds_var = sum(r ** 2 for r in downside) / len(w) if downside else 0
+        ds_var = sum(r**2 for r in downside) / len(w) if downside else 0
         ds_std = math.sqrt(ds_var) if ds_var > 0 else 1e-10
         sortino = (mean_r / ds_std) * ann_factor if ds_std > 1e-10 else 0
 
@@ -538,7 +557,8 @@ def _compute_rolling_metrics(
 
 
 def _compute_risk_metrics(
-    daily_profit: list, starting_balance: float,
+    daily_profit: list,
+    starting_balance: float,
 ) -> dict[str, Any]:
     import math
 
@@ -560,7 +580,7 @@ def _compute_risk_metrics(
     var_95 = sorted_returns[var_idx] if var_idx < n else 0
 
     # CVaR 95% (Expected Shortfall)
-    tail = sorted_returns[:var_idx + 1] if var_idx > 0 else sorted_returns[:1]
+    tail = sorted_returns[: var_idx + 1] if var_idx > 0 else sorted_returns[:1]
     cvar_95 = sum(tail) / len(tail) if tail else 0
 
     # Omega ratio (threshold = 0)
@@ -582,7 +602,7 @@ def _compute_risk_metrics(
         if balance > peak:
             peak = balance
         dd_pct = ((peak - balance) / peak) if peak > 0 else 0
-        sum_sq_dd += dd_pct ** 2
+        sum_sq_dd += dd_pct**2
     ulcer_index = math.sqrt(sum_sq_dd / n) * 100 if n > 0 else 0
 
     # Recovery factor
@@ -757,11 +777,13 @@ def _compute_duration_scatter(trades: list) -> list[dict]:
         pair = t.get("pair", "")
         if dur is None or not isinstance(pnl, (int, float)):
             continue
-        points.append({
-            "duration": round(float(dur), 1),
-            "profit": round(float(pnl), 4),
-            "pair": pair,
-        })
+        points.append(
+            {
+                "duration": round(float(dur), 1),
+                "profit": round(float(pnl), 4),
+                "pair": pair,
+            }
+        )
     if len(points) > 1000:
         step = len(points) / 1000
         points = [points[int(i * step)] for i in range(1000)]
@@ -781,12 +803,17 @@ def _compute_duration_boxplot(trades: list) -> dict[str, Any]:
         wh = float(s[s <= q3 + 1.5 * iqr].max()) if iqr > 0 else float(s.max())
         outliers = [round(float(v), 1) for v in s if v < wl or v > wh]
         if len(outliers) > 50:
-            outliers = outliers[::len(outliers) // 50 + 1]
+            outliers = outliers[:: len(outliers) // 50 + 1]
         return {
-            "q1": round(q1, 1), "median": round(med, 1), "q3": round(q3, 1),
-            "min": round(float(s.min()), 1), "max": round(float(s.max()), 1),
-            "whisker_low": round(wl, 1), "whisker_high": round(wh, 1),
-            "outliers": outliers, "count": len(arr),
+            "q1": round(q1, 1),
+            "median": round(med, 1),
+            "q3": round(q3, 1),
+            "min": round(float(s.min()), 1),
+            "max": round(float(s.max()), 1),
+            "whisker_low": round(wl, 1),
+            "whisker_high": round(wh, 1),
+            "outliers": outliers,
+            "count": len(arr),
         }
 
     all_d, win_d, lose_d = [], [], []
@@ -808,7 +835,9 @@ def _compute_duration_boxplot(trades: list) -> dict[str, Any]:
         by_exit.setdefault(reason, []).append(d)
 
     result: dict[str, Any] = {
-        "all": _box(all_d), "winners": _box(win_d), "losers": _box(lose_d),
+        "all": _box(all_d),
+        "winners": _box(win_d),
+        "losers": _box(lose_d),
     }
     by_exit_result = {}
     for reason, durations in sorted(by_exit.items(), key=lambda x: -len(x[1]))[:8]:
@@ -821,6 +850,7 @@ def _compute_duration_boxplot(trades: list) -> dict[str, Any]:
 
 def _compute_duration_buckets(trades: list) -> list[dict]:
     import numpy as np
+
     durations_pnl: list[tuple[float, float, float]] = []
     for t in trades:
         if not isinstance(t, dict):
@@ -842,33 +872,43 @@ def _compute_duration_buckets(trades: list) -> list[dict]:
         lo, hi = boundaries[i], boundaries[i + 1]
         group = [(d, p, s) for d, p, s in durations_pnl if lo <= d < hi]
         if not group:
-            buckets.append({
-                "label": labels[i], "range_min": lo,
-                "range_max": hi if hi != float("inf") else 999999,
-                "count": 0, "avg_profit": 0, "total_profit": 0,
-                "winrate": 0, "avg_stake": 0, "avg_duration": 0,
-            })
+            buckets.append(
+                {
+                    "label": labels[i],
+                    "range_min": lo,
+                    "range_max": hi if hi != float("inf") else 999999,
+                    "count": 0,
+                    "avg_profit": 0,
+                    "total_profit": 0,
+                    "winrate": 0,
+                    "avg_stake": 0,
+                    "avg_duration": 0,
+                }
+            )
             continue
         profits = [p for _, p, _ in group]
         stakes = [s for _, _, s in group]
         durs = [d for d, _, _ in group]
         wins = sum(1 for p in profits if p > 0)
-        buckets.append({
-            "label": labels[i],
-            "range_min": lo,
-            "range_max": hi if hi != float("inf") else 999999,
-            "count": len(group),
-            "avg_profit": round(float(np.mean(profits)), 4),
-            "total_profit": round(sum(profits), 4),
-            "winrate": round(wins / len(group) * 100, 1),
-            "avg_stake": round(float(np.mean(stakes)), 2) if stakes else 0,
-            "avg_duration": round(float(np.mean(durs)), 1),
-        })
+        buckets.append(
+            {
+                "label": labels[i],
+                "range_min": lo,
+                "range_max": hi if hi != float("inf") else 999999,
+                "count": len(group),
+                "avg_profit": round(float(np.mean(profits)), 4),
+                "total_profit": round(sum(profits), 4),
+                "winrate": round(wins / len(group) * 100, 1),
+                "avg_stake": round(float(np.mean(stakes)), 2) if stakes else 0,
+                "avg_duration": round(float(np.mean(durs)), 1),
+            }
+        )
     return [b for b in buckets if b["count"] > 0]
 
 
 def _compute_stuck_trades(
-    trades: list, starting_balance: float,
+    trades: list,
+    starting_balance: float,
 ) -> dict[str, Any]:
     durations: list[tuple[float, float, dict]] = []
     for t in trades:
@@ -892,16 +932,19 @@ def _compute_stuck_trades(
     total_stake_all = sum(t.get("stake_amount", 0) or 0 for _, _, t in durations)
 
     worst = sorted(stuck, key=lambda x: x[1])[:5]
-    worst_list = [{
-        "pair": t.get("pair", ""),
-        "duration_min": round(d, 1),
-        "duration_h": round(d / 60, 1),
-        "profit": round(p, 4),
-        "stake_amount": round(t.get("stake_amount", 0) or 0, 2),
-        "is_short": t.get("is_short", False),
-        "exit_reason": t.get("exit_reason", ""),
-        "orders": len(t.get("orders", [])) if isinstance(t.get("orders"), list) else 0,
-    } for d, p, t in worst]
+    worst_list = [
+        {
+            "pair": t.get("pair", ""),
+            "duration_min": round(d, 1),
+            "duration_h": round(d / 60, 1),
+            "profit": round(p, 4),
+            "stake_amount": round(t.get("stake_amount", 0) or 0, 2),
+            "is_short": t.get("is_short", False),
+            "exit_reason": t.get("exit_reason", ""),
+            "orders": len(t.get("orders", [])) if isinstance(t.get("orders"), list) else 0,
+        }
+        for d, p, t in worst
+    ]
 
     opp_cost = 0.0
     if median_dur > 0 and stuck:
@@ -926,13 +969,13 @@ def _compute_stuck_trades(
         "median_duration_min": round(median_dur, 1),
         "stuck_count": len(stuck),
         "stuck_pct": round(len(stuck) / len(durations) * 100, 1),
-        "stuck_avg_profit": round(
-            sum(stuck_profits) / len(stuck_profits), 4
-        ) if stuck_profits else 0,
+        "stuck_avg_profit": round(sum(stuck_profits) / len(stuck_profits), 4)
+        if stuck_profits
+        else 0,
         "stuck_total_profit": round(sum(stuck_profits), 4),
-        "capital_blocked_pct": round(
-            sum(stuck_stakes) / total_stake_all * 100, 1
-        ) if total_stake_all > 0 else 0,
+        "capital_blocked_pct": round(sum(stuck_stakes) / total_stake_all * 100, 1)
+        if total_stake_all > 0
+        else 0,
         "opportunity_cost": round(opp_cost, 2),
         "funding_cost_estimate": round(funding_cost, 2),
         "worst_stuck": worst_list,
@@ -969,7 +1012,9 @@ def _compute_duration_profit_heatmap(trades: list) -> dict[str, Any]:
             per_pair[pair] = [[0] * n_pnl for _ in range(n_dur)]
         per_pair[pair][di][pi] += 1
 
-    top_pairs = sorted(per_pair.keys(), key=lambda k: sum(sum(r) for r in per_pair[k]), reverse=True)[:8]
+    top_pairs = sorted(
+        per_pair.keys(), key=lambda k: sum(sum(r) for r in per_pair[k]), reverse=True
+    )[:8]
 
     return {
         "duration_bins": dur_labels,
@@ -981,6 +1026,7 @@ def _compute_duration_profit_heatmap(trades: list) -> dict[str, Any]:
 
 def _compute_exit_reason_detail(trades: list) -> list[dict]:
     from collections import defaultdict
+
     reasons: dict[str, dict] = defaultdict(
         lambda: {"count": 0, "profit_sum": 0.0, "wins": 0, "losses": 0}
     )
@@ -1000,15 +1046,17 @@ def _compute_exit_reason_detail(trades: list) -> list[dict]:
             r["losses"] += 1
     result = []
     for reason, data in sorted(reasons.items(), key=lambda x: x[1]["count"], reverse=True):
-        result.append({
-            "reason": reason,
-            "count": data["count"],
-            "avg_profit": round(data["profit_sum"] / data["count"], 4) if data["count"] else 0,
-            "total_profit": round(data["profit_sum"], 4),
-            "wins": data["wins"],
-            "losses": data["losses"],
-            "winrate": round(data["wins"] / data["count"], 4) if data["count"] else 0,
-        })
+        result.append(
+            {
+                "reason": reason,
+                "count": data["count"],
+                "avg_profit": round(data["profit_sum"] / data["count"], 4) if data["count"] else 0,
+                "total_profit": round(data["profit_sum"], 4),
+                "wins": data["wins"],
+                "losses": data["losses"],
+                "winrate": round(data["wins"] / data["count"], 4) if data["count"] else 0,
+            }
+        )
     return result
 
 
@@ -1044,13 +1092,15 @@ def _compute_weekday_pattern(trades: list) -> dict:
         avg = round(sum(profits) / count, 4) if count else 0
         total = round(sum(profits), 4)
         wins = sum(1 for p in profits if p > 0)
-        result.append({
-            "day_index": i,
-            "trades": count,
-            "avg_profit": avg,
-            "total_profit": total,
-            "winrate": round(wins / count, 4) if count else 0,
-        })
+        result.append(
+            {
+                "day_index": i,
+                "trades": count,
+                "avg_profit": avg,
+                "total_profit": total,
+                "winrate": round(wins / count, 4) if count else 0,
+            }
+        )
     return {"days": result}
 
 
@@ -1072,13 +1122,15 @@ def _compute_cumulative_trades(trades: list, starting_balance: float) -> list[di
             date_label = close_date[:10]
         else:
             date_label = str(i)
-        points.append({
-            "index": i,
-            "date": date_label,
-            "cumulative_pct": round(cumulative, 4),
-            "balance": round(balance, 2),
-            "profit": round(float(pnl), 4),
-        })
+        points.append(
+            {
+                "index": i,
+                "date": date_label,
+                "cumulative_pct": round(cumulative, 4),
+                "balance": round(balance, 2),
+                "profit": round(float(pnl), 4),
+            }
+        )
     if len(points) > 2000:
         step = len(points) / 2000
         points = [points[int(i * step)] for i in range(2000)]
@@ -1096,23 +1148,29 @@ def _compute_rolling_winrate(trades: list, window: int = 50) -> list[dict]:
         close_date = t.get("close_date", "")
         if not isinstance(pnl, (int, float)):
             continue
-        trade_results.append({
-            "win": 1 if pnl > 0 else 0,
-            "date": close_date[:10] if isinstance(close_date, str) and len(close_date) >= 10 else "",
-        })
+        trade_results.append(
+            {
+                "win": 1 if pnl > 0 else 0,
+                "date": close_date[:10]
+                if isinstance(close_date, str) and len(close_date) >= 10
+                else "",
+            }
+        )
 
     if len(trade_results) < window:
         window = max(10, len(trade_results) // 2)
 
     points = []
     for i in range(window, len(trade_results)):
-        w = trade_results[i - window: i]
+        w = trade_results[i - window : i]
         wr = sum(x["win"] for x in w) / len(w)
-        points.append({
-            "index": i,
-            "date": trade_results[i]["date"],
-            "winrate": round(wr, 4),
-        })
+        points.append(
+            {
+                "index": i,
+                "date": trade_results[i]["date"],
+                "winrate": round(wr, 4),
+            }
+        )
 
     if len(points) > 500:
         step = len(points) / 500
@@ -1129,26 +1187,32 @@ def _compute_rolling_profit_factor(trades: list, window: int = 50) -> list[dict]
         close_date = t.get("close_date", "")
         if not isinstance(pnl, (int, float)):
             continue
-        trade_pnls.append({
-            "pnl": float(pnl),
-            "date": close_date[:10] if isinstance(close_date, str) and len(close_date) >= 10 else "",
-        })
+        trade_pnls.append(
+            {
+                "pnl": float(pnl),
+                "date": close_date[:10]
+                if isinstance(close_date, str) and len(close_date) >= 10
+                else "",
+            }
+        )
 
     if len(trade_pnls) < window:
         window = max(10, len(trade_pnls) // 2)
 
     points = []
     for i in range(window, len(trade_pnls)):
-        w = trade_pnls[i - window: i]
+        w = trade_pnls[i - window : i]
         wins = sum(x["pnl"] for x in w if x["pnl"] > 0)
         losses = abs(sum(x["pnl"] for x in w if x["pnl"] < 0))
         pf = wins / losses if losses > 0 else 10.0
         pf = min(pf, 10.0)
-        points.append({
-            "index": i,
-            "date": trade_pnls[i]["date"],
-            "profit_factor": round(pf, 3),
-        })
+        points.append(
+            {
+                "index": i,
+                "date": trade_pnls[i]["date"],
+                "profit_factor": round(pf, 3),
+            }
+        )
 
     if len(points) > 500:
         step = len(points) / 500
@@ -1233,10 +1297,12 @@ def _compute_exposure_timeline(trades: list) -> list[dict]:
     current = 0
     for dt, delta in events:
         current += delta
-        timeline.append({
-            "date": dt.strftime("%Y-%m-%d"),
-            "open_positions": current,
-        })
+        timeline.append(
+            {
+                "date": dt.strftime("%Y-%m-%d"),
+                "open_positions": current,
+            }
+        )
 
     if len(timeline) > 1000:
         step = len(timeline) / 1000
@@ -1324,17 +1390,17 @@ def _compute_return_distribution_fit(trades: list) -> dict[str, Any]:
             count = sum(1 for v in profits if edge_lo <= v <= edge_hi)
         else:
             count = sum(1 for v in profits if edge_lo <= v < edge_hi)
-        normal_density = (
-            math.exp(-0.5 * ((mid - mean) / std) ** 2) / (std * math.sqrt(2 * math.pi))
-        )
+        normal_density = math.exp(-0.5 * ((mid - mean) / std) ** 2) / (std * math.sqrt(2 * math.pi))
         expected = normal_density * bin_width * n
-        bins.append({
-            "lo": round(edge_lo, 4),
-            "hi": round(edge_hi, 4),
-            "mid": round(mid, 4),
-            "count": count,
-            "normal_expected": round(expected, 2),
-        })
+        bins.append(
+            {
+                "lo": round(edge_lo, 4),
+                "hi": round(edge_hi, 4),
+                "mid": round(mid, 4),
+                "count": count,
+                "normal_expected": round(expected, 2),
+            }
+        )
 
     return {
         "bins": bins,
@@ -1348,7 +1414,8 @@ def _compute_return_distribution_fit(trades: list) -> dict[str, Any]:
 
 
 def _compute_drawdown_calendar(
-    daily_profit: list, starting_balance: float,
+    daily_profit: list,
+    starting_balance: float,
     trades: list | None = None,
 ) -> list[dict]:
     from collections import defaultdict
@@ -1392,16 +1459,18 @@ def _compute_drawdown_calendar(
         dd_pct = ((peak - balance) / peak * 100) if peak > 0 else 0
         parts = date_str.split("-")
         if len(parts) >= 3:
-            result.append({
-                "date": date_str,
-                "year": int(parts[0]),
-                "month": int(parts[1]),
-                "day": int(parts[2]),
-                "dd_pct": round(dd_pct, 2),
-                "pnl": round(pnl, 2),
-                "trades_closed": closed_per_day.get(date_str, 0),
-                "positions_open": open_per_day.get(date_str, 0),
-            })
+            result.append(
+                {
+                    "date": date_str,
+                    "year": int(parts[0]),
+                    "month": int(parts[1]),
+                    "day": int(parts[2]),
+                    "dd_pct": round(dd_pct, 2),
+                    "pnl": round(pnl, 2),
+                    "trades_closed": closed_per_day.get(date_str, 0),
+                    "positions_open": open_per_day.get(date_str, 0),
+                }
+            )
     return result
 
 
@@ -1426,12 +1495,14 @@ def _compute_mae_mfe(trades: list) -> list[dict]:
             else:
                 mae = (min_rate - open_rate) / open_rate * 100
                 mfe = (max_rate - open_rate) / open_rate * 100
-            points.append({
-                "mae": round(float(mae), 4),
-                "mfe": round(float(mfe), 4),
-                "profit": round(float(pnl), 4),
-                "pair": t.get("pair", ""),
-            })
+            points.append(
+                {
+                    "mae": round(float(mae), 4),
+                    "mfe": round(float(mfe), 4),
+                    "profit": round(float(pnl), 4),
+                    "pair": t.get("pair", ""),
+                }
+            )
     if len(points) > 1000:
         step = len(points) / 1000
         points = [points[int(i * step)] for i in range(1000)]
@@ -1469,10 +1540,7 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
     all_losses_raw = [e.get("loss", 1e6) for e in all_epochs]
     # Filter out penalty losses (hyperopt assigns 100000 to invalid epochs)
     all_losses = [l for l in all_losses_raw if l < 100000]
-    all_dd = [
-        e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100
-        for e in all_epochs
-    ]
+    all_dd = [e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100 for e in all_epochs]
 
     param_values: dict[str, list] = {}
     for ep in top_10:
@@ -1491,13 +1559,17 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
     param_analytics = _compute_param_analytics(param_values, top_10, rm)
     param_stats = _compute_param_stats(param_values)
     param_deep_dive = _compute_param_deep_dive_inferred(
-        best.get("params_dict", {}), param_values, all_param_values, all_losses,
+        best.get("params_dict", {}),
+        param_values,
+        all_param_values,
+        all_losses,
     )
 
     n_params = len(param_values)
     total_epochs = len(all_epochs)
 
     import math
+
     exp_max_sr = math.sqrt(2 * math.log(max(total_epochs, 2)))
     observed_sharpe = rm.get("sharpe", 0.0)
     dsr_analysis = {
@@ -1524,17 +1596,14 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
             {
                 "rank": i + 1,
                 "loss": round(e.get("loss", 0), 6),
-                "profit_pct": round(
-                    e.get("results_metrics", {}).get("profit_total", 0) * 100, 2
-                ),
+                "profit_pct": round(e.get("results_metrics", {}).get("profit_total", 0) * 100, 2),
                 "trades": e.get("results_metrics", {}).get("total_trades", 0),
                 "sharpe": round(e.get("results_metrics", {}).get("sharpe", 0), 4),
                 "dd_pct": round(
-                    e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100, 2,
+                    e.get("results_metrics", {}).get("max_drawdown_account", 0) * 100,
+                    2,
                 ),
-                "winrate": round(
-                    e.get("results_metrics", {}).get("winrate", 0) * 100, 1
-                ),
+                "winrate": round(e.get("results_metrics", {}).get("winrate", 0) * 100, 1),
                 "params": e.get("params_dict", {}),
                 "results_metrics": e.get("results_metrics", {}),
             }
@@ -1555,9 +1624,7 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
         "pair_profit_distribution": trade_metrics.get("pair_profit_distribution", []),
         "best_vs_median_gap": param_analytics.get("best_vs_median_gap"),
         "param_correlation": param_analytics.get("param_correlation", []),
-        "parallel_coords": param_analytics.get(
-            "parallel_coords", {"params": [], "lines": []}
-        ),
+        "parallel_coords": param_analytics.get("parallel_coords", {"params": [], "lines": []}),
         "dispersion_bands": param_analytics.get("dispersion_bands", {}),
         "benchmark_comparison": {
             "sharpe": {
@@ -1588,7 +1655,8 @@ def compute_hyperopt_analysis(dirname: Path, filename: str) -> dict[str, Any]:
     if best_trades and daily_profit:
         result["pair_correlation_analysis"] = _compute_pair_correlation(best_trades, daily_profit)
         result["market_regime_analysis"] = _compute_market_regime_analysis(
-            best_trades, daily_profit,
+            best_trades,
+            daily_profit,
         )
 
     try:
@@ -1682,11 +1750,10 @@ def _build_loss_histogram_full(all_losses: list[float]) -> dict[str, Any] | None
         "bins": _histogram_bins(all_losses, 10),
         "best_loss": round(best, 4),
         "best_percentile": round(
-            sum(1 for v in all_losses if v > best) / max(len(all_losses), 1) * 100, 1,
+            sum(1 for v in all_losses if v > best) / max(len(all_losses), 1) * 100,
+            1,
         ),
-        "raw_losses": [round(v, 6) for v in _subsample(capped, 2000)]
-        if len(capped) > 0
-        else [],
+        "raw_losses": [round(v, 6) for v in _subsample(capped, 2000)] if len(capped) > 0 else [],
     }
 
 
@@ -1713,9 +1780,7 @@ def _compute_param_stability(param_values: dict[str, list]) -> dict[str, dict]:
 
 def _compute_trade_metrics(best_trades: list[dict]) -> dict:
     result: dict = {}
-    profit_ratios = [
-        t.get("profit_ratio", 0.0) for t in best_trades if isinstance(t, dict)
-    ]
+    profit_ratios = [t.get("profit_ratio", 0.0) for t in best_trades if isinstance(t, dict)]
     if len(profit_ratios) >= 10:
         skew, kurt = _skew_kurtosis(profit_ratios)
         result["distribution_analysis"] = {
@@ -1786,7 +1851,7 @@ def _compute_param_analytics(
     pnames = sorted(num_params.keys())
     corr: list[dict] = []
     for i, pa in enumerate(pnames):
-        for pb in pnames[i + 1:]:
+        for pb in pnames[i + 1 :]:
             r = _pearson(
                 [float(x) for x in num_params[pa]],
                 [float(x) for x in num_params[pb]],
@@ -1803,7 +1868,8 @@ def _compute_param_analytics(
             v = pd.get(pn)
             if isinstance(v, (int, float)) and vals and max(vals) > min(vals):
                 normalized[pn] = round(
-                    (float(v) - min(vals)) / (max(vals) - min(vals)), 4,
+                    (float(v) - min(vals)) / (max(vals) - min(vals)),
+                    4,
                 )
             else:
                 normalized[pn] = 0.5
@@ -1815,9 +1881,7 @@ def _compute_param_analytics(
     }
     result["parallel_coords"] = pc
 
-    top10_profits = [
-        e.get("results_metrics", {}).get("profit_total", 0.0) for e in top_10
-    ]
+    top10_profits = [e.get("results_metrics", {}).get("profit_total", 0.0) for e in top_10]
     if len(top10_profits) >= 2:
         med = statistics.median(top10_profits)
         bp = rm.get("profit_total", 0.0)
@@ -1958,7 +2022,8 @@ def _compute_param_deep_dive_inferred(
 
 
 def _compute_monte_carlo(
-    best_trades: list[dict], n_sims: int = 1000,
+    best_trades: list[dict],
+    n_sims: int = 1000,
 ) -> dict | None:
     profits = [t.get("profit_ratio", 0.0) for t in best_trades if isinstance(t, dict)]
     if len(profits) < 10:
@@ -1995,20 +2060,25 @@ def _compute_monte_carlo(
         return round(arr[min(idx, len(arr) - 1)], 2)
 
     return {
-        "p5": _pct(max_dds, 5), "p25": _pct(max_dds, 25), "p50": _pct(max_dds, 50),
-        "p75": _pct(max_dds, 75), "p95": _pct(max_dds, 95),
+        "p5": _pct(max_dds, 5),
+        "p25": _pct(max_dds, 25),
+        "p50": _pct(max_dds, 50),
+        "p75": _pct(max_dds, 75),
+        "p95": _pct(max_dds, 95),
         "mean": round(sum(max_dds) / len(max_dds), 2),
         "final_return_pct": final_return_pct,
         "n_simulations": n_sims,
         "n_trades": len(profits),
         "prob_positive": round(
-            sum(1 for dd in max_dds if dd < 20) / len(max_dds) * 100, 1,
+            sum(1 for dd in max_dds if dd < 20) / len(max_dds) * 100,
+            1,
         ),
     }
 
 
 def _compute_sensitivity_grid(
-    top_epochs: list[dict], param_values: dict[str, list],
+    top_epochs: list[dict],
+    param_values: dict[str, list],
 ) -> list[dict]:
     num_params = {
         k: v
@@ -2018,7 +2088,7 @@ def _compute_sensitivity_grid(
     pnames = sorted(num_params.keys())
     grids = []
     for i, pa in enumerate(pnames):
-        for pb in pnames[i + 1:]:
+        for pb in pnames[i + 1 :]:
             cells: dict[tuple, list] = {}
             n_bins = 5
             a_vals = [float(x) for x in num_params[pa]]
@@ -2042,12 +2112,16 @@ def _compute_sensitivity_grid(
                     vs = cells.get((ai, bi), [])
                     row.append(round(sum(vs) / len(vs), 4) if vs else None)
                 grid.append(row)
-            grids.append({
-                "param_a": pa, "param_b": pb, "grid": grid,
-                "a_range": [round(a_lo, 4), round(a_hi, 4)],
-                "b_range": [round(b_lo, 4), round(b_hi, 4)],
-                "n_bins": n_bins,
-            })
+            grids.append(
+                {
+                    "param_a": pa,
+                    "param_b": pb,
+                    "grid": grid,
+                    "a_range": [round(a_lo, 4), round(a_hi, 4)],
+                    "b_range": [round(b_lo, 4), round(b_hi, 4)],
+                    "n_bins": n_bins,
+                }
+            )
     return grids[:6]
 
 
@@ -2083,8 +2157,10 @@ def _compute_regime_analysis(best_trades: list[dict]) -> dict | None:
 
     s1, s2 = _stats(first), _stats(second)
     return {
-        "first_half": s1, "second_half": s2,
-        "first_label": "first_half", "second_label": "second_half",
+        "first_half": s1,
+        "second_half": s2,
+        "first_label": "first_half",
+        "second_label": "second_half",
         "consistent": abs(s1["profit_pct"] - s2["profit_pct"])
         < max(abs(s1["profit_pct"]), abs(s2["profit_pct"]), 1) * 0.5,
     }
@@ -2098,12 +2174,14 @@ def _compute_return_vs_dd(top_epochs: list[dict]) -> list[dict]:
         dd = rm.get("max_drawdown_account", 0)
         trades = rm.get("total_trades", 0)
         if trades > 0:
-            points.append({
-                "profit_pct": round(profit * 100, 2),
-                "dd_pct": round(dd * 100, 2),
-                "trades": trades,
-                "loss": ep.get("loss", 0),
-            })
+            points.append(
+                {
+                    "profit_pct": round(profit * 100, 2),
+                    "dd_pct": round(dd * 100, 2),
+                    "trades": trades,
+                    "loss": ep.get("loss", 0),
+                }
+            )
     return points
 
 
@@ -2120,241 +2198,272 @@ def _compute_dof_analysis(n_trades: int, n_params: int) -> dict:
     else:
         level, label = "red", "Critical"
     return {
-        "n_trades": n_trades, "n_params": n_params,
-        "ratio": round(ratio, 1), "level": level, "label": label,
+        "n_trades": n_trades,
+        "n_params": n_params,
+        "ratio": round(ratio, 1),
+        "level": level,
+        "label": label,
     }
 
 
 def _compute_overfit_warnings(
-    dsr: dict | None, param_deep: dict, n_params: int, n_trades: int,
-    sans_top: dict | None, bvm_gap: dict | None, dist_analysis: dict | None,
+    dsr: dict | None,
+    param_deep: dict,
+    n_params: int,
+    n_trades: int,
+    sans_top: dict | None,
+    bvm_gap: dict | None,
+    dist_analysis: dict | None,
 ) -> list[dict]:
     warnings: list[dict] = []
 
     if dsr and not dsr.get("genuine"):
-        warnings.append({
-            "severity": "high", "warning_type": "dsr",
-            "title_en": "DSR: Sharpe likely overfitted",
-            "title_fr": "DSR : Sharpe probablement surajusté",
-            "detail_en": (
-                "Observed Sharpe is below the expected maximum "
-                "from pure noise given the number of trials."
-            ),
-            "detail_fr": (
-                "Le Sharpe observé est inférieur au maximum "
-                "attendu du bruit pur vu le nombre d'essais."
-            ),
-            "actions_en": [
-                "Reduce total epochs to lower E[max SR]",
-                "Increase min-trades to require more statistical evidence",
-                "Switch to CalmarHyperOptLoss (penalizes drawdown, harder to overfit)",
-                "Use walk-forward validation to confirm out-of-sample performance",
-            ],
-            "actions_fr": [
-                "Réduire le nombre d'epochs pour baisser E[max SR]",
-                "Augmenter min-trades pour exiger plus de preuves statistiques",
-                "Passer à CalmarHyperOptLoss (pénalise le drawdown, plus dur à surajuster)",
-                "Utiliser la validation walk-forward pour "
-                "confirmer la performance hors-échantillon",
-            ],
-            "values": {
-                "Sharpe": dsr.get("observed_sharpe"),
-                "E[max SR]": dsr.get("expected_max_sharpe"),
-                "N trials": dsr.get("n_trials"),
-            },
-        })
+        warnings.append(
+            {
+                "severity": "high",
+                "warning_type": "dsr",
+                "title_en": "DSR: Sharpe likely overfitted",
+                "title_fr": "DSR : Sharpe probablement surajusté",
+                "detail_en": (
+                    "Observed Sharpe is below the expected maximum "
+                    "from pure noise given the number of trials."
+                ),
+                "detail_fr": (
+                    "Le Sharpe observé est inférieur au maximum "
+                    "attendu du bruit pur vu le nombre d'essais."
+                ),
+                "actions_en": [
+                    "Reduce total epochs to lower E[max SR]",
+                    "Increase min-trades to require more statistical evidence",
+                    "Switch to CalmarHyperOptLoss (penalizes drawdown, harder to overfit)",
+                    "Use walk-forward validation to confirm out-of-sample performance",
+                ],
+                "actions_fr": [
+                    "Réduire le nombre d'epochs pour baisser E[max SR]",
+                    "Augmenter min-trades pour exiger plus de preuves statistiques",
+                    "Passer à CalmarHyperOptLoss (pénalise le drawdown, plus dur à surajuster)",
+                    "Utiliser la validation walk-forward pour "
+                    "confirmer la performance hors-échantillon",
+                ],
+                "values": {
+                    "Sharpe": dsr.get("observed_sharpe"),
+                    "E[max SR]": dsr.get("expected_max_sharpe"),
+                    "N trials": dsr.get("n_trials"),
+                },
+            }
+        )
 
     conv = sum(1 for p in param_deep.values() if p.get("tendency") == "converging")
     if n_params >= 3 and conv / max(n_params, 1) > 0.5:
-        warnings.append({
-            "severity": "medium", "warning_type": "clustering",
-            "title_en": "Excessive parameter clustering",
-            "title_fr": "Clustering excessif des paramètres",
-            "detail_en": (
-                "Most parameters converge to a narrow range "
-                "— possible curve-fitting to training data."
-            ),
-            "detail_fr": (
-                "La plupart des paramètres convergent vers "
-                "une plage étroite — possible surapprentissage."
-            ),
-            "actions_en": [
-                "Widen parameter search ranges",
-                "Reduce epochs to avoid over-exploration",
-                "Check if converging params are truly independent",
-            ],
-            "actions_fr": [
-                "Élargir les plages de recherche",
-                "Réduire le nombre d'epochs pour éviter la sur-exploration",
-                "Vérifier si les paramètres convergents sont vraiment indépendants",
-            ],
-            "values": {"converging": f"{conv}/{n_params}"},
-        })
+        warnings.append(
+            {
+                "severity": "medium",
+                "warning_type": "clustering",
+                "title_en": "Excessive parameter clustering",
+                "title_fr": "Clustering excessif des paramètres",
+                "detail_en": (
+                    "Most parameters converge to a narrow range "
+                    "— possible curve-fitting to training data."
+                ),
+                "detail_fr": (
+                    "La plupart des paramètres convergent vers "
+                    "une plage étroite — possible surapprentissage."
+                ),
+                "actions_en": [
+                    "Widen parameter search ranges",
+                    "Reduce epochs to avoid over-exploration",
+                    "Check if converging params are truly independent",
+                ],
+                "actions_fr": [
+                    "Élargir les plages de recherche",
+                    "Réduire le nombre d'epochs pour éviter la sur-exploration",
+                    "Vérifier si les paramètres convergents sont vraiment indépendants",
+                ],
+                "values": {"converging": f"{conv}/{n_params}"},
+            }
+        )
 
     if n_params > 0 and n_trades > 0:
         dof = n_trades / n_params
         if dof < 10:
             sev = "high" if dof < 5 else "medium"
-            warnings.append({
-                "severity": sev, "warning_type": "dof",
-                "title_en": "Low degrees of freedom",
-                "title_fr": "Peu de degrés de liberté",
-                "detail_en": (
-                    "Too few trades relative to optimized "
-                    "parameters — results lack statistical confidence."
-                ),
-                "detail_fr": (
-                    "Trop peu de trades par rapport aux "
-                    "paramètres optimisés — résultats peu fiables statistiquement."
-                ),
-                "actions_en": [
-                    "Increase min-trades (aim for 30+ per parameter)",
-                    "Reduce the number of optimized parameters",
-                    "Extend the training timerange",
-                ],
-                "actions_fr": [
-                    "Augmenter min-trades (viser 30+ par paramètre)",
-                    "Réduire le nombre de paramètres optimisés",
-                    "Étendre le timerange d'entraînement",
-                ],
-                "values": {
-                    "trades/params": f"{n_trades}/{n_params}",
-                    "ratio": round(dof, 1),
-                },
-            })
+            warnings.append(
+                {
+                    "severity": sev,
+                    "warning_type": "dof",
+                    "title_en": "Low degrees of freedom",
+                    "title_fr": "Peu de degrés de liberté",
+                    "detail_en": (
+                        "Too few trades relative to optimized "
+                        "parameters — results lack statistical confidence."
+                    ),
+                    "detail_fr": (
+                        "Trop peu de trades par rapport aux "
+                        "paramètres optimisés — résultats peu fiables statistiquement."
+                    ),
+                    "actions_en": [
+                        "Increase min-trades (aim for 30+ per parameter)",
+                        "Reduce the number of optimized parameters",
+                        "Extend the training timerange",
+                    ],
+                    "actions_fr": [
+                        "Augmenter min-trades (viser 30+ par paramètre)",
+                        "Réduire le nombre de paramètres optimisés",
+                        "Étendre le timerange d'entraînement",
+                    ],
+                    "values": {
+                        "trades/params": f"{n_trades}/{n_params}",
+                        "ratio": round(dof, 1),
+                    },
+                }
+            )
 
     if sans_top and sans_top.get("fragile"):
-        warnings.append({
-            "severity": "high", "warning_type": "concentration",
-            "title_en": "Profit concentration: fragile",
-            "title_fr": "Concentration du profit : fragile",
-            "detail_en": (
-                "Removing the top 2 trades makes profit "
-                "negative — the edge depends on lucky hits."
-            ),
-            "detail_fr": (
-                "Sans les 2 meilleurs trades, le profit "
-                "devient négatif — l'edge dépend de coups de chance."
-            ),
-            "actions_en": [
-                "Increase min-trades to force more diversified results",
-                "Add more pairs to spread risk",
-                "Check if the top trade is a lucky outlier or a repeatable pattern",
-            ],
-            "actions_fr": [
-                "Augmenter min-trades pour forcer des résultats plus diversifiés",
-                "Ajouter plus de paires pour répartir le risque",
-                "Vérifier si le meilleur trade est un outlier chanceux ou un pattern répétable",
-            ],
-            "values": {
-                "total": sans_top.get("total_profit"),
-                "without_top2": sans_top.get("without_top2"),
-            },
-        })
+        warnings.append(
+            {
+                "severity": "high",
+                "warning_type": "concentration",
+                "title_en": "Profit concentration: fragile",
+                "title_fr": "Concentration du profit : fragile",
+                "detail_en": (
+                    "Removing the top 2 trades makes profit "
+                    "negative — the edge depends on lucky hits."
+                ),
+                "detail_fr": (
+                    "Sans les 2 meilleurs trades, le profit "
+                    "devient négatif — l'edge dépend de coups de chance."
+                ),
+                "actions_en": [
+                    "Increase min-trades to force more diversified results",
+                    "Add more pairs to spread risk",
+                    "Check if the top trade is a lucky outlier or a repeatable pattern",
+                ],
+                "actions_fr": [
+                    "Augmenter min-trades pour forcer des résultats plus diversifiés",
+                    "Ajouter plus de paires pour répartir le risque",
+                    "Vérifier si le meilleur trade est un outlier chanceux ou un pattern répétable",
+                ],
+                "values": {
+                    "total": sans_top.get("total_profit"),
+                    "without_top2": sans_top.get("without_top2"),
+                },
+            }
+        )
 
     if bvm_gap and bvm_gap.get("outlier"):
-        warnings.append({
-            "severity": "medium", "warning_type": "outlier",
-            "title_en": "Best epoch is an outlier",
-            "title_fr": "Le meilleur epoch est un outlier",
-            "detail_en": (
-                "Best profit > 2x the median top-10 — "
-                "the best epoch may be the luckiest, not the best."
-            ),
-            "detail_fr": (
-                "Le profit du meilleur > 2x la médiane — "
-                "l'epoch est peut-être le plus chanceux, pas le meilleur."
-            ),
-            "actions_en": [
-                "Consider using 2nd or 3rd best epoch",
-                "Compare param values of best vs median to find what differs",
-                "Run a shorter timerange to check if the best epoch is robust",
-            ],
-            "actions_fr": [
-                "Envisager le 2e ou 3e meilleur epoch",
-                "Comparer les paramètres du meilleur vs la médiane pour identifier les écarts",
-                "Lancer sur un timerange plus court pour vérifier la robustesse",
-            ],
-            "values": {
-                "best": f"{bvm_gap.get('best_profit')}%",
-                "median": f"{bvm_gap.get('median_profit')}%",
-                "gap": f"{bvm_gap.get('gap_ratio')}x",
-            },
-        })
+        warnings.append(
+            {
+                "severity": "medium",
+                "warning_type": "outlier",
+                "title_en": "Best epoch is an outlier",
+                "title_fr": "Le meilleur epoch est un outlier",
+                "detail_en": (
+                    "Best profit > 2x the median top-10 — "
+                    "the best epoch may be the luckiest, not the best."
+                ),
+                "detail_fr": (
+                    "Le profit du meilleur > 2x la médiane — "
+                    "l'epoch est peut-être le plus chanceux, pas le meilleur."
+                ),
+                "actions_en": [
+                    "Consider using 2nd or 3rd best epoch",
+                    "Compare param values of best vs median to find what differs",
+                    "Run a shorter timerange to check if the best epoch is robust",
+                ],
+                "actions_fr": [
+                    "Envisager le 2e ou 3e meilleur epoch",
+                    "Comparer les paramètres du meilleur vs la médiane pour identifier les écarts",
+                    "Lancer sur un timerange plus court pour vérifier la robustesse",
+                ],
+                "values": {
+                    "best": f"{bvm_gap.get('best_profit')}%",
+                    "median": f"{bvm_gap.get('median_profit')}%",
+                    "gap": f"{bvm_gap.get('gap_ratio')}x",
+                },
+            }
+        )
 
     if dist_analysis:
         if dist_analysis.get("skew_alert"):
-            warnings.append({
-                "severity": "medium", "warning_type": "skew",
-                "title_en": "Negative skew: tail risk",
-                "title_fr": "Skew négatif : risque de queue",
-                "detail_en": "Return distribution has heavy left tail — occasional large losses.",
-                "detail_fr": (
-                    "La distribution a une queue gauche lourde — grosses pertes occasionnelles."
-                ),
-                "actions_en": [
-                    "Add or tighten stoploss to cap downside",
-                    "Check if a few pairs dominate the left tail",
-                    "Consider CalmarHyperOptLoss to penalize drawdown-heavy results",
-                ],
-                "actions_fr": [
-                    "Ajouter ou resserrer le stoploss pour limiter les pertes",
-                    "Vérifier si quelques paires dominent la queue gauche",
-                    "Envisager CalmarHyperOptLoss pour pénaliser les résultats à fort drawdown",
-                ],
-                "values": {"skewness": dist_analysis.get("skewness")},
-            })
+            warnings.append(
+                {
+                    "severity": "medium",
+                    "warning_type": "skew",
+                    "title_en": "Negative skew: tail risk",
+                    "title_fr": "Skew négatif : risque de queue",
+                    "detail_en": "Return distribution has heavy left tail — occasional large losses.",
+                    "detail_fr": (
+                        "La distribution a une queue gauche lourde — grosses pertes occasionnelles."
+                    ),
+                    "actions_en": [
+                        "Add or tighten stoploss to cap downside",
+                        "Check if a few pairs dominate the left tail",
+                        "Consider CalmarHyperOptLoss to penalize drawdown-heavy results",
+                    ],
+                    "actions_fr": [
+                        "Ajouter ou resserrer le stoploss pour limiter les pertes",
+                        "Vérifier si quelques paires dominent la queue gauche",
+                        "Envisager CalmarHyperOptLoss pour pénaliser les résultats à fort drawdown",
+                    ],
+                    "values": {"skewness": dist_analysis.get("skewness")},
+                }
+            )
         if dist_analysis.get("kurtosis_alert"):
-            warnings.append({
-                "severity": "medium", "warning_type": "kurtosis",
-                "title_en": "Fat tails: extreme events",
-                "title_fr": "Queues épaisses : événements extrêmes",
-                "detail_en": (
-                    "Excess kurtosis > 3 — extreme gains "
-                    "and losses more frequent than normal."
-                ),
-                "detail_fr": (
-                    "Kurtosis > 3 — les gains et pertes "
-                    "extrêmes sont plus fréquents que la normale."
-                ),
-                "actions_en": [
-                    "Expect occasional extreme P&L days",
-                    "Size positions conservatively",
-                    "Use a loss function that accounts for tail risk (Calmar, Sortino)",
-                ],
-                "actions_fr": [
-                    "S'attendre à des jours de P&L extrêmes occasionnels",
-                    "Dimensionner les positions prudemment",
-                    "Utiliser une loss function qui tient compte du risque de queue "
-                    "(Calmar, Sortino)",
-                ],
-                "values": {"kurtosis": dist_analysis.get("excess_kurtosis")},
-            })
+            warnings.append(
+                {
+                    "severity": "medium",
+                    "warning_type": "kurtosis",
+                    "title_en": "Fat tails: extreme events",
+                    "title_fr": "Queues épaisses : événements extrêmes",
+                    "detail_en": (
+                        "Excess kurtosis > 3 — extreme gains and losses more frequent than normal."
+                    ),
+                    "detail_fr": (
+                        "Kurtosis > 3 — les gains et pertes "
+                        "extrêmes sont plus fréquents que la normale."
+                    ),
+                    "actions_en": [
+                        "Expect occasional extreme P&L days",
+                        "Size positions conservatively",
+                        "Use a loss function that accounts for tail risk (Calmar, Sortino)",
+                    ],
+                    "actions_fr": [
+                        "S'attendre à des jours de P&L extrêmes occasionnels",
+                        "Dimensionner les positions prudemment",
+                        "Utiliser une loss function qui tient compte du risque de queue "
+                        "(Calmar, Sortino)",
+                    ],
+                    "values": {"kurtosis": dist_analysis.get("excess_kurtosis")},
+                }
+            )
 
     boundary = [n for n, p in param_deep.items() if p.get("boundary_cluster")]
     if boundary:
-        warnings.append({
-            "severity": "medium", "warning_type": "boundary",
-            "title_en": "Boundary clustering",
-            "title_fr": "Clustering aux bornes",
-            "detail_en": (
-                "Some params cluster at the edge of the "
-                "search range — the optimum may lie outside."
-            ),
-            "detail_fr": (
-                "Certains paramètres se concentrent au "
-                "bord du range — l'optimum est peut-être hors de l'espace de recherche."
-            ),
-            "actions_en": [
-                "Extend the search range for flagged parameters",
-                "Re-run hyperopt with wider bounds to check if loss improves",
-            ],
-            "actions_fr": [
-                "Étendre la plage de recherche des paramètres signalés",
-                "Relancer l'hyperopt avec des bornes plus larges pour voir si la loss s'améliore",
-            ],
-            "values": {"params": ", ".join(boundary)},
-        })
+        warnings.append(
+            {
+                "severity": "medium",
+                "warning_type": "boundary",
+                "title_en": "Boundary clustering",
+                "title_fr": "Clustering aux bornes",
+                "detail_en": (
+                    "Some params cluster at the edge of the "
+                    "search range — the optimum may lie outside."
+                ),
+                "detail_fr": (
+                    "Certains paramètres se concentrent au "
+                    "bord du range — l'optimum est peut-être hors de l'espace de recherche."
+                ),
+                "actions_en": [
+                    "Extend the search range for flagged parameters",
+                    "Re-run hyperopt with wider bounds to check if loss improves",
+                ],
+                "actions_fr": [
+                    "Étendre la plage de recherche des paramètres signalés",
+                    "Relancer l'hyperopt avec des bornes plus larges pour voir si la loss s'améliore",
+                ],
+                "values": {"params": ", ".join(boundary)},
+            }
+        )
 
     return warnings
 
@@ -2459,7 +2568,9 @@ def delete_wfa_result(dirname: Path, filename: str) -> None:
 
 
 def compute_backtest_analytics(
-    dirname: Path, filename: str, strategy: str,
+    dirname: Path,
+    filename: str,
+    strategy: str,
 ) -> dict[str, Any]:
     zip_path = dirname / f"{filename}.zip"
     json_path = dirname / f"{filename}.json"
@@ -2483,9 +2594,7 @@ def compute_backtest_analytics(
 
     trades = strat_data.get("trades", [])
     wins_count = sum(1 for t in trades if isinstance(t, dict) and t.get("profit_ratio", 0) > 0)
-    losses_count = sum(
-        1 for t in trades if isinstance(t, dict) and t.get("profit_ratio", 0) < 0
-    )
+    losses_count = sum(1 for t in trades if isinstance(t, dict) and t.get("profit_ratio", 0) < 0)
     draws_count = len(trades) - wins_count - losses_count
 
     epoch: dict[str, Any] = {
@@ -2529,14 +2638,18 @@ def compute_backtest_analytics(
         result["hourly_pattern"] = _compute_hourly_pattern(trades)
     if trades:
         result["capital_utilization"] = _compute_capital_utilization(
-            trades, starting_balance, max_open_trades,
+            trades,
+            starting_balance,
+            max_open_trades,
         )
     rpp = strat_data.get("results_per_pair", [])
     if rpp:
         result["pair_heatmap"] = _compute_pair_heatmap(rpp)
     if daily_profit:
         result["benchmark"] = _compute_benchmark_comparison(
-            daily_profit, starting_balance, market_change,
+            daily_profit,
+            starting_balance,
+            market_change,
         )
     result["order_stats"] = _compute_order_stats(strat_data)
 
@@ -2609,21 +2722,24 @@ def _compute_hourly_pattern(trades: list) -> dict:
         avg = round(sum(profits) / count, 4) if count else 0
         total = round(sum(profits), 4)
         wins = sum(1 for p in profits if p > 0)
-        hours.append({
-            "hour": h,
-            "trades": count,
-            "avg_profit": avg,
-            "total_profit": total,
-            "winrate": round(wins / count, 4) if count else 0,
-        })
+        hours.append(
+            {
+                "hour": h,
+                "trades": count,
+                "avg_profit": avg,
+                "total_profit": total,
+                "winrate": round(wins / count, 4) if count else 0,
+            }
+        )
     return {"hours": hours}
 
 
 def _compute_capital_utilization(
-    trades: list, starting_balance: float, max_open_trades: int,
+    trades: list,
+    starting_balance: float,
+    max_open_trades: int,
 ) -> list[dict]:
     from collections import defaultdict
-    from datetime import datetime
 
     daily_stake: dict[str, float] = defaultdict(float)
     daily_count: dict[str, int] = defaultdict(int)
@@ -2646,12 +2762,14 @@ def _compute_capital_utilization(
     result = []
     for day in sorted(daily_stake.keys()):
         util = min(daily_stake[day] / max_possible * 100, 100) if max_possible > 0 else 0
-        result.append({
-            "date": day,
-            "utilization_pct": round(util, 2),
-            "deployed": round(daily_stake[day], 2),
-            "trades": daily_count[day],
-        })
+        result.append(
+            {
+                "date": day,
+                "utilization_pct": round(util, 2),
+                "deployed": round(daily_stake[day], 2),
+                "trades": daily_count[day],
+            }
+        )
 
     if len(result) > 1000:
         step = len(result) / 1000
@@ -2667,28 +2785,32 @@ def _compute_pair_heatmap(results_per_pair: list) -> list[dict]:
         key = p.get("key", "")
         if key == "TOTAL":
             continue
-        result.append({
-            "pair": key,
-            "trades": p.get("trades", 0),
-            "winrate": round(p.get("winrate", 0) * 100, 1)
-            if isinstance(p.get("winrate"), (int, float)) and p.get("winrate", 0) <= 1
-            else round(p.get("winrate", 0), 1),
-            "avg_profit": round(p.get("profit_mean_pct", 0), 2),
-            "total_profit": round(p.get("profit_total_abs", 0), 2),
-            "profit_factor": round(p.get("profit_factor", 0), 2),
-            "sqn": round(p.get("sqn", 0), 2),
-            "sharpe": round(p.get("sharpe", 0), 2),
-            "max_drawdown": round(p.get("max_drawdown_account", 0) * 100, 2)
-            if isinstance(p.get("max_drawdown_account"), (int, float))
-            else 0,
-            "duration_avg": p.get("duration_avg"),
-        })
+        result.append(
+            {
+                "pair": key,
+                "trades": p.get("trades", 0),
+                "winrate": round(p.get("winrate", 0) * 100, 1)
+                if isinstance(p.get("winrate"), (int, float)) and p.get("winrate", 0) <= 1
+                else round(p.get("winrate", 0), 1),
+                "avg_profit": round(p.get("profit_mean_pct", 0), 2),
+                "total_profit": round(p.get("profit_total_abs", 0), 2),
+                "profit_factor": round(p.get("profit_factor", 0), 2),
+                "sqn": round(p.get("sqn", 0), 2),
+                "sharpe": round(p.get("sharpe", 0), 2),
+                "max_drawdown": round(p.get("max_drawdown_account", 0) * 100, 2)
+                if isinstance(p.get("max_drawdown_account"), (int, float))
+                else 0,
+                "duration_avg": p.get("duration_avg"),
+            }
+        )
     result.sort(key=lambda x: abs(x["total_profit"]), reverse=True)
     return result
 
 
 def _compute_benchmark_comparison(
-    daily_profit: list, starting_balance: float, market_change: float,
+    daily_profit: list,
+    starting_balance: float,
+    market_change: float,
 ) -> dict:
     if not daily_profit:
         return {}
@@ -2711,9 +2833,11 @@ def _compute_benchmark_comparison(
     strat_total = (balance / starting_balance - 1) if starting_balance > 0 else 0
 
     return {
-        "strategy_equity": strat_equity if len(strat_equity) <= 500
+        "strategy_equity": strat_equity
+        if len(strat_equity) <= 500
         else [strat_equity[int(i * len(strat_equity) / 500)] for i in range(500)],
-        "buyhold_equity": bh_equity if len(bh_equity) <= 500
+        "buyhold_equity": bh_equity
+        if len(bh_equity) <= 500
         else [bh_equity[int(i * len(bh_equity) / 500)] for i in range(500)],
         "strategy_return": round(strat_total * 100, 2),
         "buyhold_return": round(market_change * 100, 2),
@@ -2756,9 +2880,7 @@ def convert_backtest_entries(
             if raw:
                 stats = rapidjson.loads(raw)
                 strat_data = stats.get("strategy", {}).get(entry["strategy"], {})
-                result["total_profit_pct"] = round(
-                    strat_data.get("profit_total", 0) * 100, 2
-                )
+                result["total_profit_pct"] = round(strat_data.get("profit_total", 0) * 100, 2)
                 result["total_trades"] = strat_data.get("total_trades", 0)
                 result["best_sharpe"] = strat_data.get("sharpe")
                 result["best_loss"] = None
@@ -2769,7 +2891,9 @@ def convert_backtest_entries(
 
 
 def compute_plot_profit_data(
-    dirname: Path, filename: str, strategy: str,
+    dirname: Path,
+    filename: str,
+    strategy: str,
 ) -> dict[str, Any]:
     zip_path = dirname / f"{filename}.zip"
     json_path = dirname / f"{filename}.json"
@@ -2829,11 +2953,13 @@ def _compute_combined_profit(trades: list, starting_balance: float) -> list[dict
         cumulative += pnl
         close_date = t.get("close_date", "")
         if close_date:
-            result.append({
-                "date": str(close_date),
-                "value": round(cumulative, 4),
-                "balance": round(starting_balance + cumulative, 2),
-            })
+            result.append(
+                {
+                    "date": str(close_date),
+                    "value": round(cumulative, 4),
+                    "balance": round(starting_balance + cumulative, 2),
+                }
+            )
 
     if len(result) > 2000:
         step = len(result) / 2000
@@ -2941,10 +3067,12 @@ def _compute_parallelism(trades: list, timeframe: str) -> list[dict]:
 
     result = []
     for idx, row in result_df.iterrows():
-        result.append({
-            "date": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
-            "count": int(row["open_trades"]),
-        })
+        result.append(
+            {
+                "date": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
+                "count": int(row["open_trades"]),
+            }
+        )
 
     if len(result) > 2000:
         step = len(result) / 2000
@@ -2953,7 +3081,8 @@ def _compute_parallelism(trades: list, timeframe: str) -> list[dict]:
 
 
 def _compute_underwater_series(
-    trades: list, starting_balance: float,
+    trades: list,
+    starting_balance: float,
 ) -> tuple[list[dict], list[dict]]:
     sorted_trades = sorted(trades, key=lambda t: t.get("close_date", "") or "")
     if not sorted_trades:
@@ -2996,7 +3125,8 @@ def _compute_underwater_series(
 
 
 def _compute_pair_correlation(
-    trades: list, daily_profit: list,
+    trades: list,
+    daily_profit: list,
 ) -> dict[str, Any] | None:
     from collections import defaultdict
     from datetime import datetime
@@ -3058,7 +3188,9 @@ def _compute_pair_correlation(
     total_volume = sum(pair_profit.values())
     shares = [(pair_profit[p] / total_volume) ** 2 for p in pairs] if total_volume > 0 else []
     hhi = round(sum(shares) * 10000, 1) if shares else 0
-    top_pair_pct = round(max(pair_profit[p] / total_volume for p in pairs) * 100, 1) if total_volume > 0 else 0
+    top_pair_pct = (
+        round(max(pair_profit[p] / total_volume for p in pairs) * 100, 1) if total_volume > 0 else 0
+    )
 
     avg_corr_values = []
     for i in range(n):
@@ -3070,10 +3202,13 @@ def _compute_pair_correlation(
     for i in range(n):
         for j in range(i + 1, n):
             if abs(matrix[i][j]) > 0.6:
-                highly_correlated.append({
-                    "pair_a": pairs[i], "pair_b": pairs[j],
-                    "correlation": matrix[i][j],
-                })
+                highly_correlated.append(
+                    {
+                        "pair_a": pairs[i],
+                        "pair_b": pairs[j],
+                        "correlation": matrix[i][j],
+                    }
+                )
     highly_correlated.sort(key=lambda x: -abs(x["correlation"]))
 
     return {
@@ -3087,8 +3222,13 @@ def _compute_pair_correlation(
         "top_pair": max(pairs, key=lambda p: pair_profit[p]) if pairs else "",
         "max_simultaneous_loss": max_simul_loss,
         "pair_stats": [
-            {"pair": p, "trades": pair_trades[p],
-             "volume_pct": round(pair_profit[p] / total_volume * 100, 1) if total_volume > 0 else 0}
+            {
+                "pair": p,
+                "trades": pair_trades[p],
+                "volume_pct": round(pair_profit[p] / total_volume * 100, 1)
+                if total_volume > 0
+                else 0,
+            }
             for p in sorted(pairs, key=lambda x: -pair_profit[x])[:15]
         ],
     }
@@ -3166,7 +3306,9 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
         orders = t.get("orders", [])
         if not isinstance(orders, list):
             orders = []
-        entry_orders = [o for o in orders if isinstance(o, dict) and o.get("ft_order_side") == "entry"]
+        entry_orders = [
+            o for o in orders if isinstance(o, dict) and o.get("ft_order_side") == "entry"
+        ]
         actual_entries = len(entry_orders) if entry_orders else n_entries
         if actual_entries < 1:
             actual_entries = 1
@@ -3175,17 +3317,19 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
         stake = t.get("stake_amount", 0)
         if not isinstance(pnl, (int, float)):
             continue
-        dca_trades.append({
-            "entries": actual_entries,
-            "profit_pct": float(pnl),
-            "profit_abs": float(pnl_abs) if isinstance(pnl_abs, (int, float)) else 0,
-            "stake": float(stake) if isinstance(stake, (int, float)) else 0,
-            "pair": t.get("pair", ""),
-            "duration": float(t.get("trade_duration", 0) or 0),
-            "is_short": t.get("is_short", False),
-            "exit_reason": t.get("exit_reason", ""),
-            "orders": orders,
-        })
+        dca_trades.append(
+            {
+                "entries": actual_entries,
+                "profit_pct": float(pnl),
+                "profit_abs": float(pnl_abs) if isinstance(pnl_abs, (int, float)) else 0,
+                "stake": float(stake) if isinstance(stake, (int, float)) else 0,
+                "pair": t.get("pair", ""),
+                "duration": float(t.get("trade_duration", 0) or 0),
+                "is_short": t.get("is_short", False),
+                "exit_reason": t.get("exit_reason", ""),
+                "orders": orders,
+            }
+        )
 
     if not dca_trades:
         return None
@@ -3214,11 +3358,13 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
     profit_by_level: list[dict] = []
     for level in sorted(level_dist.keys()):
         d = level_dist[level]
-        profit_by_level.append({
-            "level": level,
-            "label": f"SO{level - 1}" if level > 1 else "Base",
-            **d,
-        })
+        profit_by_level.append(
+            {
+                "level": level,
+                "label": f"SO{level - 1}" if level > 1 else "Base",
+                **d,
+            }
+        )
 
     single_entry = [t for t in dca_trades if t["entries"] == 1]
     multi_entry = [t for t in dca_trades if t["entries"] > 1]
@@ -3227,8 +3373,14 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
         recovered = sum(1 for t in multi_entry if t["profit_pct"] > 0)
         recovery_rate = round(recovered / len(multi_entry) * 100, 1)
 
-    single_avg = round(sum(t["profit_pct"] for t in single_entry) / len(single_entry), 4) if single_entry else 0
-    multi_avg = round(sum(t["profit_pct"] for t in multi_entry) / len(multi_entry), 4) if multi_entry else 0
+    single_avg = (
+        round(sum(t["profit_pct"] for t in single_entry) / len(single_entry), 4)
+        if single_entry
+        else 0
+    )
+    multi_avg = (
+        round(sum(t["profit_pct"] for t in multi_entry) / len(multi_entry), 4) if multi_entry else 0
+    )
 
     total_profit_single = sum(t["profit_abs"] for t in single_entry)
     total_profit_multi = sum(t["profit_abs"] for t in multi_entry)
@@ -3244,11 +3396,18 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
         dca_by_pair[p]["entries_sum"] += t["entries"]
         dca_by_pair[p]["count"] += 1
         dca_by_pair[p]["profit_sum"] += t["profit_pct"]
-    pair_dca_stats = sorted([
-        {"pair": p, "avg_entries": round(d["entries_sum"] / d["count"], 2),
-         "avg_profit": round(d["profit_sum"] / d["count"], 4), "trades": d["count"]}
-        for p, d in dca_by_pair.items()
-    ], key=lambda x: -x["avg_entries"])[:10]
+    pair_dca_stats = sorted(
+        [
+            {
+                "pair": p,
+                "avg_entries": round(d["entries_sum"] / d["count"], 2),
+                "avg_profit": round(d["profit_sum"] / d["count"], 4),
+                "trades": d["count"],
+            }
+            for p, d in dca_by_pair.items()
+        ],
+        key=lambda x: -x["avg_entries"],
+    )[:10]
 
     insights: list[str] = []
     if recovery_rate > 70:
@@ -3275,12 +3434,12 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
         "multi_entry_avg": multi_avg,
         "single_count": len(single_entry),
         "multi_count": len(multi_entry),
-        "profit_contribution_single": round(
-            total_profit_single / total_profit_all * 100, 1
-        ) if total_profit_all != 0 else 0,
-        "profit_contribution_multi": round(
-            total_profit_multi / total_profit_all * 100, 1
-        ) if total_profit_all != 0 else 0,
+        "profit_contribution_single": round(total_profit_single / total_profit_all * 100, 1)
+        if total_profit_all != 0
+        else 0,
+        "profit_contribution_multi": round(total_profit_multi / total_profit_all * 100, 1)
+        if total_profit_all != 0
+        else 0,
         "pair_dca_stats": pair_dca_stats,
         "insights": insights,
     }
@@ -3292,7 +3451,8 @@ def _compute_dca_analysis(trades: list) -> dict[str, Any] | None:
 
 
 def _compute_market_regime_analysis(
-    trades: list, daily_profit: list,
+    trades: list,
+    daily_profit: list,
 ) -> dict[str, Any] | None:
     if not daily_profit or len(daily_profit) < 30:
         return None
@@ -3309,7 +3469,7 @@ def _compute_market_regime_analysis(
 
     regimes: list[dict] = []
     for i in range(window, n):
-        w = pnls[i - window: i]
+        w = pnls[i - window : i]
         mean_r = sum(w) / len(w)
         var_r = sum((r - mean_r) ** 2 for r in w) / len(w)
         vol = math.sqrt(var_r) if var_r > 0 else 0
@@ -3331,19 +3491,22 @@ def _compute_market_regime_analysis(
         else:
             regime = "bear_volatile"
 
-        regimes.append({
-            "date": dates[i],
-            "regime": regime,
-            "volatility": round(vol, 4),
-            "trend": round(trend, 4),
-        })
+        regimes.append(
+            {
+                "date": dates[i],
+                "regime": regime,
+                "volatility": round(vol, 4),
+                "trend": round(trend, 4),
+            }
+        )
 
     if not regimes:
         return None
 
     regime_labels = ["bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile"]
-    regime_perf: dict[str, dict] = {r: {"days": 0, "profit_sum": 0.0, "wins": 0, "losses": 0}
-                                     for r in regime_labels}
+    regime_perf: dict[str, dict] = {
+        r: {"days": 0, "profit_sum": 0.0, "wins": 0, "losses": 0} for r in regime_labels
+    }
     for i, rg in enumerate(regimes):
         idx = i + window
         if idx < n:
@@ -3357,18 +3520,21 @@ def _compute_market_regime_analysis(
     perf_summary = []
     for r in regime_labels:
         d = regime_perf[r]
-        perf_summary.append({
-            "regime": r,
-            "days": d["days"],
-            "pct_time": round(d["days"] / len(regimes) * 100, 1) if regimes else 0,
-            "total_profit": round(d["profit_sum"], 2),
-            "avg_daily_profit": round(d["profit_sum"] / d["days"], 4) if d["days"] > 0 else 0,
-            "winrate": round(d["wins"] / d["days"] * 100, 1) if d["days"] > 0 else 0,
-        })
+        perf_summary.append(
+            {
+                "regime": r,
+                "days": d["days"],
+                "pct_time": round(d["days"] / len(regimes) * 100, 1) if regimes else 0,
+                "total_profit": round(d["profit_sum"], 2),
+                "avg_daily_profit": round(d["profit_sum"] / d["days"], 4) if d["days"] > 0 else 0,
+                "winrate": round(d["wins"] / d["days"] * 100, 1) if d["days"] > 0 else 0,
+            }
+        )
 
     regime_dates = {r["date"]: r["regime"] for r in regimes}
-    trade_regime_perf: dict[str, dict] = {r: {"count": 0, "profit_sum": 0.0, "wins": 0}
-                                           for r in regime_labels}
+    trade_regime_perf: dict[str, dict] = {
+        r: {"count": 0, "profit_sum": 0.0, "wins": 0} for r in regime_labels
+    }
     for t in trades:
         if not isinstance(t, dict):
             continue
@@ -3380,6 +3546,7 @@ def _compute_market_regime_analysis(
             day = cd[:10]
         elif isinstance(cd, (int, float)):
             from datetime import datetime
+
             dt = datetime.fromtimestamp(cd / 1000 if cd > 1e12 else cd)
             day = dt.strftime("%Y-%m-%d")
         else:
@@ -3394,13 +3561,15 @@ def _compute_market_regime_analysis(
     trade_perf_summary = []
     for r in regime_labels:
         d = trade_regime_perf[r]
-        trade_perf_summary.append({
-            "regime": r,
-            "trades": d["count"],
-            "avg_profit": round(d["profit_sum"] / d["count"], 4) if d["count"] > 0 else 0,
-            "total_profit": round(d["profit_sum"], 4),
-            "winrate": round(d["wins"] / d["count"] * 100, 1) if d["count"] > 0 else 0,
-        })
+        trade_perf_summary.append(
+            {
+                "regime": r,
+                "trades": d["count"],
+                "avg_profit": round(d["profit_sum"] / d["count"], 4) if d["count"] > 0 else 0,
+                "total_profit": round(d["profit_sum"], 4),
+                "winrate": round(d["wins"] / d["count"] * 100, 1) if d["count"] > 0 else 0,
+            }
+        )
 
     transitions = [[0] * 4 for _ in range(4)]
     idx_map = {r: i for i, r in enumerate(regime_labels)}
@@ -3415,9 +3584,11 @@ def _compute_market_regime_analysis(
             for j in range(len(row)):
                 row[j] = round(row[j] / row_sum * 100, 1)
 
-    timeline = regimes if len(regimes) <= 500 else [
-        regimes[int(i * len(regimes) / 500)] for i in range(500)
-    ]
+    timeline = (
+        regimes
+        if len(regimes) <= 500
+        else [regimes[int(i * len(regimes) / 500)] for i in range(500)]
+    )
 
     insights: list[str] = []
     best_regime = max(perf_summary, key=lambda x: x["avg_daily_profit"])

@@ -11,6 +11,27 @@ from freqtrade.exchange.bitmart import Bitmart
 from freqtrade.exchange.bitpanda import Bitpanda
 from freqtrade.exchange.bitvavo import Bitvavo
 from freqtrade.exchange.bybit import Bybit
+from freqtrade.exchange.cached_hyperliquid import CachedHyperliquid
+from freqtrade.exchange.cached_subclasses import (
+    CachedBinance,
+    CachedBinanceus,
+    CachedBinanceusdm,
+    CachedBingx,
+    CachedBitget,
+    CachedBitmart,
+    CachedBitvavo,
+    CachedBybit,
+    CachedCoinex,
+    CachedCryptocom,
+    CachedGate,
+    CachedHtx,
+    CachedKraken,
+    CachedKrakenfutures,
+    CachedKucoin,
+    CachedMyokx,
+    CachedOkx,
+    CachedOkxus,
+)
 from freqtrade.exchange.coinex import Coinex
 from freqtrade.exchange.cryptocom import Cryptocom
 from freqtrade.exchange.exchange_utils import (
@@ -42,27 +63,6 @@ from freqtrade.exchange.gate import Gate
 from freqtrade.exchange.hitbtc import Hitbtc
 from freqtrade.exchange.htx import Htx
 from freqtrade.exchange.hyperliquid import Hyperliquid
-from freqtrade.exchange.cached_hyperliquid import CachedHyperliquid
-from freqtrade.exchange.cached_subclasses import (  # noqa: F401
-    CachedBinance,
-    CachedBinanceus,
-    CachedBinanceusdm,
-    CachedBingx,
-    CachedBitget,
-    CachedBitmart,
-    CachedBitvavo,
-    CachedBybit,
-    CachedCoinex,
-    CachedCryptocom,
-    CachedGate,
-    CachedHtx,
-    CachedKraken,
-    CachedKrakenfutures,
-    CachedKucoin,
-    CachedMyokx,
-    CachedOkx,
-    CachedOkxus,
-)
 from freqtrade.exchange.idex import Idex
 from freqtrade.exchange.kraken import Kraken
 from freqtrade.exchange.krakenfutures import Krakenfutures

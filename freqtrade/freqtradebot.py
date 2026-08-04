@@ -102,7 +102,11 @@ class _StartupTracer:
         slow = " ⚠ SLOW" if delta > _SLOW_PHASE_THRESHOLD_S else ""
         logger.info(
             "[startup +%.1fs] %s (%.1fs)%s%s",
-            elapsed, label, delta, f" {suffix}" if suffix else "", slow,
+            elapsed,
+            label,
+            delta,
+            f" {suffix}" if suffix else "",
+            slow,
         )
         self._phases.append((label, delta))
         self._last = now
@@ -161,7 +165,7 @@ class FreqtradeBot(LoggingMixin):
                 "api_port": config.get("api_server", {}).get("listen_port", 0),
                 "pid": os.getpid(),
             }
-            ftcache_client = getattr(self.exchange, '_ftcache_client', None)
+            ftcache_client = getattr(self.exchange, "_ftcache_client", None)
             if ftcache_client and ftcache_client:
                 ftcache_client.set_bot_identity(bot_identity)
             else:
@@ -302,9 +306,7 @@ class FreqtradeBot(LoggingMixin):
             self._last_profit_history_record: float = 0.0
             retention_days = self.config.get("profit_history_retention_days", 365)
             self._schedule.every().day.at("00:11").do(
-                lambda: ProfitHistory.prune_older_than(
-                    dt_now() - timedelta(days=retention_days)
-                )
+                lambda: ProfitHistory.prune_older_than(dt_now() - timedelta(days=retention_days))
             )
 
             self.strategy.ft_bot_start()
@@ -436,11 +438,11 @@ class FreqtradeBot(LoggingMixin):
         _cp("pairlist")
 
         # Inform ftcache which pairs have open positions (CRITICAL priority)
-        if hasattr(self.exchange, 'ftcache_set_open_pairs'):
+        if hasattr(self.exchange, "ftcache_set_open_pairs"):
             open_pairs = {t.pair for t in trades}
             self.exchange.ftcache_set_open_pairs(open_pairs)
 
-        if hasattr(self.exchange, 'ftcache_mark_init_complete'):
+        if hasattr(self.exchange, "ftcache_mark_init_complete"):
             self.exchange.ftcache_mark_init_complete()
 
         # Refreshing candles
@@ -508,7 +510,9 @@ class FreqtradeBot(LoggingMixin):
                 parts.append(f"{label}={ts - prev:.1f}s")
                 prev = ts
             logger.warning(
-                "[cycle] slow cycle: %.1fs — %s", cycle_total, ", ".join(parts),
+                "[cycle] slow cycle: %.1fs — %s",
+                cycle_total,
+                ", ".join(parts),
             )
         self.last_process = datetime.now(UTC)
 
@@ -772,12 +776,15 @@ class FreqtradeBot(LoggingMixin):
                     "Position coordination: BLOCKED entry for %s — exchange refused to set "
                     "leverage to %dx on the open position (%s). Not opening to avoid a higher "
                     "leverage than intended.",
-                    pair, int(target_leverage), e,
+                    pair,
+                    int(target_leverage),
+                    e,
                 )
                 return False
             logger.warning(
                 "Position coordination: leverage pre-set for %s failed (%s) — proceeding.",
-                pair, e,
+                pair,
+                e,
             )
             return True
 
@@ -813,7 +820,9 @@ class FreqtradeBot(LoggingMixin):
                 pair,
                 "Position coordination: exchange shows a position on %s not matching the "
                 "DB-based decision (%s) [%s].",
-                pair, ", ".join(mismatches), "BLOCKED" if block else "allowed, warn-only",
+                pair,
+                ", ".join(mismatches),
+                "BLOCKED" if block else "allowed, warn-only",
             )
             if block:
                 return False
@@ -860,9 +869,12 @@ class FreqtradeBot(LoggingMixin):
                     "%sx → %sx (aligned with %s). "
                     "stake_amount recalculated to %.2f. "
                     "Another bot or manual action changed the leverage.",
-                    trade.id, trade.pair,
-                    int(old_lev), int(ex_leverage),
-                    self.exchange.name, trade.stake_amount,
+                    trade.id,
+                    trade.pair,
+                    int(old_lev),
+                    int(ex_leverage),
+                    self.exchange.name,
+                    trade.stake_amount,
                 )
 
             ex_side = pos.get("side")
@@ -872,8 +884,11 @@ class FreqtradeBot(LoggingMixin):
                     "Leverage sync: CRITICAL mismatch Trade #%d %s — "
                     "DB says %s but %s shows %s. "
                     "Manual intervention required!",
-                    trade.id, trade.pair,
-                    trade_side.upper(), self.exchange.name, ex_side.upper(),
+                    trade.id,
+                    trade.pair,
+                    trade_side.upper(),
+                    self.exchange.name,
+                    ex_side.upper(),
                 )
         Trade.commit()
 
@@ -1115,9 +1130,7 @@ class FreqtradeBot(LoggingMixin):
                             # closed while the real (netted) position lives on as an
                             # orphan. Only proceed when no opposite-side sibling can
                             # explain the zero reading.
-                            if self._coordinator.opposite_side_sibling(
-                                trade.pair, trade.is_short
-                            ):
+                            if self._coordinator.opposite_side_sibling(trade.pair, trade.is_short):
                                 logger.warning(
                                     f"{trade.pair}: wallet shows no position but a sibling "
                                     "bot holds the opposite side on the shared wallet "
@@ -1182,9 +1195,7 @@ class FreqtradeBot(LoggingMixin):
         :return: True if liquidation was detected and handled, False otherwise
         """
         try:
-            liq_fills = self.exchange.fetch_liquidation_fills(
-                trade.pair, trade.open_date_utc
-            )
+            liq_fills = self.exchange.fetch_liquidation_fills(trade.pair, trade.open_date_utc)
             if not liq_fills:
                 return False
 
@@ -1214,15 +1225,11 @@ class FreqtradeBot(LoggingMixin):
             self._notify_exit(trade, "liquidation", fill=True)
             self.handle_protections(trade.pair, trade.trade_direction)
 
-            logger.info(
-                f"Trade {trade} closed due to liquidation at price {liq_price}."
-            )
+            logger.info(f"Trade {trade} closed due to liquidation at price {liq_price}.")
             return True
 
         except Exception:
-            logger.warning(
-                f"Error checking for liquidation of {trade.pair}.", exc_info=True
-            )
+            logger.warning(f"Error checking for liquidation of {trade.pair}.", exc_info=True)
             Trade.session.rollback()
             Trade.session.refresh(trade)
             raise
@@ -1252,8 +1259,7 @@ class FreqtradeBot(LoggingMixin):
                     last_trade = recent_trades[-1]
                     close_price = last_trade.get("price")
                     logger.info(
-                        f"Found actual fill price {close_price} for "
-                        f"external close of {trade.pair}."
+                        f"Found actual fill price {close_price} for external close of {trade.pair}."
                     )
             except Exception:
                 logger.debug(
@@ -1268,9 +1274,12 @@ class FreqtradeBot(LoggingMixin):
                 )
 
             import math
+
             if (
-                not close_price or close_price <= 0
-                or math.isnan(close_price) or math.isinf(close_price)
+                not close_price
+                or close_price <= 0
+                or math.isnan(close_price)
+                or math.isinf(close_price)
             ):
                 logger.error(
                     f"Invalid close price {close_price} for external close of {trade.pair}."
@@ -1318,9 +1327,7 @@ class FreqtradeBot(LoggingMixin):
             return True
 
         except Exception:
-            logger.warning(
-                f"Error handling external close for {trade.pair}.", exc_info=True
-            )
+            logger.warning(f"Error handling external close for {trade.pair}.", exc_info=True)
             Trade.session.rollback()
             Trade.session.refresh(trade)
             return False
@@ -1404,9 +1411,7 @@ class FreqtradeBot(LoggingMixin):
             return False
         now = time_module.monotonic()
         if now - getattr(self, "_pos_cb_last_warn", 0.0) > 60.0:
-            logger.warning(
-                "Positions too stale (age=%.0fs) — %s blocked until fresh", age, context
-            )
+            logger.warning("Positions too stale (age=%.0fs) — %s blocked until fresh", age, context)
             self._pos_cb_last_warn = now
         req = getattr(self.exchange, "request_positions_refresh", None)
         if req is not None:

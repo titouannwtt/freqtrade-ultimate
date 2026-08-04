@@ -38,11 +38,7 @@ class BucketStats:
 
     @property
     def avg_latency_ms(self) -> float:
-        return (
-            self.latency_sum_ms / self.latency_count
-            if self.latency_count
-            else 0.0
-        )
+        return self.latency_sum_ms / self.latency_count if self.latency_count else 0.0
 
 
 class ExchangeMetrics:
@@ -79,12 +75,12 @@ class ExchangeMetrics:
                 bucket.latency_sum_ms += call.latency_ms
                 bucket.latency_count += 1
 
-            bucket.by_method[call.method] = (
-                bucket.by_method.get(call.method, 0) + 1
-            )
+            bucket.by_method[call.method] = bucket.by_method.get(call.method, 0) + 1
 
     def get_timeline(
-        self, since_s: float, bucket_s: int = 10,
+        self,
+        since_s: float,
+        bucket_s: int = 10,
     ) -> list[dict]:
         cutoff = time.time() - since_s
         with self._lock:
@@ -92,16 +88,18 @@ class ExchangeMetrics:
             for ts in sorted(self._buckets):
                 if ts >= cutoff:
                     b = self._buckets[ts]
-                    result.append({
-                        "ts": b.ts,
-                        "total": b.total,
-                        "cached": b.cached,
-                        "direct": b.direct,
-                        "errors": b.errors,
-                        "errors_429": b.errors_429,
-                        "avg_latency_ms": round(b.avg_latency_ms, 1),
-                        "by_method": dict(b.by_method),
-                    })
+                    result.append(
+                        {
+                            "ts": b.ts,
+                            "total": b.total,
+                            "cached": b.cached,
+                            "direct": b.direct,
+                            "errors": b.errors,
+                            "errors_429": b.errors_429,
+                            "avg_latency_ms": round(b.avg_latency_ms, 1),
+                            "by_method": dict(b.by_method),
+                        }
+                    )
             if bucket_s != BUCKET_SIZE_S:
                 result = self._rebucket(result, bucket_s)
             return result
@@ -109,8 +107,11 @@ class ExchangeMetrics:
     def get_summary(self, window_s: int = 3600) -> dict:
         cutoff = time.time() - window_s
         totals = {
-            "total": 0, "cached": 0, "direct": 0,
-            "errors": 0, "errors_429": 0,
+            "total": 0,
+            "cached": 0,
+            "direct": 0,
+            "errors": 0,
+            "errors_429": 0,
         }
         by_method: dict[str, dict] = {}
         latencies: list[float] = []
@@ -133,8 +134,11 @@ class ExchangeMetrics:
                 m = by_method.get(call.method)
                 if m is None:
                     m = {
-                        "count": 0, "cached": 0, "direct": 0,
-                        "errors": 0, "latencies": [],
+                        "count": 0,
+                        "cached": 0,
+                        "direct": 0,
+                        "errors": 0,
+                        "latencies": [],
                     }
                     by_method[call.method] = m
                 m["count"] += 1
@@ -157,22 +161,34 @@ class ExchangeMetrics:
                 "direct": m["direct"],
                 "errors": m["errors"],
                 "avg_latency_ms": round(
-                    sum(lats) / n, 1,
-                ) if n else 0,
+                    sum(lats) / n,
+                    1,
+                )
+                if n
+                else 0,
                 "p95_latency_ms": round(
-                    lats[int(n * 0.95)], 1,
-                ) if n else 0,
+                    lats[int(n * 0.95)],
+                    1,
+                )
+                if n
+                else 0,
             }
 
         n_lat = len(latencies)
         return {
             **totals,
             "avg_latency_ms": round(
-                sum(latencies) / n_lat, 1,
-            ) if n_lat else 0,
+                sum(latencies) / n_lat,
+                1,
+            )
+            if n_lat
+            else 0,
             "p95_latency_ms": round(
-                latencies[int(n_lat * 0.95)], 1,
-            ) if n_lat else 0,
+                latencies[int(n_lat * 0.95)],
+                1,
+            )
+            if n_lat
+            else 0,
             "by_method": method_summary,
         }
 
@@ -180,8 +196,10 @@ class ExchangeMetrics:
         with self._lock:
             return [
                 {
-                    "ts": c.ts, "method": c.method,
-                    "exchange": c.exchange, "pair": c.pair,
+                    "ts": c.ts,
+                    "method": c.method,
+                    "exchange": c.exchange,
+                    "pair": c.pair,
                 }
                 for c in list(self._recent_429s)[-limit:]
             ]
@@ -202,9 +220,14 @@ class ExchangeMetrics:
             key = b["ts"] // target_s * target_s
             if key not in merged:
                 merged[key] = {
-                    "ts": key, "total": 0, "cached": 0,
-                    "direct": 0, "errors": 0, "errors_429": 0,
-                    "latency_sum": 0.0, "latency_count": 0,
+                    "ts": key,
+                    "total": 0,
+                    "cached": 0,
+                    "direct": 0,
+                    "errors": 0,
+                    "errors_429": 0,
+                    "latency_sum": 0.0,
+                    "latency_count": 0,
                     "by_method": {},
                 }
             m = merged[key]
@@ -218,9 +241,7 @@ class ExchangeMetrics:
             m["latency_sum"] += avg * direct
             m["latency_count"] += direct
             for method, count in b.get("by_method", {}).items():
-                m["by_method"][method] = (
-                    m["by_method"].get(method, 0) + count
-                )
+                m["by_method"][method] = m["by_method"].get(method, 0) + count
         result = []
         for v in sorted(merged.values(), key=lambda x: x["ts"]):
             lc = v.pop("latency_count")

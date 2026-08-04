@@ -64,6 +64,9 @@ class CachedHyperliquid(CachedExchangeMixin, Hyperliquid):
                 logger.warning(
                     "additional_exchange_init failed (attempt %d/%d): %s"
                     " — waiting %ds for rate limit to clear",
-                    attempt + 1, _INIT_MAX_RETRIES, e, wait,
+                    attempt + 1,
+                    _INIT_MAX_RETRIES,
+                    e,
+                    wait,
                 )
                 time.sleep(wait)

@@ -279,6 +279,7 @@ class Exchange:
 
         # Increase HTTP connection pool to avoid "Connection pool is full" warnings
         from requests.adapters import HTTPAdapter
+
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self._api.session.mount("https://", adapter)
         self._api.session.mount("http://", adapter)
@@ -332,7 +333,8 @@ class Exchange:
         self._load_persisted_klines()
         logger.info(
             "[exchange-init] klines cache loaded (%.1fs, total exchange init: %.1fs)",
-            time_module.monotonic() - _kl_t0, time_module.monotonic() - _ex_t0,
+            time_module.monotonic() - _kl_t0,
+            time_module.monotonic() - _ex_t0,
         )
 
     def __del__(self):
@@ -859,6 +861,7 @@ class Exchange:
         logger.debug("Performing scheduled market reload..")
         try:
             from freqtrade.enums import RunMode
+
             runmode = self._config.get("runmode", RunMode.OTHER)
             is_offline = runmode in (RunMode.BACKTEST, RunMode.HYPEROPT, RunMode.WALKFORWARD)
             retries: int = (15 if is_offline else 3) if force else 0
@@ -1657,9 +1660,8 @@ class Exchange:
             except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
                 if attempt < max_attempts - 1:
                     import time as _time
-                    logger.warning(
-                        "Rate limited on create_order for %s, retrying in 5s...", pair
-                    )
+
+                    logger.warning("Rate limited on create_order for %s, retrying in 5s...", pair)
                     _time.sleep(5)
                     continue
                 raise DDosProtection(e) from e
@@ -2255,9 +2257,7 @@ class Exchange:
             # (`get_conversion_rate`, etc.) can safely use `.get(pair, None)`.
             if isinstance(tickers, list):
                 tickers = {
-                    t["symbol"]: t
-                    for t in tickers
-                    if isinstance(t, dict) and t.get("symbol")
+                    t["symbol"]: t for t in tickers if isinstance(t, dict) and t.get("symbol")
                 }
             with self._cache_lock:
                 self._fetch_tickers_cache[cache_key] = tickers
@@ -2505,7 +2505,8 @@ class Exchange:
         if ticker_rate is None and ticker.get("last"):
             logger.warning(
                 "Ticker %s is None for %s — falling back to 'last' price",
-                price_side, ticker.get("symbol", "?"),
+                price_side,
+                ticker.get("symbol", "?"),
             )
             ticker_rate = ticker["last"]
         if ticker.get("last") and ticker_rate:
@@ -3020,7 +3021,9 @@ class Exchange:
         if not isinstance(ticks, list):
             logger.warning(
                 "ticks for %s/%s is %s, not list — returning empty df",
-                pair, timeframe, type(ticks).__name__,
+                pair,
+                timeframe,
+                type(ticks).__name__,
             )
             ticks = []
         elif ticks:
@@ -3028,7 +3031,9 @@ class Exchange:
             if not isinstance(first, (list, tuple)) or len(first) < 6:
                 logger.warning(
                     "ticks rows for %s/%s have bad shape (first=%s) — returning empty df",
-                    pair, timeframe, repr(first)[:120],
+                    pair,
+                    timeframe,
+                    repr(first)[:120],
                 )
                 ticks = []
         # keeping last candle time as last refreshed time of the pair
@@ -4094,9 +4099,7 @@ class Exchange:
         funding_comb: PairWithTimeframe = (pair, timeframe_ff, CandleType.FUNDING_RATE)
 
         if self.loop.is_running():
-            raise ExchangeError(
-                "Cannot fetch funding fees — event loop already running"
-            )
+            raise ExchangeError("Cannot fetch funding fees — event loop already running")
 
         candle_histories = self.refresh_latest_ohlcv(
             [mark_comb, funding_comb],

@@ -516,6 +516,7 @@ class Hyperopt:
     def _get_plateau_sampler(self):
         """Get the PlateauSampler instance from the Optuna study."""
         from freqtrade.optimize.hyperopt.plateau_sampler import PlateauSampler
+
         if self.opt and hasattr(self.opt, "sampler"):
             sampler = self.opt.sampler
             if isinstance(sampler, PlateauSampler):
@@ -577,6 +578,7 @@ class Hyperopt:
         if fn:
             out_path = fn.with_suffix(".json")
             import json as json_mod
+
             out_path.write_text(json_mod.dumps(data, indent=2, default=str))
             logger.info(
                 f"PlateauSampler: robust params exported to {out_path} "
@@ -598,24 +600,23 @@ class Hyperopt:
         n_params = len(robust)
         n_plateaus = n_params - n_fallback
 
-        print(f"\n{'='*70}")
-        print(f"PlateauSampler — Robust parameters (plateau-anchored)")
-        print(f"{'='*70}")
-        print(f"\n  {n_plateaus}/{n_params} params found stable plateaus"
-              f"{f', {n_fallback} fell back to baseline' if n_fallback else ''}\n")
+        print(f"\n{'=' * 70}")
+        print("PlateauSampler — Robust parameters (plateau-anchored)")
+        print(f"{'=' * 70}")
+        print(
+            f"\n  {n_plateaus}/{n_params} params found stable plateaus"
+            f"{f', {n_fallback} fell back to baseline' if n_fallback else ''}\n"
+        )
         print("  Robust optima:")
         for k, v in robust.items():
             marker = " (baseline fallback)" if v == sampler._baseline.get(k) else ""
             print(f"    {k}: {v}{marker}")
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
+        print("  These params are exported as the strategy's active parameters.")
         print(
-            "  These params are exported as the strategy's active parameters."
+            "  They replace the standard 'Best result' which is NOT meaningful for PlateauSampler."
         )
-        print(
-            "  They replace the standard 'Best result' which is NOT meaningful "
-            "for PlateauSampler."
-        )
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
     @staticmethod
     def _threshold_label(slug: str, value: float) -> str:

@@ -154,8 +154,15 @@ def run_replay(
     # ── 2b. Seed-mode DB prep (DB-integrity critical) ────────────────────
     db_file = _sqlite_file(config["db_url"])
     end_dt, pre_existing_ids, noop = _prep_db(
-        config, db_file, seed=seed, fresh=fresh, reset_db=reset_db,
-        start_dt=start_dt, end_dt=end_dt, pairs=pairs, sub_step=sub_step,
+        config,
+        db_file,
+        seed=seed,
+        fresh=fresh,
+        reset_db=reset_db,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        pairs=pairs,
+        sub_step=sub_step,
     )
     if noop is not None:  # real trades already cover the window → graceful no-op
         return noop
@@ -291,8 +298,16 @@ def run_replay(
         summary = _build_summary(config["db_url"])
         if seed:
             summary = _finalize_seed(
-                config, db_file, pairs, start_dt, end_dt, summary,
-                bot=bot, sub_step=sub_step, duration_s=duration_s, reset_db=reset_db,
+                config,
+                db_file,
+                pairs,
+                start_dt,
+                end_dt,
+                summary,
+                bot=bot,
+                sub_step=sub_step,
+                duration_s=duration_s,
+                reset_db=reset_db,
                 pre_existing_ids=pre_existing_ids,
             )
         _print_summary(summary)
@@ -342,7 +357,10 @@ def _enforce_intracandle_sl(bot, store, clock, candle_type) -> None:
                 bot.execute_trade_exit(trade, trade.stop_loss, exit_check)
                 logger.info(
                     "[replay-SL] %s intra-candle SL hit: stop=%.6f candle=[%.6f, %.6f] → exited",
-                    trade.pair, trade.stop_loss, candle["low"], candle["high"],
+                    trade.pair,
+                    trade.stop_loss,
+                    candle["low"],
+                    candle["high"],
                 )
             except Exception as exc:
                 logger.warning("[replay-SL] failed to exit %s: %s", trade.pair, exc)
@@ -790,8 +808,18 @@ def _sqlite_file(db_url: str | None) -> Path | None:
 
 
 def _finalize_seed(
-    config, db_file, pairs, start_dt, end_dt, summary, *,
-    bot, sub_step, duration_s, reset_db, pre_existing_ids,
+    config,
+    db_file,
+    pairs,
+    start_dt,
+    end_dt,
+    summary,
+    *,
+    bot,
+    sub_step,
+    duration_s,
+    reset_db,
+    pre_existing_ids,
 ):
     """Post-seed: flatten replay open trades, tag, write the marker, guarantee DB integrity."""
     # Hand the live bot a FLAT book: close every replay-created open trade at the last
@@ -801,8 +829,14 @@ def _finalize_seed(
     _tag_replay_trades(exclude_ids=pre_existing_ids)
     summary = _build_summary(config["db_url"])  # refresh after reconciliation
     _write_seed_marker(
-        start_dt, end_dt, pairs, summary,
-        resolution=sub_step, duration_s=duration_s, reset_db=reset_db, truncated=truncated,
+        start_dt,
+        end_dt,
+        pairs,
+        summary,
+        resolution=sub_step,
+        duration_s=duration_s,
+        reset_db=reset_db,
+        truncated=truncated,
     )
     # Integrity guarantee: never leave a corrupt DB — restore the pre-seed backup.
     if not _db_quick_check(db_file):
@@ -829,9 +863,7 @@ def _seed_noop(db_url, exc, start_dt, end_dt, pairs, sub_step, reset_db) -> dict
     return summary
 
 
-def _prep_db(
-    config, db_file, *, seed, fresh, reset_db, start_dt, end_dt, pairs, sub_step
-) -> tuple:
+def _prep_db(config, db_file, *, seed, fresh, reset_db, start_dt, end_dt, pairs, sub_step) -> tuple:
     """Seed/fresh DB preparation. Returns ``(end_dt, pre_existing_ids, noop_summary)`` where
     ``noop_summary`` is non-None only when there is nothing to replay (graceful skip)."""
     pre_existing_ids: set[int] = set()
@@ -841,8 +873,10 @@ def _prep_db(
                 db_file, reset_db=reset_db, start_dt=start_dt, end_dt=end_dt
             )
         except NothingToReplay as exc:
-            return end_dt, pre_existing_ids, _seed_noop(
-                config["db_url"], exc, start_dt, end_dt, pairs, sub_step, reset_db
+            return (
+                end_dt,
+                pre_existing_ids,
+                _seed_noop(config["db_url"], exc, start_dt, end_dt, pairs, sub_step, reset_db),
             )
     elif fresh:
         # Namespaced replay DB only — never drop the bot's live dry-run file.
@@ -868,9 +902,7 @@ def _prepare_seed_db(db_file, *, reset_db, start_dt, end_dt):
         )
         end_dt = cutoff
     if end_dt <= start_dt:
-        raise NothingToReplay(
-            "existing real trades start at/before the requested start date"
-        )
+        raise NothingToReplay("existing real trades start at/before the requested start date")
     return end_dt, pre_existing
 
 

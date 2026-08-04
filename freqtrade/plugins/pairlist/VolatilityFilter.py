@@ -43,6 +43,7 @@ class VolatilityFilter(IPairList):
         self._params_hash = ""
         try:
             from freqtrade.pairlist_cache.client import PairlistCacheClient
+
             self._shared_client = PairlistCacheClient.get_or_spawn()
             self._params_hash = PairlistCacheClient.compute_params_hash(self._pairlistconfig)
         except Exception:
@@ -154,8 +155,10 @@ class VolatilityFilter(IPairList):
 
         if newly_computed and self._shared_client:
             self._shared_client.mput(
-                "VolatilityFilter", self._params_hash,
-                newly_computed, ttl=self._refresh_period,
+                "VolatilityFilter",
+                self._params_hash,
+                newly_computed,
+                ttl=self._refresh_period,
             )
 
         if self._sort_direction:

@@ -31,9 +31,7 @@ class CandleSeries:
     timeframe: str
     candle_type: str
     tf_ms: int
-    candles: np.ndarray = field(
-        default_factory=lambda: np.empty((0, 6), dtype=np.float64)
-    )
+    candles: np.ndarray = field(default_factory=lambda: np.empty((0, 6), dtype=np.float64))
     # Earliest timestamp the exchange serves for this series. None until a
     # fetch returns fewer candles than requested with a first_ts > our
     # since_ms, indicating we've hit the historic boundary. Subsequent
@@ -89,8 +87,10 @@ class CandleSeries:
         new_arr = np.asarray(new_candles, dtype=np.float64)
         if new_arr.ndim != 2 or new_arr.shape[1] < 6:
             logger.warning(
-                "merge: unexpected shape %s for %s %s", new_arr.shape,
-                self.pair, self.timeframe,
+                "merge: unexpected shape %s for %s %s",
+                new_arr.shape,
+                self.pair,
+                self.timeframe,
             )
             return len(self.candles)
         # Drop any extra columns (Binance quote volume, KuCoin turnover, etc.)
@@ -130,20 +130,33 @@ class CandleStore:
 
     @staticmethod
     def make_key(
-        exchange: str, trading_mode: str, pair: str, timeframe: str, candle_type: str,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
     ) -> tuple[str, str, str, str, str]:
         return (exchange, trading_mode, pair, timeframe, candle_type)
 
     def get_or_create(
-        self, exchange: str, trading_mode: str, pair: str,
-        timeframe: str, candle_type: str, tf_ms: int,
+        self,
+        exchange: str,
+        trading_mode: str,
+        pair: str,
+        timeframe: str,
+        candle_type: str,
+        tf_ms: int,
     ) -> CandleSeries:
         k = self.make_key(exchange, trading_mode, pair, timeframe, candle_type)
         s = self._series.get(k)
         if s is None:
             s = CandleSeries(
-                exchange=exchange, trading_mode=trading_mode, pair=pair,
-                timeframe=timeframe, candle_type=candle_type, tf_ms=tf_ms,
+                exchange=exchange,
+                trading_mode=trading_mode,
+                pair=pair,
+                timeframe=timeframe,
+                candle_type=candle_type,
+                tf_ms=tf_ms,
             )
             self._series[k] = s
         return s
@@ -157,7 +170,10 @@ class CandleStore:
     def put(self, series: CandleSeries) -> None:
         """Insert a pre-built series (used by persistence loader)."""
         k = self.make_key(
-            series.exchange, series.trading_mode, series.pair,
-            series.timeframe, series.candle_type,
+            series.exchange,
+            series.trading_mode,
+            series.pair,
+            series.timeframe,
+            series.candle_type,
         )
         self._series[k] = series

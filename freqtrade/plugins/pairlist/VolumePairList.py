@@ -105,10 +105,9 @@ class VolumePairList(IPairList):
         if self._use_range:
             try:
                 from freqtrade.pairlist_cache.client import PairlistCacheClient
+
                 self._shared_client = PairlistCacheClient.get_or_spawn()
-                self._params_hash = PairlistCacheClient.compute_params_hash(
-                    self._pairlistconfig
-                )
+                self._params_hash = PairlistCacheClient.compute_params_hash(self._pairlistconfig)
             except Exception:
                 logger.info("Shared pairlist cache unavailable, using local cache only.")
 
@@ -269,8 +268,7 @@ class VolumePairList(IPairList):
             shared_volumes: dict[str, float] = {}
             if self._shared_client:
                 uncached_symbols = [
-                    s["symbol"] for s in filtered_tickers
-                    if s["symbol"] not in self._pair_cache
+                    s["symbol"] for s in filtered_tickers if s["symbol"] not in self._pair_cache
                 ]
                 if uncached_symbols:
                     shared = self._shared_client.mget(
@@ -333,8 +331,10 @@ class VolumePairList(IPairList):
 
             if newly_computed and self._shared_client:
                 self._shared_client.mput(
-                    "VolumePairList", self._params_hash,
-                    newly_computed, ttl=self._refresh_period,
+                    "VolumePairList",
+                    self._params_hash,
+                    newly_computed,
+                    ttl=self._refresh_period,
                 )
         else:
             # Tickers mode - filter based on incoming pairlist.

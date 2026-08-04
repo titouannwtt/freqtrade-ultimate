@@ -49,15 +49,14 @@ class TrendRegularityFilter(IPairList):
         self._params_hash = ""
         try:
             from freqtrade.pairlist_cache.client import PairlistCacheClient
+
             self._shared_client = PairlistCacheClient.get_or_spawn()
             self._params_hash = PairlistCacheClient.compute_params_hash(self._pairlistconfig)
         except Exception:
             logger.info("Shared pairlist cache unavailable, using local cache only.")
 
         if self._lookback_period < 2:
-            raise OperationalException(
-                "TrendRegularityFilter requires lookback_period to be >= 2"
-            )
+            raise OperationalException("TrendRegularityFilter requires lookback_period to be >= 2")
 
         from freqtrade.exchange import timeframe_to_minutes
 
@@ -142,18 +141,14 @@ class TrendRegularityFilter(IPairList):
             if p not in self._pair_cache
         ]
 
-        since_ms = (
-            dt_ts(dt_now() - timedelta(minutes=self._lookback_period * self._tf_in_min))
-        )
+        since_ms = dt_ts(dt_now() - timedelta(minutes=self._lookback_period * self._tf_in_min))
         candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms=since_ms)
 
         freshly_needed = {p for p, _, _ in needed_pairs}
         newly_computed: dict[str, dict] = {}
         resulting_pairlist: list[str] = []
         for p in pairlist:
-            pair_candles = candles.get(
-                (p, self._lookback_timeframe, self._def_candletype), None
-            )
+            pair_candles = candles.get((p, self._lookback_timeframe, self._def_candletype), None)
 
             should_exclude = self._check_trend(p, pair_candles)
 
@@ -161,9 +156,7 @@ class TrendRegularityFilter(IPairList):
                 newly_computed[p] = {"exclude": should_exclude}
 
             if should_exclude is None:
-                self.log_once(
-                    f"Removed {p} from whitelist, no candles found.", logger.info
-                )
+                self.log_once(f"Removed {p} from whitelist, no candles found.", logger.info)
             elif should_exclude:
                 pass
             else:
@@ -171,8 +164,10 @@ class TrendRegularityFilter(IPairList):
 
         if newly_computed and self._shared_client:
             self._shared_client.mput(
-                "TrendRegularityFilter", self._params_hash,
-                newly_computed, ttl=self._refresh_period,
+                "TrendRegularityFilter",
+                self._params_hash,
+                newly_computed,
+                ttl=self._refresh_period,
             )
 
         return resulting_pairlist

@@ -38,9 +38,7 @@ def start_walk_forward(args: dict[str, Any]) -> None:
             wfa.start()
 
     except Timeout:
-        logger.info(
-            "Another running instance of freqtrade Walk-Forward detected."
-        )
+        logger.info("Another running instance of freqtrade Walk-Forward detected.")
         logger.info(
             "Simultaneous execution is not supported. "
             "Please run Walk-Forward analysis sequentially."

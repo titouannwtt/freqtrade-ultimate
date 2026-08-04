@@ -19,15 +19,15 @@ PROTOCOL_VERSION = 2
 class FetchRequest:
     req_id: str
     exchange: str
-    trading_mode: str           # "spot" | "futures"
+    trading_mode: str  # "spot" | "futures"
     pair: str
     timeframe: str
-    candle_type: str            # CandleType string value
+    candle_type: str  # CandleType string value
     since_ms: int | None = None
     limit: int | None = None
     op: str = "fetch"
-    priority: int = 2           # 0=CRITICAL, 1=HIGH, 2=NORMAL, 3=LOW
-    capital: float = 0.0        # stake capital for intra-priority ordering
+    priority: int = 2  # 0=CRITICAL, 1=HIGH, 2=NORMAL, 3=LOW
+    capital: float = 0.0  # stake capital for intra-priority ordering
 
 
 @dataclass
@@ -43,9 +43,9 @@ class FetchResponse:
     pair: str = ""
     timeframe: str = ""
     candle_type: str = ""
-    data: list = field(default_factory=list)     # list of [ts, o, h, l, c, v]
+    data: list = field(default_factory=list)  # list of [ts, o, h, l, c, v]
     drop_incomplete: bool = True
-    served_from: str = ""                         # "cache" | "fetch" | "fallback"
+    served_from: str = ""  # "cache" | "fetch" | "fallback"
     latency_ms: float = 0.0
     error_type: str = ""
     error_message: str = ""

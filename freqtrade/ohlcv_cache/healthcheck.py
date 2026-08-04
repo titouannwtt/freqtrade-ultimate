@@ -102,8 +102,7 @@ def ftcache_status(sock_path: str) -> int:
             )
             p_rate = (p_hits / p_gets * 100) if p_gets > 0 else 0
             print(
-                f"         positions: {p_gets} gets  {p_hits} hits"
-                f" ({p_rate:.0f}%)  {p_puts} puts",
+                f"         positions: {p_gets} gets  {p_hits} hits ({p_rate:.0f}%)  {p_puts} puts",
             )
 
     return 0
@@ -154,31 +153,38 @@ def ftpairlist_status(sock_path: str) -> int:
 
 def main() -> int:
     import argparse
+
     parser = argparse.ArgumentParser(
         description="Check ftcache / ftpairlist daemon health",
     )
     parser.add_argument(
-        "--pairlist", action="store_true",
+        "--pairlist",
+        action="store_true",
         help="Check pairlist cache daemon instead of ftcache",
     )
     parser.add_argument(
-        "--socket", default=None,
+        "--socket",
+        default=None,
         help="Override socket path",
     )
     parser.add_argument(
-        "--json", action="store_true", dest="output_json",
+        "--json",
+        action="store_true",
+        dest="output_json",
         help="Output raw JSON stats",
     )
     args = parser.parse_args()
 
     if args.pairlist:
         from freqtrade.pairlist_cache.defaults import default_socket_path
+
         sock = args.socket or default_socket_path()
         if args.output_json:
             return _json_output(sock)
         return ftpairlist_status(sock)
     else:
         from freqtrade.ohlcv_cache.defaults import default_socket_path
+
         sock = args.socket or default_socket_path()
         if args.output_json:
             return _json_output(sock)

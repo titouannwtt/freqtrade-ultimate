@@ -5,6 +5,7 @@ Runs optimization jobs as subprocesses so they work alongside trading-mode bots.
 Results land in the standard backtest_results/hyperopt_results/walk_forward_results
 directories, which the existing stratdev reader already scans.
 """
+
 from __future__ import annotations
 
 import logging
@@ -144,8 +145,17 @@ class JobStartRequest(BaseModel):
     def validate_spaces(cls, v: list[str] | None) -> list[str] | None:
         if v is not None:
             valid = {
-                "default", "all", "buy", "sell", "enter", "exit",
-                "roi", "stoploss", "trailing", "protection", "trades",
+                "default",
+                "all",
+                "buy",
+                "sell",
+                "enter",
+                "exit",
+                "roi",
+                "stoploss",
+                "trailing",
+                "protection",
+                "trades",
             }
             for s in v:
                 if s not in valid:
@@ -157,8 +167,12 @@ class JobStartRequest(BaseModel):
     def validate_sampler(cls, v: str | None) -> str | None:
         if v is not None:
             valid = {
-                "NSGAIIISampler", "NSGAIISampler", "TPESampler",
-                "CmaEsSampler", "GPSampler", "QMCSampler",
+                "NSGAIIISampler",
+                "NSGAIISampler",
+                "TPESampler",
+                "CmaEsSampler",
+                "GPSampler",
+                "QMCSampler",
             }
             if v not in valid:
                 raise ValueError(f"Invalid sampler: {v!r}")
@@ -336,9 +350,7 @@ class _JobManager:
 
             self._spawn(job, project_root)
 
-            if self._active and self._active.status not in (
-                JobStatus.pending, JobStatus.running
-            ):
+            if self._active and self._active.status not in (JobStatus.pending, JobStatus.running):
                 self._history.appendleft(self._active)
             self._active = job
             return job
@@ -400,15 +412,14 @@ class _JobManager:
         config: dict[str, Any],
     ) -> list[str]:
         import sys
+
         venv_ft = Path(sys.executable).parent / "freqtrade"
         if venv_ft.is_file():
             ft_bin = str(venv_ft)
         else:
             ft_bin = shutil.which("freqtrade")
         if not ft_bin:
-            raise HTTPException(
-                status_code=500, detail="freqtrade binary not found in PATH"
-            )
+            raise HTTPException(status_code=500, detail="freqtrade binary not found in PATH")
 
         cmd = [ft_bin, _JOBTYPE_TO_CLI[req.job_type], "-c", str(config_path)]
         cmd.extend(["-s", req.strategy])
@@ -529,9 +540,7 @@ class _JobManager:
             job.status = JobStatus.running
             job.started_at = time.time()
 
-            reader = threading.Thread(
-                target=self._read_output, args=(job,), daemon=True
-            )
+            reader = threading.Thread(target=self._read_output, args=(job,), daemon=True)
             reader.start()
             job._reader_thread = reader
 
@@ -580,7 +589,8 @@ class _JobManager:
         has_error = bool(self._ERROR_PATTERNS.search(log_text))
         has_success = bool(self._SUCCESS_PATTERNS.search(log_text))
         ran_too_fast = (
-            job.started_at and job.finished_at
+            job.started_at
+            and job.finished_at
             and (job.finished_at - job.started_at) < 3.0
             and not has_success
         )
@@ -596,7 +606,11 @@ class _JobManager:
         elif ran_too_fast:
             job.status = JobStatus.failed
             last_lines = list(job.log_buffer)[-10:]
-            job.error = "\n".join(last_lines) if last_lines else "Process exited too quickly (< 3s) with no output"
+            job.error = (
+                "\n".join(last_lines)
+                if last_lines
+                else "Process exited too quickly (< 3s) with no output"
+            )
             logger.warning(f"Job {job.job_id} failed (too fast, exit {exit_code})")
         elif has_error:
             job.status = JobStatus.failed
@@ -676,7 +690,8 @@ def list_configs(config=Depends(get_config)):
 
     strategy_dir = Path(config.get("user_data_dir", "")) / "strategies"
     strategies = sorted(
-        f.stem for f in strategy_dir.glob("*.py")
+        f.stem
+        for f in strategy_dir.glob("*.py")
         if not f.name.startswith("_") and f.name != "__init__.py"
     )
 

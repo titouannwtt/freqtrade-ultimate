@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 
 logger = logging.getLogger("ftcache.daemon")
@@ -30,7 +30,9 @@ class RequestCoordinator:
         self._inflight: dict[InflightKey, asyncio.Future] = {}
 
     async def run(
-        self, key: InflightKey, fetcher: Callable[[], Awaitable[None]],
+        self,
+        key: InflightKey,
+        fetcher: Callable[[], Awaitable[None]],
     ) -> None:
         """Either run `fetcher()` and broadcast its result, or await an
         already-running one for this key."""
@@ -46,15 +48,13 @@ class RequestCoordinator:
 
         fut = asyncio.get_running_loop().create_future()
         # Swallow unawaited-exception asyncio warnings for this future.
-        fut.add_done_callback(
-            lambda f: f.exception() if not f.cancelled() else None
-        )
+        fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
         self._inflight[key] = fut
         try:
             await fetcher()
             if not fut.done():
                 fut.set_result(None)
-        except Exception as e:
+        except Exception:
             if not fut.done():
                 # Signal completion to waiters without propagating the error.
                 fut.set_result(None)

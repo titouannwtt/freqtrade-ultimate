@@ -291,6 +291,37 @@ max-complexity = 12
   "RUF100",  # Allow unused noqa
 ]
 
+# --- Fork lint baseline -------------------------------------------------
+# Pre-existing violations in fork-added modules, frozen per file so CI can be
+# enforced on everything else. This is debt to pay down, not a standard: adding
+# a NEW violation of these rules anywhere else still fails the build. The S110/
+# S112 entries (silently swallowed exceptions) are the ones worth fixing first —
+# on trading code they hide real incidents.
+"freqtrade/commands/deploy_ui.py" = ["S202"]
+"freqtrade/data/dataprovider.py" = ["S110"]
+"freqtrade/freqtradebot.py" = ["C901", "E741"]
+"freqtrade/ohlcv_cache/client.py" = ["C901", "PTH108", "PTH110", "PTH123"]
+"freqtrade/ohlcv_cache/coordinator.py" = ["S110"]
+"freqtrade/ohlcv_cache/daemon.py" = ["C901", "PTH101", "PTH105", "PTH108", "PTH110", "PTH116", "PTH123"]
+"freqtrade/ohlcv_cache/defaults.py" = ["E501", "S108"]
+"freqtrade/ohlcv_cache/mixin.py" = ["C901", "RUF002"]
+"freqtrade/ohlcv_cache/warmup.py" = ["RUF001", "S108", "S110"]
+"freqtrade/optimize/hyperopt/hyperopt.py" = ["C901", "S110"]
+"freqtrade/optimize/hyperopt/hyperopt_optimizer.py" = ["E402", "RUF001", "RUF003", "S112"]
+"freqtrade/optimize/hyperopt/plateau_sampler.py" = ["E501", "RUF002", "RUF003"]
+"freqtrade/optimize/hyperopt_loss/hyperopt_loss_my_profit_drawdown.py" = ["F841"]
+"freqtrade/optimize/stratdev_dataframe.py" = ["C901"]
+"freqtrade/optimize/stratdev_readers.py" = ["C901", "E501", "E741", "F841", "S110", "S112"]
+"freqtrade/plugins/pairlist/VolumePairList.py" = ["C901"]
+"freqtrade/replay/runner.py" = ["C901", "S110"]
+"freqtrade/rpc/api_server/api_stratdev_editor.py" = ["E501", "E741", "S110"]
+"freqtrade/rpc/api_server/api_stratdev_jobs.py" = ["C901", "PTH123", "S101", "S110"]
+"freqtrade/rpc/api_server/api_v1.py" = ["E501"]
+"freqtrade/rpc/rpc.py" = ["C901"]
+"freqtrade/wallets.py" = ["E402", "RUF003"]
+"freqtrade/worker.py" = ["S324"]
+
+
 "ft_client/test_client/**.py" = [
   "S101",  # allow assert in tests
 ]

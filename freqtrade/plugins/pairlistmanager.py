@@ -171,11 +171,13 @@ class PairListManager(LoggingMixin):
         # Generate the pairlist with first Pairlist Handler in the chain
         pairlist = self._pairlist_handlers[0].gen_pairlist(tickers)
 
-        snapshot: list[dict] = [{
-            "handler": self._pairlist_handlers[0].name,
-            "count_after": len(pairlist),
-            "pairs_removed": [],
-        }]
+        snapshot: list[dict] = [
+            {
+                "handler": self._pairlist_handlers[0].name,
+                "count_after": len(pairlist),
+                "pairs_removed": [],
+            }
+        ]
 
         # Optional intersection with an explicit list of pairs (used in backtesting)
         if pairs is not None:
@@ -188,11 +190,13 @@ class PairListManager(LoggingMixin):
                 prev_set = set(pairlist)
                 pairlist = pairlist_handler.filter_pairlist(pairlist, tickers)
                 removed = sorted(prev_set - set(pairlist))
-                snapshot.append({
-                    "handler": pairlist_handler.name,
-                    "count_after": len(pairlist),
-                    "pairs_removed": removed,
-                })
+                snapshot.append(
+                    {
+                        "handler": pairlist_handler.name,
+                        "count_after": len(pairlist),
+                        "pairs_removed": removed,
+                    }
+                )
 
         # Validation against blacklist happens after the chain of Pairlist Handlers
         # to ensure blacklist is respected.
@@ -200,11 +204,13 @@ class PairListManager(LoggingMixin):
         pairlist = self.verify_blacklist(pairlist, logger.warning)
         bl_removed = sorted(prev_set - set(pairlist))
         if bl_removed:
-            snapshot.append({
-                "handler": "Blacklist",
-                "count_after": len(pairlist),
-                "pairs_removed": bl_removed,
-            })
+            snapshot.append(
+                {
+                    "handler": "Blacklist",
+                    "count_after": len(pairlist),
+                    "pairs_removed": bl_removed,
+                }
+            )
 
         self._pipeline_snapshot = snapshot
         self.log_once(f"Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)

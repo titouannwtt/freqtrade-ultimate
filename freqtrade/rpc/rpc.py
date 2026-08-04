@@ -484,13 +484,15 @@ class RPC:
         freq = bucket_freq_map.get(bucket, "1D")
 
         start_date = datetime.now(UTC) - timedelta(days=days)
-        tr = TimeRange.parse_timerange(
-            f"{start_date.strftime('%Y%m%d')}-"
-        )
+        tr = TimeRange.parse_timerange(f"{start_date.strftime('%Y%m%d')}-")
 
         pair_data = load_data(
-            datadir=datadir, timeframe="1d", pairs=list(whitelist),
-            timerange=tr, fill_up_missing=False, candle_type=candle_type,
+            datadir=datadir,
+            timeframe="1d",
+            pairs=list(whitelist),
+            timerange=tr,
+            fill_up_missing=False,
+            candle_type=candle_type,
         )
 
         pairs_with_data = sum(1 for df in pair_data.values() if len(df) > 0)
@@ -506,40 +508,45 @@ class RPC:
 
         if all_volumes:
             import pandas as pd
+
             combined = pd.concat(all_volumes, ignore_index=True)
             exchange_buckets = (
-                combined.groupby(pd.Grouper(key="date", freq=freq))["quote_vol"]
-                .sum()
-                .reset_index()
+                combined.groupby(pd.Grouper(key="date", freq=freq))["quote_vol"].sum().reset_index()
             )
             exchange_buckets.columns = ["date", "exchange_volume"]
         else:
             import pandas as pd
+
             exchange_buckets = pd.DataFrame(columns=["date", "exchange_volume"])
 
         trades_query = Trade.session.execute(
             select(
                 Trade.close_date,
                 Trade.close_profit_abs,
-            ).filter(
+            )
+            .filter(
                 Trade.is_open.is_(False),
                 Trade.close_date >= start_date,
-            ).order_by(Trade.close_date)
+            )
+            .order_by(Trade.close_date)
         ).all()
 
         orders_query = Trade.session.execute(
             select(
                 Trade.close_date,
                 func.sum(Order.cost).label("cost"),
-            ).join(Order._trade_live)
+            )
+            .join(Order._trade_live)
             .filter(
                 Trade.is_open.is_(False),
                 Trade.close_date >= start_date,
                 Order.status == "closed",
-            ).group_by(Trade.id, Trade.close_date)
+            )
+            .group_by(Trade.id, Trade.close_date)
         ).all()
 
         import pandas as pd
+
         if trades_query:
             trades_df = pd.DataFrame(
                 [(t.close_date, t.close_profit_abs or 0.0) for t in trades_query],
@@ -552,9 +559,7 @@ class RPC:
                 .reset_index()
             )
         else:
-            trade_buckets = pd.DataFrame(
-                columns=["date", "trade_count", "abs_profit"]
-            )
+            trade_buckets = pd.DataFrame(columns=["date", "trade_count", "abs_profit"])
 
         if orders_query:
             orders_df = pd.DataFrame(
@@ -609,14 +614,17 @@ class RPC:
 
         buckets = []
         for _, row in merged.iterrows():
-            buckets.append({
-                "date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime")
-                else str(row["date"]),
-                "exchange_volume": round(float(row["exchange_volume"]), 2),
-                "bot_volume": round(float(row["bot_volume"]), 2),
-                "trade_count": int(row["trade_count"]),
-                "abs_profit": round(float(row["abs_profit"]), 4),
-            })
+            buckets.append(
+                {
+                    "date": row["date"].strftime("%Y-%m-%d")
+                    if hasattr(row["date"], "strftime")
+                    else str(row["date"]),
+                    "exchange_volume": round(float(row["exchange_volume"]), 2),
+                    "bot_volume": round(float(row["bot_volume"]), 2),
+                    "trade_count": int(row["trade_count"]),
+                    "abs_profit": round(float(row["abs_profit"]), 4),
+                }
+            )
 
         result = {
             "buckets": buckets,
@@ -970,7 +978,8 @@ class RPC:
             "bot_start_timestamp": dt_ts_def(bot_start, 0),
             "bot_start_date": format_date(bot_start),
             "capital_withdrawal": self._freqtrade.wallets.get_capital_withdrawal(),
-            "profit_net_coin": profit_closed_coin_sum - self._freqtrade.wallets.get_capital_withdrawal(),
+            "profit_net_coin": profit_closed_coin_sum
+            - self._freqtrade.wallets.get_capital_withdrawal(),
         }
 
     def _rpc_get_historic_balance(self) -> tuple[DataFrame, int]:
@@ -1710,13 +1719,9 @@ class RPC:
                 active_only=True,
             )
             if trading_mode == "futures":
-                total_market_pairs = len([
-                    m for m in all_markets.values() if m.get("swap", False)
-                ])
+                total_market_pairs = len([m for m in all_markets.values() if m.get("swap", False)])
             else:
-                total_market_pairs = len([
-                    m for m in all_markets.values() if m.get("spot", False)
-                ])
+                total_market_pairs = len([m for m in all_markets.values() if m.get("spot", False)])
         except Exception:
             total_market_pairs = 0
 
@@ -2136,7 +2141,8 @@ class RPC:
             return {"error": str(e)}
 
     def _rpc_fleet_events(
-        self, since_ts: float = 0,
+        self,
+        since_ts: float = 0,
         event_types: list[str] | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
@@ -2146,8 +2152,10 @@ class RPC:
 
             sock = default_socket_path()
             req: dict[str, Any] = {
-                "op": "fleet_events", "req_id": "api-events",
-                "since_ts": since_ts, "limit": limit,
+                "op": "fleet_events",
+                "req_id": "api-events",
+                "since_ts": since_ts,
+                "limit": limit,
             }
             if event_types:
                 req["event_types"] = event_types
@@ -2156,7 +2164,9 @@ class RPC:
             return {"error": str(e), "events": []}
 
     def _rpc_rate_metrics(
-        self, window: int = 3600, bucket_s: int = 10,
+        self,
+        window: int = 3600,
+        bucket_s: int = 10,
     ) -> dict[str, Any]:
         exchange = self._freqtrade.exchange
         metrics = exchange.api_metrics
@@ -2194,12 +2204,19 @@ class RPC:
                     "queue_depths": budget.get("queue_depths", {}),
                 }
                 result["ftcache_extended"] = {
-                    k: stats.get(k, 0) for k in [
-                        "requests_total", "cache_hits", "cache_partial",
-                        "cache_misses", "acquire_total",
-                        "tickers_requests", "tickers_cache_hits",
-                        "tickers_fetches", "positions_puts",
-                        "positions_gets", "positions_cache_hits",
+                    k: stats.get(k, 0)
+                    for k in [
+                        "requests_total",
+                        "cache_hits",
+                        "cache_partial",
+                        "cache_misses",
+                        "acquire_total",
+                        "tickers_requests",
+                        "tickers_cache_hits",
+                        "tickers_fetches",
+                        "positions_puts",
+                        "positions_gets",
+                        "positions_cache_hits",
                     ]
                 }
                 hit_rate_keys = {
@@ -2238,9 +2255,7 @@ class RPC:
                     "hits": w_hits,
                     "puts": round(pl_stats.get("puts", 0) * ratio),
                     "entries": pl_stats.get("entries", 0),
-                    "hit_rate_pct": (
-                        round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0
-                    ),
+                    "hit_rate_pct": (round(pl_hits / pl_gets * 100, 1) if pl_gets > 0 else 0),
                 }
                 pl_by_method = pl_stats.get("by_method", {})
                 if pl_by_method and "summary" in result and "by_method" in result["summary"]:
@@ -2259,9 +2274,9 @@ class RPC:
         except Exception:  # noqa: S110
             pass
 
-        rate_limit = getattr(exchange, '_ft_has', {}).get('rateLimit', None)
+        rate_limit = getattr(exchange, "_ft_has", {}).get("rateLimit", None)
         if rate_limit is None:
-            rate_limit = getattr(exchange._api, 'rateLimit', None)
+            rate_limit = getattr(exchange._api, "rateLimit", None)
         if rate_limit:
             result["exchange_rate_limit"] = {
                 "rate_limit_ms": rate_limit,

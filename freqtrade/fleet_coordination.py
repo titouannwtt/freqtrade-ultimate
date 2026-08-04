@@ -401,7 +401,8 @@ class PositionCoordinator:
                 continue
             out.append(
                 SiblingPosition(
-                    data.get("bot", "?"), bool(data.get("is_short", False)),
+                    data.get("bot", "?"),
+                    bool(data.get("is_short", False)),
                     float(data.get("leverage", 1.0)),
                 )
             )
@@ -422,7 +423,8 @@ class PositionCoordinator:
         if not self._is_futures:
             if self.mode == MODE_STRICT:
                 return Decision(
-                    False, my_leverage,
+                    False,
+                    my_leverage,
                     f"{pair} already held by sibling {siblings[0].bot_name} (strict, spot)",
                 )
             return Decision(True, my_leverage)
@@ -430,7 +432,8 @@ class PositionCoordinator:
         # Futures
         if self.mode == MODE_STRICT:
             return Decision(
-                False, my_leverage,
+                False,
+                my_leverage,
                 f"{pair} already held by sibling {siblings[0].bot_name} (strict mode)",
             )
 
@@ -439,16 +442,15 @@ class PositionCoordinator:
         for s in siblings:
             if s.is_short != wanted_short:
                 return Decision(
-                    False, my_leverage,
+                    False,
+                    my_leverage,
                     f"{pair} held by sibling {s.bot_name} on the OPPOSITE side "
                     f"({'short' if s.is_short else 'long'}) — netting risk",
                 )
 
         return self._reconcile_leverage(pair, my_leverage, [s.leverage for s in siblings])
 
-    def _reconcile_leverage(
-        self, pair: str, my_leverage: float, sib_levs: list[float]
-    ) -> Decision:
+    def _reconcile_leverage(self, pair: str, my_leverage: float, sib_levs: list[float]) -> Decision:
         """Resolve the leverage of a same-side compat share per ``leverage_policy``."""
         existing = sib_levs[0]
         if self.leverage_policy == LEV_CAP:
@@ -460,7 +462,8 @@ class PositionCoordinator:
             coin_lev = max(sib_levs)
             if int(coin_lev) > int(my_leverage):
                 return Decision(
-                    False, my_leverage,
+                    False,
+                    my_leverage,
                     f"{pair} coin already at {coin_lev:g}x on the shared wallet, above my "
                     f"{my_leverage:g}x (leverage_policy=cap) — not opening to avoid inheriting "
                     f"a higher leverage than intended",
@@ -471,7 +474,8 @@ class PositionCoordinator:
         if self.leverage_policy == LEV_BLOCK:
             if any(int(lv) != int(my_leverage) for lv in sib_levs):
                 return Decision(
-                    False, my_leverage,
+                    False,
+                    my_leverage,
                     f"{pair} leverage mismatch (mine {my_leverage:g}x vs sibling {existing:g}x) "
                     f"and leverage_policy=block",
                 )
@@ -484,7 +488,9 @@ class PositionCoordinator:
             target = existing
 
         return Decision(
-            True, float(target), leverage_changed=int(target) != int(existing),
+            True,
+            float(target),
+            leverage_changed=int(target) != int(existing),
         )
 
     # ----- intent markers -----------------------------------------------------

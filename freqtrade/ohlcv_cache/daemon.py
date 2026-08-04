@@ -40,7 +40,6 @@ from typing import Any
 
 from freqtrade.ohlcv_cache.coordinator import RequestCoordinator
 from freqtrade.ohlcv_cache.defaults import (
-    EXCHANGE_DEFAULTS,
     resolve_exchange_config,
     resolve_global_config,
 )
@@ -659,7 +658,7 @@ class ExchangeFetcher:
         if self._client is not None:
             try:
                 await self._client.close()
-            except Exception:
+            except Exception:  # noqa: S110 - best-effort close during shutdown
                 pass
 
 
@@ -978,9 +977,7 @@ class Daemon:
         self._swr_enabled = bool(global_cfg.get("swr_enabled", True))
         self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 8))
         self._swr_dry_max_stale_candles = int(global_cfg.get("swr_dry_max_stale_candles", 20))
-        self._swr_max_missing_tail_candles = int(
-            global_cfg.get("swr_max_missing_tail_candles", 4)
-        )
+        self._swr_max_missing_tail_candles = int(global_cfg.get("swr_max_missing_tail_candles", 4))
         self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
         self._swr_inflight: set = set()  # series keys with a background refresh pending
         self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
@@ -1440,18 +1437,33 @@ class Daemon:
                     else TokenBucket.LOW
                 )
                 self._schedule_swr_refresh(
-                    series, exchange, trading_mode, pair, timeframe,
-                    candle_type, gaps, ex_cfg, tf_ms, refresh_prio,
+                    series,
+                    exchange,
+                    trading_mode,
+                    pair,
+                    timeframe,
+                    candle_type,
+                    gaps,
+                    ex_cfg,
+                    tf_ms,
+                    refresh_prio,
                 )
             series.hits += 1
             self.stats.cache_swr += 1
-            return self._ok(
-                req["req_id"], series, start_ms, end_ms, t0, served_from="stale"
-            )
+            return self._ok(req["req_id"], series, start_ms, end_ms, t0, served_from="stale")
 
         errors, shed_errors = await self._fill_chunks(
-            series, exchange, trading_mode, pair, timeframe, candle_type,
-            gaps, ex_cfg, tf_ms, priority, capital,
+            series,
+            exchange,
+            trading_mode,
+            pair,
+            timeframe,
+            candle_type,
+            gaps,
+            ex_cfg,
+            tf_ms,
+            priority,
+            capital,
         )
 
         if is_live and errors == 0:
@@ -2567,7 +2579,7 @@ class Daemon:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
+            except Exception:  # noqa: S110 - peer may already be gone
                 pass
 
     async def _idle_watchdog(self) -> None:
@@ -2629,7 +2641,7 @@ class Daemon:
                     logger.warning("central positions fetch failed for %s: %s", exchange, e)
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 pass
 
     async def _periodic_stats(self) -> None:
@@ -2885,7 +2897,7 @@ def main() -> int:
                 pass
             fcntl.flock(pid_lock_fd, fcntl.LOCK_UN)
             os.close(pid_lock_fd)
-        except Exception:
+        except Exception:  # noqa: S110 - pid-lock release must never raise
             pass
     return 0
 

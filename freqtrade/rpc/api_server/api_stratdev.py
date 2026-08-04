@@ -30,6 +30,7 @@ async def _safe_to_thread(func, *args):
             raise HTTPException(status_code=503, detail="Server shutting down")
         raise
 
+
 _runs_cache: AllRunsResponse | None = None
 _runs_cache_ts: float = 0.0
 _RUNS_CACHE_TTL_S = 300.0
@@ -130,7 +131,12 @@ async def api_list_all_runs(
         return _runs_cache
 
     result = await _safe_to_thread(
-        _build_all_runs, config, strategy, run_type, ho_offset, ho_limit,
+        _build_all_runs,
+        config,
+        strategy,
+        run_type,
+        ho_offset,
+        ho_limit,
     )
     if not strategy and not run_type and not is_paginated:
         _runs_cache = AllRunsResponse(**result)
@@ -177,7 +183,10 @@ async def api_hyperopt_epoch_advanced(
     from freqtrade.optimize.stratdev_readers import compute_epoch_advanced_analytics
 
     return await _safe_to_thread(
-        compute_epoch_advanced_analytics, _ho_dir(config), filename, rank,
+        compute_epoch_advanced_analytics,
+        _ho_dir(config),
+        filename,
+        rank,
     )
 
 
@@ -222,7 +231,9 @@ async def api_update_hyperopt_meta(
     config: dict = Depends(get_config),
 ) -> dict[str, str]:
     return await _safe_to_thread(
-        _update_meta, _ho_dir(config) / f"{filename}.meta.json", body,
+        _update_meta,
+        _ho_dir(config) / f"{filename}.meta.json",
+        body,
     )
 
 
@@ -295,7 +306,10 @@ async def api_backtest_analysis(
     from freqtrade.optimize.stratdev_readers import compute_backtest_analytics
 
     return await _safe_to_thread(
-        compute_backtest_analytics, _bt_dir(config), filename, strategy,
+        compute_backtest_analytics,
+        _bt_dir(config),
+        filename,
+        strategy,
     )
 
 
@@ -311,7 +325,10 @@ async def api_backtest_snapshot(
     from freqtrade.optimize.stratdev_readers import get_backtest_snapshot
 
     result = await _safe_to_thread(
-        get_backtest_snapshot, _bt_dir(config), filename, strategy,
+        get_backtest_snapshot,
+        _bt_dir(config),
+        filename,
+        strategy,
     )
     return BacktestSnapshotResponse(**result)
 
@@ -334,8 +351,11 @@ async def api_snapshot_diff(
 
         if body.diff_type == "strategy":
             saved, current_path = _get_strategy_snapshot(
-                body, config,
-                get_hyperopt_run_detail, get_wfa_run_detail, get_backtest_snapshot,
+                body,
+                config,
+                get_hyperopt_run_detail,
+                get_wfa_run_detail,
+                get_backtest_snapshot,
             )
         elif body.diff_type == "config":
             saved, current_path = _get_config_snapshot(body, config)

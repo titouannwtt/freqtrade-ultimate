@@ -8,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 def start_convert_db(args: dict[str, Any]) -> None:
-
     from freqtrade.configuration.config_setup import setup_utils_configuration
     from freqtrade.persistence import Trade, init_db
     from freqtrade.persistence.db_migration import migrate_db

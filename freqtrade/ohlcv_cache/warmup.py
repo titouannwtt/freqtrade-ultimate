@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 
 from freqtrade.enums import CandleType, TradingMode
-from freqtrade.ohlcv_cache.client import CacheUnavailable, OhlcvCacheClient
+from freqtrade.ohlcv_cache.client import OhlcvCacheClient
+
 
 logger = logging.getLogger("ftcache.warmup")
 
@@ -45,6 +46,7 @@ def _resolve_pairlist(config: dict, config_path: Path) -> list[str]:
         if db_path.exists():
             try:
                 import sqlite3
+
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.execute(
                     "SELECT DISTINCT pair FROM trades ORDER BY open_date DESC LIMIT 200"
@@ -54,7 +56,8 @@ def _resolve_pairlist(config: dict, config_path: Path) -> list[str]:
                 if pairs:
                     logger.info(
                         "%s: resolved %d pairs from trade database",
-                        config_path.name, len(pairs),
+                        config_path.name,
+                        len(pairs),
                     )
                     return pairs
             except Exception:
@@ -68,13 +71,15 @@ def _resolve_pairlist(config: dict, config_path: Path) -> list[str]:
     if cache_file.exists():
         try:
             import pickle
+
             with cache_file.open("rb") as f:
                 data = pickle.load(f)  # noqa: S301
             pairs = list({k[0] for k in data.get("klines", {}).keys()})
             if pairs:
                 logger.info(
                     "%s: resolved %d pairs from klines cache",
-                    config_path.name, len(pairs),
+                    config_path.name,
+                    len(pairs),
                 )
                 return pairs
         except Exception:
@@ -202,8 +207,12 @@ async def run_warmup(config_paths: list[Path], socket_path: str | None = None) -
 
         logger.info(
             "Warming %s/%s %s: %d pairs × %d candles from %d configs",
-            exchange, trading_mode, timeframe,
-            len(pairs), startup_candles, len(group["configs"]),
+            exchange,
+            trading_mode,
+            timeframe,
+            len(pairs),
+            startup_candles,
+            len(group["configs"]),
         )
 
         # Determine candle type
@@ -221,21 +230,30 @@ async def run_warmup(config_paths: list[Path], socket_path: str | None = None) -
 
         try:
             success, failed = await _warmup_pairs(
-                client, pairs, timeframe, startup_candles, candle_type,
+                client,
+                pairs,
+                timeframe,
+                startup_candles,
+                candle_type,
             )
             total_success += success
             total_failed += failed
             logger.info(
                 "  %s/%s %s: %d/%d pairs warmed (%d failed)",
-                exchange, trading_mode, timeframe,
-                success, len(pairs), failed,
+                exchange,
+                trading_mode,
+                timeframe,
+                success,
+                len(pairs),
+                failed,
             )
         finally:
             await client.close()
 
     logger.info(
         "Warmup complete: %d pairs cached, %d failed.",
-        total_success, total_failed,
+        total_success,
+        total_failed,
     )
     return 0 if total_failed == 0 else 1
 
@@ -245,15 +263,19 @@ def main() -> int:
         description="Pre-warm ftcache with startup candles for bot configs."
     )
     parser.add_argument(
-        "--configs", nargs="+", required=True,
+        "--configs",
+        nargs="+",
+        required=True,
         help="Bot config files (glob-expanded by shell)",
     )
     parser.add_argument(
-        "--socket", default=None,
+        "--socket",
+        default=None,
         help="ftcache daemon socket path (default: /tmp/ftcache-$UID.sock)",
     )
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
