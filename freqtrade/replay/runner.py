@@ -364,12 +364,19 @@ def _drive_loop(
     processed = 0
     wall_start = wall_clock()
     total_sim = (end_dt - start_dt).total_seconds()
+    ticks = 0
+    failed_ticks = 0
+    first_tick_error: Exception | None = None
 
     while current < end_dt:
         clock.advance_to(current)
+        ticks += 1
         try:
             bot.process()
         except Exception as exc:  # keep going; one bad tick shouldn't abort the run
+            failed_ticks += 1
+            if first_tick_error is None:
+                first_tick_error = exc
             logger.warning(
                 "[dry-run replay] bot.process() raised at %s: %s", current, exc, exc_info=True
             )
@@ -407,6 +414,15 @@ def _drive_loop(
                     )
 
         current += timedelta(seconds=sub_step)
+
+    # Honest completion: a run where (nearly) every tick raised is NOT "done" —
+    # it silently produced an empty book (incident 2026-08-02: 7 seeds "done" with
+    # 0 trades, 100% of ticks failing on the same exception). Fail loudly instead.
+    if ticks >= 100 and failed_ticks / ticks > 0.5:
+        raise RuntimeError(
+            f"[dry-run replay] {failed_ticks}/{ticks} ticks raised — run is not trustworthy. "
+            f"First error: {first_tick_error!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +557,14 @@ def _install_precomputed_analyze(bot, store, pairs, tf, candle_type):
             # First touch: recompute for real (also caches it), then validate the slice.
             original(pair)
             live_df = dp.get_analyzed_dataframe(pair, tf)[0]
-            sliced = _slice_to_window(full, live_df) if isinstance(live_df, pd.DataFrame) else None
+            # Guard: if the real analyze failed/produced nothing, live_df is empty and
+            # _slice_to_window would IndexError on iloc[0] — fall through to the
+            # mismatch path (per-candle recompute) instead of blowing up the tick.
+            sliced = (
+                _slice_to_window(full, live_df)
+                if isinstance(live_df, pd.DataFrame) and not live_df.empty
+                else None
+            )
             if _last_row_matches(sliced, live_df):
                 verified.add(pair)
             else:
