@@ -297,12 +297,20 @@ max-complexity = 12
 # a NEW violation of these rules anywhere else still fails the build. The S110/
 # S112 entries (silently swallowed exceptions) are the ones worth fixing first —
 # on trading code they hide real incidents.
+# Rules introduced by newer ruff releases, baselined rather than rushed:
+# - ASYNC240 targets trio/anyio; this codebase is asyncio, where a short
+#   os.path/Path call in an async function is not the hazard the rule describes.
+# - UP042 would mean swapping (str, Enum) for StrEnum. On Python 3.11 that
+#   changes what str() returns, and these classes back API schemas — a
+#   serialization change is not a lint fix.
+"freqtrade/pairlist_cache/daemon.py" = ["ASYNC240"]
+"freqtrade/rpc/api_server/api_stratdev_schemas.py" = ["UP042"]
 "freqtrade/commands/deploy_ui.py" = ["S202"]
 "freqtrade/data/dataprovider.py" = ["S110"]
 "freqtrade/freqtradebot.py" = ["C901", "E741"]
 "freqtrade/ohlcv_cache/client.py" = ["C901", "PTH108", "PTH110", "PTH123"]
 "freqtrade/ohlcv_cache/coordinator.py" = ["S110"]
-"freqtrade/ohlcv_cache/daemon.py" = ["C901", "PTH101", "PTH105", "PTH108", "PTH110", "PTH116", "PTH123"]
+"freqtrade/ohlcv_cache/daemon.py" = ["C901", "PTH101", "PTH105", "PTH108", "PTH110", "PTH116", "PTH123", "ASYNC240"]
 "freqtrade/ohlcv_cache/defaults.py" = ["E501", "S108"]
 "freqtrade/ohlcv_cache/mixin.py" = ["C901", "RUF002"]
 "freqtrade/ohlcv_cache/warmup.py" = ["RUF001", "S108", "S110"]
@@ -315,7 +323,7 @@ max-complexity = 12
 "freqtrade/plugins/pairlist/VolumePairList.py" = ["C901"]
 "freqtrade/replay/runner.py" = ["C901", "S110"]
 "freqtrade/rpc/api_server/api_stratdev_editor.py" = ["E501", "E741", "S110"]
-"freqtrade/rpc/api_server/api_stratdev_jobs.py" = ["C901", "PTH123", "S101", "S110"]
+"freqtrade/rpc/api_server/api_stratdev_jobs.py" = ["C901", "PTH123", "S101", "S110", "UP042"]
 "freqtrade/rpc/api_server/api_v1.py" = ["E501"]
 "freqtrade/rpc/rpc.py" = ["C901"]
 "freqtrade/wallets.py" = ["E402", "RUF003"]

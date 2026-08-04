@@ -25,7 +25,10 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install "ruff>=0.6"
+        # Pinned to the version in requirements-dev.txt: an unpinned "ruff>=0.6"
+        # silently picks up every new release, so newly-introduced rules turn a
+        # green build red without a single line of code changing.
+        run: grep -E '^ruff==' requirements-dev.txt | xargs pip install
 
       - name: Ruff check
         run: ruff check freqtrade/
