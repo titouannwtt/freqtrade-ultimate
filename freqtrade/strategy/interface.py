@@ -1299,6 +1299,14 @@ class IStrategy(ABC, HyperStrategyMixin):
             return None, None
         # Explicitly convert to datetime object to ensure the below comparison does not fail
         latest_date: datetime = latest_date_pd.to_pydatetime()
+        # Fork guard: every freqtrade candle date is UTC by convention, but a naive
+        # timestamp can reach here (indicator that rebuilt the column, or pandas 3 /
+        # freezegun interplay under the replay virtual clock). Comparing it with the
+        # aware dt_now() below raises TypeError, which upstream never catches — under
+        # replay that killed bot.process() on *every* tick, silently producing runs
+        # with zero trades (incident 2026-08-04). Normalising is safe and lossless.
+        if latest_date.tzinfo is None:
+            latest_date = latest_date.replace(tzinfo=UTC)
 
         # Check if dataframe is out of date
         timeframe_minutes = timeframe_to_minutes(timeframe)
@@ -1738,12 +1746,21 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         side = "entry" if order.ft_order_side == trade.entry_side else "exit"
 
+        # Fork guard (see dt_now): under the replay virtual clock a naive datetime
+        # can reach these comparisons and raise TypeError, which upstream doesn't
+        # catch — killing bot.process() on every tick and yielding zero-trade runs.
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=UTC)
+
         timeout = self.config.get("unfilledtimeout", {}).get(side)
         if timeout is not None:
             timeout_unit = self.config.get("unfilledtimeout", {}).get("unit", "minutes")
             timeout_kwargs = {timeout_unit: -timeout}
             timeout_threshold = current_time + timedelta(**timeout_kwargs)
-            timedout = order.status == "open" and order.order_date_utc <= timeout_threshold
+            order_date = order.order_date_utc
+            if order_date.tzinfo is None:
+                order_date = order_date.replace(tzinfo=UTC)
+            timedout = order.status == "open" and order_date <= timeout_threshold
             if timedout:
                 return True
         time_method = (

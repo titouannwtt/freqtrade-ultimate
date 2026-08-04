@@ -8,8 +8,17 @@ from freqtrade.constants import DATETIME_PRINT_FORMAT
 
 
 def dt_now() -> datetime:
-    """Return the current datetime in UTC."""
-    return datetime.now(UTC)
+    """Return the current datetime in UTC (always timezone-aware)."""
+    now = datetime.now(UTC)
+    # Fork guard: under the dry-run replay virtual clock, freezegun 1.5.5 combined
+    # with pandas 3.0.3 can hand back a naive datetime here (datetime binary-layout
+    # mismatch). Every caller assumes UTC-aware and compares it against aware candle
+    # dates, so a naive value raises TypeError deep inside the strategy — incident
+    # 2026-08-04: get_latest_candle() failed on *every* tick, silently producing
+    # replay runs with zero trades. Re-stamping UTC is lossless.
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return now
 
 
 def dt_now_no_micro() -> datetime:
