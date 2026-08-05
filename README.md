@@ -28,6 +28,26 @@
 
 ---
 
+> **📦 Heads-up on repository size.** Freqtrade Ultimate ships a bundle of historical
+> Hyperliquid OHLCV data (397 pairs × 8 timeframes, reaching further back than Hyperliquid's
+> own 5000-candle API limit). It is one of the reasons the fork exists — but it makes a full
+> clone **~6.5 GB**.
+>
+> Every `git clone` below therefore uses `--filter=blob:none`, which fetches file contents
+> on demand instead of every historical revision. Measured on a fresh clone: **~2 GB in
+> under a minute**, with the complete working tree — all the code *and* the 3358 data files.
+>
+> Want the code without the data bundle? A sparse checkout gets you there in
+> **~130 MB, in seconds**:
+>
+> ```bash
+> git clone --filter=blob:none --sparse https://github.com/titouannwtt/freqtrade-ultimate.git
+> cd freqtrade-ultimate
+> git sparse-checkout set --no-cone '/*' '!user_data/data'
+> ```
+
+---
+
 ## 🔄 Already running freqtrade? Switch to Ultimate without losing anything
 
 **Freqtrade Ultimate is a drop-in superset of upstream freqtrade.** Same `freqtrade` command, same configuration schema, same database format — it just adds features. Your bot *is* its `user_data/` folder (strategies, configs, hyperopt and backtest results, downloaded data) plus its trade database. Switching forks means pointing a Freqtrade Ultimate install at those same files. **Nothing about a running bot changes**: same open trades, same config, same strategy — it simply resumes with extra capabilities available.
@@ -53,7 +73,10 @@ The safest path is **non-destructive**: install the fork in a *new* folder and r
 cp /path/to/tradesv3.sqlite /path/to/tradesv3.sqlite.bak
 
 # 3. Clone Freqtrade Ultimate into a NEW folder — your old install stays as rollback.
-git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
+#   ↑ ~6.5 GB of bundled Hyperliquid market data lives in this repo's history.
+#     --filter=blob:none fetches file contents on demand: same working tree,
+#     a fraction of the download. Drop the flag if you want the full history.
 cd freqtrade-ultimate
 
 # 4. Install it (creates its own .venv; your old environment is untouched).
@@ -83,7 +106,10 @@ There is **no public Ultimate image — you build it yourself from source** (the
 docker compose down
 
 # 2. Build the Freqtrade Ultimate image from source.
-git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
+#   ↑ ~6.5 GB of bundled Hyperliquid market data lives in this repo's history.
+#     --filter=blob:none fetches file contents on demand: same working tree,
+#     a fraction of the download. Drop the flag if you want the full history.
 cd freqtrade-ultimate
 docker build -t freqtrade-ultimate:latest .
 cd -
@@ -123,7 +149,10 @@ You don't need to install upstream freqtrade first — Freqtrade Ultimate is a c
 ### 🖥️ Native install (source / venv)
 
 ```bash
-git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
+#   ↑ ~6.5 GB of bundled Hyperliquid market data lives in this repo's history.
+#     --filter=blob:none fetches file contents on demand: same working tree,
+#     a fraction of the download. Drop the flag if you want the full history.
 cd freqtrade-ultimate
 ./setup.sh -i
 
@@ -137,7 +166,10 @@ freqtrade new-config --config user_data/config.json
 The bundled `docker-compose.yml` builds the Ultimate image for you (tagged `freqtrade-ultimate:latest`):
 
 ```bash
-git clone https://github.com/titouannwtt/freqtrade-ultimate.git
+git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
+#   ↑ ~6.5 GB of bundled Hyperliquid market data lives in this repo's history.
+#     --filter=blob:none fetches file contents on demand: same working tree,
+#     a fraction of the download. Drop the flag if you want the full history.
 cd freqtrade-ultimate
 
 # Build the image from source.
