@@ -49,6 +49,28 @@ Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/
 
 **Structural note:** the fork history is squash-style vs. upstream (`git merge-base HEAD 2026.7` returns commit `4139b0b0c` — the ancient 2017 `add signal handler for SIGINT, SIGTERM and SIGABRT` commit). `git merge 2026.7 --allow-unrelated-histories` produces ~50 add/add conflicts because every file added since 2017 registers as add/add, so **the previous sync approach must be reused**: apply the upstream diff (`git diff 2026.6..2026.7 | git apply --3way`) rather than a git-merge, then hand-resolve the ~5 real conflict sites listed above.
 
+**Status update (2026-08-05) — part of this delta has already landed.** The impact table
+above was written on 2026-08-01, before a backport pass that cherry-picked the safe fixes
+from 2026.7 / 2026.8-dev directly. Already on `main`, so the follow-up sync must skip them:
+
+- Hyperliquid `lastTradeTimestamp` (the "trivial cherry-pick" row) — done.
+- `handle_onexchange_order` no longer breaking when no order is found (`if order_obj:`) — done.
+- `wallets.py` skipping zero balances — done.
+- Plus, from the same window and not listed above: the cancel-then-replace safety fix,
+  `MarginModeAlreadySet` treated as a no-op, `strip_trailing_zeros` no longer corrupting
+  integers, and the `balance_includes_unrealized_pnl` chain (which fixed a real bug here:
+  Hyperliquid's `total` already contains open-position uPnL, so `Wallet.total` was
+  double-counting it).
+
+Still outstanding from the table: the `enter_positions(free_trade_slots)` signature change,
+the `LocalTrade.to_json` refactor, the pairlist signature harmonisation, the `rpc.py`
+empty-dataframe guard, the telegram help string, and `include funding_fees in wallet
+migration` (deliberately deferred — it only affects offline balance-curve plots).
+
+Step 4 of the plan below is obsolete: Dependabot has been removed from this repo. The
+dependency bumps it listed were applied by hand instead, aligned on the versions upstream
+freqtrade pins and validates in its own CI.
+
 **Follow-up plan:**
 1. Merge this tracking PR (zero-risk documentation).
 2. Open a follow-up PR that applies the `2026.6..2026.7` diff via `git apply --3way`, hand-resolves the freqtradebot.py sites, runs `pytest --random-order -n auto` and the replay determinism harness, bumps the version marker to `2026.7`.
