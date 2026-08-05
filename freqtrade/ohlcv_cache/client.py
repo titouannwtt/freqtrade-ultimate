@@ -79,6 +79,8 @@ class OhlcvCacheClient:
         self.socket_path = socket_path
         self.timeout_s = timeout_s
         self.exchange_id = exchange_id
+        # Age of the daemon's positions copy at the moment it last answered us.
+        self.last_positions_age_s: float = 0.0
         self.trading_mode = trading_mode
         self.dry_run = dry_run
         self.capital = capital
@@ -461,6 +463,13 @@ class OhlcvCacheClient:
             raise CacheUnavailable(
                 f"positions_get failed: {resp.get('error_type')} {resp.get('error_message')}"
             )
+        # How old the daemon's copy already was when it answered. Callers that must
+        # prove a reading post-dates an event need the CAPTURE time, not the time the
+        # bytes arrived: a 15s-old cache hit delivered instantly is still 15s-old data.
+        try:
+            self.last_positions_age_s = float(resp.get("age_s") or 0.0)
+        except (TypeError, ValueError):
+            self.last_positions_age_s = 0.0
         return resp.get("hit", False), resp.get("data", []), resp.get("auto_grant", False)
 
     async def report_order(

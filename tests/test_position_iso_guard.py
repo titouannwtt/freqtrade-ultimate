@@ -212,3 +212,61 @@ def test_exchange_without_the_shared_cache_is_unaffected():
     """Single-account exchanges read live: the guard must not change their behaviour."""
     bot = _BotStub(SimpleNamespace())
     assert bot._positions_view_covers_fill(_trade_filled_at(datetime.now(UTC))) is True
+
+
+# ------------------------------------------- the two holes production found (2026-08-05)
+
+
+class _BotStub2:
+    """FreqtradeBot slice for _position_confirmed_absent."""
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    _position_confirmed_absent = FreqtradeBot._position_confirmed_absent
+
+    def __init__(self, exchange):
+        self.exchange = exchange
+
+
+def test_absence_must_be_confirmed_against_the_exchange():
+    """A wallet reading of 0 is not proof: the position may simply not be in it yet."""
+    ex = FakeExchange([{"symbol": "INIT/USDC:USDC", "contracts": 2890, "side": "short"}])
+    bot = _BotStub2(ex)
+    assert (
+        bot._position_confirmed_absent(
+            _trade_filled_at(datetime.now(UTC)) if False else SimpleNamespace(pair="INIT/USDC:USDC")
+        )
+        is False
+    )
+
+
+def test_absence_confirmed_when_the_exchange_really_shows_nothing():
+    ex = FakeExchange([])
+    bot = _BotStub2(ex)
+    assert bot._position_confirmed_absent(SimpleNamespace(pair="INIT/USDC:USDC")) is True
+
+
+def test_unreadable_exchange_blocks_the_close_rather_than_allowing_it():
+    broken = MagicMock()
+    broken.fetch_positions_authoritative.side_effect = RuntimeError("down")
+    bot = _BotStub2(broken)
+    assert bot._position_confirmed_absent(SimpleNamespace(pair="INIT/USDC:USDC")) is False
+
+
+def test_cached_hit_is_stamped_at_capture_time_not_arrival():
+    """A 15s-old daemon hit delivered instantly must not read as fresh."""
+    import time as _t
+
+    from freqtrade.ohlcv_cache.mixin import CachedExchangeMixin
+
+    class M(CachedExchangeMixin):
+        def __init__(self):
+            self._ftcache_last_positions = None
+            self._ftcache_last_positions_ts = 0.0
+            self._ftcache_last_positions_wall = 0.0
+            self._pos_last_fetched_at = 0.0
+
+    m = M()
+    before = _t.time()
+    m._ftcache_save_positions([], captured_age_s=15.0)
+    assert m.positions_snapshot_wall_ts() <= before - 14.0

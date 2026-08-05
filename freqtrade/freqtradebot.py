@@ -1278,6 +1278,12 @@ class FreqtradeBot(LoggingMixin):
         # the DB while the real position lives on, unpiloted, on the exchange.
         if not self._positions_view_covers_fill(trade):
             return False
+        # Freshness alone proved insufficient in production: the wallets snapshot that
+        # produced the zero reading has its own cadence, so a view can be provably
+        # recent and still not be the one the decision was taken on. Confirm the
+        # absence directly against the exchange before closing anything.
+        if not self._position_confirmed_absent(trade):
+            return False
         try:
             # Try to find the actual close price from recent trades on exchange
             close_price = None
@@ -1485,6 +1491,46 @@ class FreqtradeBot(LoggingMixin):
             trade.pair,
         )
         return False
+
+    def _position_confirmed_absent(self, trade: Trade) -> bool:
+        """Prove, against the exchange, that nothing is left on this pair.
+
+        The caller reached here from `wallets.get_owned() == 0`, but that value comes
+        from the wallets snapshot, which has its own refresh cadence layered on top of
+        the shared positions cache — so "0" can simply mean "not seen yet". Before
+        writing an irreversible close into the DB we ask the exchange directly,
+        bypassing every cache. Anything short of an explicit, readable "no position" is
+        treated as unknown, and unknown must never close a trade.
+        """
+        fresh = getattr(self.exchange, "fetch_positions_authoritative", None)
+        if fresh is None:
+            return True  # no shared cache in play: the caller's reading was already live
+        try:
+            positions = fresh(trade.pair)
+        except Exception as exc:
+            logger.warning(
+                "%s: could not confirm the position is gone (%s) — leaving the trade "
+                "open, will retry next cycle.",
+                trade.pair,
+                exc,
+            )
+            return False
+        for p in positions or []:
+            if p.get("symbol") != trade.pair:
+                continue
+            try:
+                contracts = abs(float(p.get("contracts") or 0.0))
+            except (TypeError, ValueError):
+                continue
+            if contracts > 0:
+                logger.warning(
+                    "%s: wallet reported no position but an authoritative read shows "
+                    "%s contracts still open — refusing to fabricate an external close.",
+                    trade.pair,
+                    contracts,
+                )
+                return False
+        return True
 
     def _positions_circuit_open(self, context: str) -> bool:
         """Circuit breaker: True when the position cache is too stale to safely

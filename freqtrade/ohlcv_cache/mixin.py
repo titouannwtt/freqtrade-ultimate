@@ -456,7 +456,13 @@ class CachedExchangeMixin:
             )
         return stats
 
-    def _ftcache_save_positions(self, positions: list, *, fetched_at: float | None = None) -> None:
+    def _ftcache_save_positions(
+        self,
+        positions: list,
+        *,
+        fetched_at: float | None = None,
+        captured_age_s: float = 0.0,
+    ) -> None:
         """Store the latest positions, rejecting out-of-order writes.
 
         ``fetched_at`` is the monotonic time captured *before* the fetch that
@@ -478,7 +484,12 @@ class CachedExchangeMixin:
             return
         self._ftcache_last_positions = positions
         self._ftcache_last_positions_ts = time.monotonic()
-        self._ftcache_last_positions_wall = time.time()
+        # Stamp WHEN THE DATA WAS CAPTURED, not when we received it. The daemon serves
+        # a shared copy with its own TTL, so a hit that arrives instantly can still be
+        # seconds old. Stamping arrival time made a stale reading look fresh and let
+        # `external_close` be concluded from a view that predated the fill — the exact
+        # failure this timestamp exists to prevent.
+        self._ftcache_last_positions_wall = time.time() - max(0.0, captured_age_s)
         self._pos_last_fetched_at = fa
 
     def positions_snapshot_wall_ts(self) -> float:
@@ -1543,7 +1554,10 @@ class CachedExchangeMixin:
                         positions,
                         add_info="from ftcache",
                     )
-                    self._ftcache_save_positions(positions)
+                    self._ftcache_save_positions(
+                        positions,
+                        captured_age_s=getattr(client, "last_positions_age_s", 0.0),
+                    )
                     self._ftcache_record_cached("fetch_positions")
                     return positions
         except CacheRateLimited:
