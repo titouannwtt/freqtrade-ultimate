@@ -141,6 +141,12 @@ python user_data/export_strategies.py --config-dir live_configs --with-backtest
 - When fixing trade DB issues, use `python3` with `sqlite3` module (no `sqlite3` CLI binary).
 - Strategies using `"stake_amount": "unlimited"` handle sizing in `custom_stake_amount()`.
 - **Never use `pkill`/`kill -9` on hyperopt** — leaves orphaned workers. Use `screen -S <session> -X stuff $'\003'` (Ctrl+C).
+- **No tooling attribution in anything published** — commit messages, PR titles/bodies, issue
+  comments, release notes, tags. That means no `Generated with <tool>` footer, no
+  `Co-Authored-By:` bot trailer, and above all **no link to an assistant session**: those URLs are
+  private and leak the whole working context into a public repo. This applies to automated runs
+  (upstream-sync routine, scheduled jobs) exactly as it does to hand-written commits — an
+  automated PR is still published under a human's name.
 
 ## Updating from upstream
 

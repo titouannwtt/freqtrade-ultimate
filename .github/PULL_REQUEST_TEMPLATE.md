@@ -1,4 +1,11 @@
 <!-- Thanks for contributing to Freqtrade Ultimate. Please fill in the relevant sections below. -->
+<!--
+  House rule: no tooling attribution anywhere in this repo — not in the PR title or
+  body, not in commit messages, not in release notes. Concretely: never append a
+  "Generated with <tool>" / "Co-Authored-By: <bot>" footer, and never paste a link
+  to an assistant session (those URLs are private and leak context). The PR should
+  read as if a human wrote it, because a human is accountable for it.
+-->
 
 ## Summary
 
@@ -25,7 +32,8 @@
 - [ ] Code lints clean (`ruff check freqtrade/` and `ruff format --check freqtrade/`)
 - [ ] Relevant tests added / updated
 - [ ] `docs/FEATURES.md` updated if behavior changed
-- [ ] Commit message follows convention (`feat:`, `fix:`, `docs:`, etc., no AI co-author trailers)
+- [ ] Commit message follows convention (`feat:`, `fix:`, `docs:`, etc.)
+- [ ] No tooling attribution or assistant-session link in the commits, the PR title, or this body
 
 ## Strategy contributions only
 
