@@ -217,6 +217,37 @@ CONF_SCHEMA = {
             "type": "string",
             "enum": MARGIN_MODES,
         },
+        "position_iso_guard": {
+            "description": (
+                "Fork extension: assert around every order that the exchange position and "
+                "the bot's book agree (position_after == position_before + filled). Catches "
+                "orphans (position on the wallet nobody pilots) and phantoms (a book with "
+                "no counterpart) at the moment they are created rather than at the next "
+                "reconciliation. Exits are never blocked."
+            ),
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "description": (
+                        "off = no checking; warn = log and report breaches; block = also "
+                        "refuse new ENTRIES on a pair with an unresolved breach."
+                    ),
+                    "type": "string",
+                    "enum": ["off", "warn", "block"],
+                    "default": "warn",
+                },
+                "tolerance": {
+                    "description": (
+                        "Relative tolerance on the position delta, absorbing contract-size "
+                        "rounding and concurrent sibling fills."
+                    ),
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0.02,
+                },
+            },
+        },
         "position_coordination": {
             "description": (
                 "Fork extension: coordinate positions across bots so they do not stack on "

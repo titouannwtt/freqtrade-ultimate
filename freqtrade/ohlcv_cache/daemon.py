@@ -1715,6 +1715,40 @@ class Daemon:
             "backoff_remaining_s": budget.backoff_remaining_s,
         }
 
+    async def _handle_iso_breach(self, req: dict) -> dict:
+        """A bot reports that its book and the wallet disagree on a position.
+
+        Logged at ERROR and emitted as a fleet event: on a shared netted wallet this
+        is the earliest signal that a position is about to become an orphan (live on
+        the exchange, owned by nobody) or a phantom (claimed by a book that has no
+        counterpart). Both are silent until someone reconciles, which is why they are
+        surfaced loudly here rather than left in a per-bot log.
+        """
+        pair = req.get("pair", "")
+        bot = req.get("bot", "") or "?"
+        delta = req.get("delta", 0.0)
+        logger.error(
+            "ISO BREACH %s [bot=%s] phase=%s expected=%s observed=%s delta=%s",
+            pair,
+            bot,
+            req.get("phase", ""),
+            req.get("expected"),
+            req.get("observed"),
+            delta,
+        )
+        if self.event_log:
+            self.event_log.emit(
+                "iso_breach",
+                exchange=req.get("exchange", "hyperliquid"),
+                pair=pair,
+                bot=bot,
+                phase=req.get("phase", ""),
+                expected=req.get("expected"),
+                observed=req.get("observed"),
+                delta=delta,
+            )
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
     async def _handle_order_report(self, req: dict) -> dict:
         """A bot reports an order create/cancel for fleet observability."""
         exchange = req.get("exchange", "hyperliquid")
@@ -2447,6 +2481,8 @@ class Daemon:
             return await self._handle_report_429(req)
         if op == "report_order":
             return await self._handle_order_report(req)
+        if op == "report_iso_breach":
+            return await self._handle_iso_breach(req)
         if op == "tickers":
             return await self._handle_tickers(req)
         if op == "positions_put":

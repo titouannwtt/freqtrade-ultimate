@@ -61,6 +61,7 @@ from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_d
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.plugins.protectionmanager import ProtectionManager
+from freqtrade.position_iso_guard import PositionIsoGuard
 from freqtrade.resolvers import ExchangeResolver, StrategyResolver
 from freqtrade.rpc import RPCManager
 from freqtrade.rpc.external_message_consumer import ExternalMessageConsumer
@@ -231,6 +232,8 @@ class FreqtradeBot(LoggingMixin):
 
             # Fleet position coordination (fork extension)
             self._coordinator = PositionCoordinator(self.config)
+            # Asserts the exchange/book position arithmetic around every order.
+            self._iso_guard = PositionIsoGuard(self.config, self.exchange, self._coordinator)
 
             # Protect exit-logic from forcesell and vice versa
             self._exit_lock = RLock()
@@ -1039,6 +1042,26 @@ class FreqtradeBot(LoggingMixin):
                     # We knew this order, but didn't have it updated properly
                     order_obj = trade_order[0]
                 else:
+                    # `fetch_orders` is ACCOUNT-scoped. Upstream may adopt an unknown
+                    # order because one bot owns the account, so any order on the pair
+                    # is necessarily its own. When siblings share the wallet that
+                    # inference is false, and adopting means claiming a sibling's fill:
+                    # both bots then recompute `trade.amount` from the same order and
+                    # the fleet double-counts a single on-chain position. Observed in
+                    # the wild — two bots entered the same coin 5s apart and each
+                    # adopted the other's entry, inflating both books by the full size.
+                    if (
+                        self.exchange.get_option("orders_are_account_scoped", False)
+                        and self._coordinator.shares_account()
+                    ):
+                        logger.warning(
+                            "%s: ignoring order %s — it is not in this bot's book and "
+                            "the exchange account is shared with sibling bots, so it "
+                            "cannot be attributed to us.",
+                            trade.pair,
+                            order["id"],
+                        )
+                        continue
                     logger.info(f"Found previously unknown order {order['id']} for {trade.pair}.")
 
                     order_obj = Order.parse_from_ccxt_object(order, trade.pair, order["side"])
@@ -1248,6 +1271,13 @@ class FreqtradeBot(LoggingMixin):
         # until positions are fresh — the reconciliation retries next cycle.
         if self._positions_circuit_open(f"external close {trade.pair}"):
             return False
+        # Temporal invariant: "the position is gone" may only be concluded from a
+        # positions view taken AFTER our own last fill. A snapshot older than the
+        # fill simply predates the position — it shows zero because the position did
+        # not exist yet, not because it was closed. Acting on it closes the trade in
+        # the DB while the real position lives on, unpiloted, on the exchange.
+        if not self._positions_view_covers_fill(trade):
+            return False
         try:
             # Try to find the actual close price from recent trades on exchange
             close_price = None
@@ -1385,6 +1415,76 @@ class FreqtradeBot(LoggingMixin):
             logger.debug("Found no enter signals for whitelisted currencies. Trying again...")
 
         return trades_created
+
+    # Grace period added on top of the fill timestamp before a positions view is
+    # accepted as covering it. Exchanges publish a fill and update the position
+    # snapshot from different services, so equality is not enough.
+    _POSITIONS_COVERAGE_MARGIN_S: float = 5.0
+
+    def _positions_view_covers_fill(self, trade: Trade) -> bool:
+        """True when the current positions view is newer than this trade's last fill.
+
+        Reading "no position" only means "closed" if the reading post-dates the fill
+        that created it. On a shared, netted wallet the positions snapshot is cached
+        (daemon TTL, plus a local per-pair reuse window), so a bot that just filled an
+        entry routinely gets a view captured seconds BEFORE its own fill. Upstream has
+        no reason to guard against this — one bot owns one account there, and the
+        wallet reading is its own. Here it produced orphans: the trade was marked
+        `external_close` with no exit order ever sent, while the position kept running
+        on-chain.
+
+        When the cached view is too old we pay for one authoritative, cache-bypassing
+        read rather than guess. If even that cannot be obtained, we return False: the
+        caller then leaves the trade open and retries next cycle, which is the
+        recoverable failure. Fabricating a close is not.
+        """
+        last_fill = trade.date_last_filled_utc
+        if last_fill is None:
+            return True  # nothing filled yet — no fill to be older than
+        needed = last_fill.timestamp() + self._POSITIONS_COVERAGE_MARGIN_S
+        get_ts = getattr(self.exchange, "positions_snapshot_wall_ts", None)
+        if get_ts is None:
+            return True  # exchange without the shared cache: reading is always live
+        try:
+            snapshot_ts = float(get_ts() or 0.0)
+        except Exception:
+            return True
+        if snapshot_ts >= needed:
+            return True
+
+        fresh = getattr(self.exchange, "fetch_positions_authoritative", None)
+        if fresh is None:
+            logger.warning(
+                "%s: positions view predates the last fill (%.0fs too old) and no "
+                "authoritative read is available — refusing to conclude the position "
+                "is gone.",
+                trade.pair,
+                needed - snapshot_ts,
+            )
+            return False
+        try:
+            fresh(trade.pair)
+            snapshot_ts = float(get_ts() or 0.0)
+        except Exception as exc:
+            logger.warning(
+                "%s: authoritative positions read failed (%s) — refusing to conclude "
+                "the position is gone; will retry next cycle.",
+                trade.pair,
+                exc,
+            )
+            return False
+        if snapshot_ts >= needed:
+            logger.info(
+                "%s: authoritative positions read confirms the view now post-dates the last fill.",
+                trade.pair,
+            )
+            return True
+        logger.warning(
+            "%s: positions view still predates the last fill after an authoritative "
+            "read — refusing to conclude the position is gone.",
+            trade.pair,
+        )
+        return False
 
     def _positions_circuit_open(self, context: str) -> bool:
         """Circuit breaker: True when the position cache is too stale to safely
@@ -1714,6 +1814,11 @@ class FreqtradeBot(LoggingMixin):
         if trade and self.handle_similar_open_order(trade, enter_limit_requested, amount, side):
             return False
 
+        # ISO guard checkpoint 1/2: sample the on-chain position before we move it,
+        # so the fill can be verified against a known starting point afterwards.
+        if not self._iso_guard.before_order(pair, side, amount, is_entry=True):
+            return False
+
         order = self.exchange.create_order(
             pair=pair,
             ordertype=order_type,
@@ -1731,6 +1836,19 @@ class FreqtradeBot(LoggingMixin):
         order_status = order.get("status")
         logger.info(f"Order {order_id} was created for {pair} and status is {order_status}.")
         self._request_positions_refresh()  # entry placed — position about to change
+        # ISO guard checkpoint 2/2: the position must have moved by exactly what we
+        # got filled. A short adds to the position negatively.
+        try:
+            filled = float(order.get("filled") or 0.0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if filled:
+            self._iso_guard.after_order(
+                pair,
+                -filled if is_short else filled,
+                phase="entry",
+                context={"order_id": order_id, "side": side},
+            )
 
         # we assume the order is executed at the price requested
         enter_limit_filled_price = enter_limit_requested
@@ -2811,6 +2929,35 @@ class FreqtradeBot(LoggingMixin):
         )
         return cancelled
 
+    def _clamp_exit_to_wallet_position(self, trade: Trade, pair: str, amount: float) -> float:
+        """Cap a futures exit at what actually exists on the wallet for this pair.
+
+        Only ever shrinks an exit, and only on a shared account. An exit must never be
+        blocked, so every uncertainty resolves in favour of the caller's amount: no
+        sibling bots, no reading, a zero/absent position (which on a netted wallet
+        usually means siblings offset us, not that we are flat), or any error at all
+        leaves `amount` untouched. Capital that cannot be exited is a far worse
+        failure than an exit that overshoots.
+        """
+        try:
+            if not self.exchange.get_option("orders_are_account_scoped", False):
+                return amount  # one bot, one account: upstream's assumption holds
+            if not self._coordinator.shares_account():
+                return amount
+            owned = abs(float(self.wallets.get_owned(pair, trade.base_currency) or 0.0))
+        except Exception:
+            return amount
+        if owned <= 0 or owned >= amount:
+            return amount
+        logger.warning(
+            "%s: exit of %s capped to the %s actually present on the shared wallet "
+            "— closing more would open an opposite position nobody is piloting.",
+            pair,
+            amount,
+            owned,
+        )
+        return owned
+
     def _safe_exit_amount(self, trade: Trade, pair: str, amount: float) -> float:
         """
         Get exitable amount.
@@ -2826,8 +2973,14 @@ class FreqtradeBot(LoggingMixin):
         # Update wallets to ensure amounts tied up in a stoploss is now free!
         self.wallets.update()
         if self.trading_mode == TradingMode.FUTURES:
-            # A safe exit amount isn't needed for futures, you can just exit/close the position
-            return amount
+            # Upstream returns `amount` untouched here: with one bot per account,
+            # closing more than you hold is impossible, and `reduceOnly` catches the
+            # rest. Neither holds on a shared netted wallet — `reduceOnly` is
+            # evaluated against the WALLET's net, so while siblings hold the same
+            # side there is headroom and the exchange happily fills a buy-back larger
+            # than this bot's own leg. Seen in production: a 4003 short was bought
+            # back 6911 across two orders and left a 2908 LONG nobody asked for.
+            return self._clamp_exit_to_wallet_position(trade, pair, amount)
 
         trade_base_currency = self.exchange.get_pair_base_currency(pair)
         # Free + Used - open orders will eventually still be canceled.
@@ -2936,6 +3089,9 @@ class FreqtradeBot(LoggingMixin):
             if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
                 return False
 
+        # ISO guard checkpoint 1/2 (exits are sampled but never blocked).
+        self._iso_guard.before_order(trade.pair, trade.exit_side, amount, is_entry=False)
+
         try:
             # Execute exit and update trade record
             order = self.exchange.create_order(
@@ -2966,6 +3122,19 @@ class FreqtradeBot(LoggingMixin):
 
         self._notify_exit(trade, order_type, sub_trade=bool(sub_trade_amt), order=order_obj)
         self._request_positions_refresh()  # exit placed — position about to change
+        # ISO guard checkpoint 2/2: an exit moves the position back towards zero, so
+        # the signed delta is the opposite of the trade's own direction.
+        try:
+            exit_filled = float(order.get("filled") or 0.0)
+        except (TypeError, ValueError):
+            exit_filled = 0.0
+        if exit_filled:
+            self._iso_guard.after_order(
+                trade.pair,
+                exit_filled if trade.is_short else -exit_filled,
+                phase="exit",
+                context={"order_id": order_obj.order_id, "exit_reason": exit_reason},
+            )
         # In case of market exit orders the order can be closed immediately
         if order.get("status", "unknown") in ("closed", "expired"):
             self.update_trade_state(trade, order_obj.order_id, order)

@@ -152,6 +152,14 @@ class CachedExchangeMixin:
     # slow refresh can never overwrite fresher data with staler data. See
     # docs/dev/positions_refresher_plan_v2.md (invariant I2).
     _pos_last_fetched_at: float = 0.0
+    # Wall-clock (epoch seconds) of the same snapshot. The monotonic stamps above
+    # are perfect for measuring age but cannot be compared against a trade's fill
+    # timestamp, which is wall-clock. Deciding "this position no longer exists"
+    # requires exactly that comparison: a snapshot taken BEFORE our fill landed
+    # legitimately shows no position, and concluding an external close from it
+    # strands the real position on-chain as an orphan. See
+    # `positions_snapshot_wall_ts()` and FreqtradeBot._positions_view_covers_fill().
+    _ftcache_last_positions_wall: float = 0.0
 
     # --- Phase 2: mixin-side positions refresher (dormant until started in phase 3) ---
     # docs/dev/positions_refresher_plan_v2.md. All references are guarded by
@@ -470,7 +478,64 @@ class CachedExchangeMixin:
             return
         self._ftcache_last_positions = positions
         self._ftcache_last_positions_ts = time.monotonic()
+        self._ftcache_last_positions_wall = time.time()
         self._pos_last_fetched_at = fa
+
+    def positions_snapshot_wall_ts(self) -> float:
+        """Wall-clock epoch of the newest positions snapshot (0.0 if none yet).
+
+        Callers that must decide whether a position is *gone* (rather than merely
+        unknown) compare this against the trade's last fill: a snapshot older than
+        the fill simply predates the position and proves nothing.
+        """
+        return self._ftcache_last_positions_wall
+
+    def ftcache_report_iso_breach(
+        self,
+        *,
+        pair: str,
+        expected: float,
+        observed: float,
+        delta: float,
+        phase: str,
+        bot: str = "",
+    ) -> None:
+        """Forward a position ISO breach to the daemon. Never raises."""
+        try:
+            client = self._ftcache_get_client()
+            if client is None:
+                return
+            self._ftcache_run_on_loop(
+                client.report_iso_breach(
+                    pair=pair,
+                    expected=expected,
+                    observed=observed,
+                    delta=delta,
+                    phase=phase,
+                    bot=bot,
+                )
+            )
+        except Exception as exc:
+            logger.debug("could not report ISO breach to daemon (%s)", exc)
+
+    def fetch_positions_authoritative(self, pair: str | None = None) -> list:
+        """Fetch positions straight from the exchange, bypassing every cache layer.
+
+        Reserved for decisions that cannot tolerate a stale read — chiefly "is this
+        position really gone?". Costs one rate token at CRITICAL priority, so it must
+        stay on cold paths, never in the per-cycle loop. The result is written back
+        into the shared snapshot so the rest of the cycle benefits from it.
+        """
+        self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+        positions = super().fetch_positions(pair=pair, params=None)  # type: ignore[misc]
+        if pair is None:
+            self._ftcache_save_positions(positions)
+        else:
+            # A per-pair read cannot replace the fleet-wide snapshot, but it is
+            # still the freshest truth we have for that pair: stamp it so callers
+            # can prove the read post-dates their fill.
+            self._ftcache_last_positions_wall = time.time()
+        return positions
 
     def _ftcache_get_stale_positions(self, *, reject_if_too_old: bool = True) -> list | None:
         if self._ftcache_last_positions is None:

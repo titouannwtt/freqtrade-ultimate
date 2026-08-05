@@ -78,7 +78,7 @@ class VirtualClock:
 
         original_now = fake_dt.now
 
-        def _aware_now(cls, tz=None):  # noqa: ANN001
+        def _aware_now(cls, tz=None):
             value = original_now(tz)
             if tz is not None and value.tzinfo is None:
                 value = value.replace(tzinfo=tz)

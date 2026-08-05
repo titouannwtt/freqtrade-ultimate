@@ -43,6 +43,11 @@ class Hyperliquid(Exchange):
         "marketOrderRequiresPrice": True,
         "download_data_parallel_quick": False,
         "ws_enabled": True,
+        # `fetch_orders(pair)` returns every order the WALLET placed on that pair, not
+        # just this bot's. Anything that infers ownership from "it is on my pair" is
+        # wrong here as soon as two bots share the wallet — which is the normal setup
+        # on Hyperliquid, where positions are netted per coin account-wide.
+        "orders_are_account_scoped": True,
     }
     _ft_has_futures: FtHas = {
         "stoploss_on_exchange": True,

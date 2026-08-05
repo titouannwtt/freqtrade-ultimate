@@ -356,6 +356,23 @@ class PositionCoordinator:
         positions.extend(self._read_intents(pair))
         return positions
 
+    def shares_account(self) -> bool:
+        """True when at least one sibling bot trades the very same exchange account.
+
+        This is the precondition that invalidates a core upstream assumption: that
+        every order visible on the account belongs to this bot. With siblings on one
+        wallet, account-scoped endpoints (``fetch_orders``, ``fetch_positions``)
+        return the fleet's activity, not ours, and anything that attributes those
+        results to this bot will silently steal a sibling's fills.
+
+        Deliberately conservative: any failure to enumerate siblings returns True, so
+        the caller keeps the safe behaviour rather than the permissive one.
+        """
+        try:
+            return bool(self._registry.siblings())
+        except Exception:
+            return True
+
     def opposite_side_sibling(self, pair: str, is_short: bool) -> bool:
         """
         True if a sibling bot in this coordination group holds an OPEN position on

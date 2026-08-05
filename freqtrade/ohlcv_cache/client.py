@@ -490,6 +490,38 @@ class OhlcvCacheClient:
         except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
             pass
 
+    async def report_iso_breach(
+        self,
+        pair: str,
+        expected: float,
+        observed: float,
+        delta: float,
+        phase: str,
+        bot: str = "",
+    ) -> None:
+        """Fire-and-forget: a bot's book and the wallet disagree on a position.
+
+        Sent to the daemon because it is the only process with a fleet-wide view: one
+        bot cannot tell "my own accounting is wrong" from "a sibling moved the shared
+        net", but the daemon sees every bot's orders and the wallet at once.
+        """
+        try:
+            await self._send_and_receive(
+                {
+                    "op": "report_iso_breach",
+                    "req_id": uuid.uuid4().hex,
+                    "exchange": self.exchange_id,
+                    "pair": pair,
+                    "expected": expected,
+                    "observed": observed,
+                    "delta": delta,
+                    "phase": phase,
+                    "bot": bot,
+                }
+            )
+        except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
+            pass
+
     async def push_balances(self, balances: dict) -> None:
         """Push get_balances() result into the daemon's shared cache."""
         req = {
