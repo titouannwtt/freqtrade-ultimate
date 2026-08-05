@@ -6,6 +6,55 @@ Versioning convention: `v<upstream_version>-fork.<n>` — e.g. `v2026.3-fork.5` 
 
 ## [Unreleased]
 
+### Upstream sync tracking — freqtrade 2026.7 (2026-07-31)
+
+Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/2026.7) was published 2026-07-31. This section documents the delta `2026.6..2026.7` and its impact on this fork. **No application code is changed in this tracking PR** — the sync itself must be applied as its own follow-up PR (same pattern as the previous `Merge upstream freqtrade 2026.6 (#30)`).
+
+**Delta size:** 277 commits, 89 files, +11 355 / −4 448.
+
+**Upstream highlights (from the 2026.7 release notes):**
+- Backtesting performance improvements (when used with `--export signals`).
+- Timerange filtering for trades in parquet format; Arrow-based OHLCV filtering (feather/parquet).
+- OHLCV storage recommendation now favors **feather only** (drops parquet).
+- OKX / MyOKX: support both stop-market and stop-limit orders.
+- FreqAI: backtest pairs with partial data availability (later listing date).
+- Deprecation: `from freqtrade.vendor.qtpylib` → `from technical import qtpylib`.
+- Fix: `get_conversation_rate` when rate is `None`.
+- Fix: don't persist 0 balances to wallet history.
+- Fix: Hyperliquid properly sets `lastTradeTimestamp` (fills the `filled_date` for orders returned by `_add_missing_trades_from_trades`).
+- Fix: `handle_on_exchange_orders` no longer breaks when no order is found.
+- Feat: include funding fees in the wallet-history migration.
+- Chore: refreshed Binance leverage tiers; ta_lib armhf wheel bump to 0.7.1.
+
+**Fork-sensitive files touched by upstream (impact scan):**
+
+| File | Upstream delta | Impact on fork | Effort |
+|------|----------------|----------------|--------|
+| `freqtrade/freqtradebot.py` | 113 lines | 🔴 **Conflict** — `enter_positions()` signature changes to `enter_positions(free_trade_slots: int)`; call site in `process()` becomes `if …((free_trade_slots := self.get_free_open_trades()) > 0): self.enter_positions(free_trade_slots)`. The fork has a `_cp("entries")` probe on the line right after `self.enter_positions()`, so the merge won't auto-resolve. Also, upstream guards `order_close_notify` with `if order_obj:` in `update_trade_state()`. Custom handlers `_handle_external_close`, `_handle_liquidation`, `_coordinator.opposite_side_sibling` guard block are **unaffected** — they live in a separate branch of `handle_onexchange_order()` untouched by upstream. Manual 3-way needed on the two `enter_positions` sites and on the `order_obj` guard block. | ~20 min |
+| `freqtrade/exchange/hyperliquid.py` | +2 lines | 🟢 **Trivial** — one added line: `order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)` inside `_add_missing_trades_from_trades`. Fork's `fetch_liquidation_fills()` is a separate method, unaffected. Cherry-pick clean. | ~2 min |
+| `freqtrade/persistence/trade_model.py` | 101 lines | 🟡 **Portable but bulky** — refactors `LocalTrade.to_json()` to compute `filled_entry_orders`, `filled_exit_orders`, `open_orders_wo_sl`, `open_sl_orders`, `date_entry_fill_utc`, `stoploss_last_update_utc`, `trade_duration_s` once instead of via repeated property calls. Fork does not add fields inside `to_json` — merge should be clean but the diff is large enough to warrant a visual review. | ~10 min |
+| `freqtrade/wallets.py` | 3 lines | 🟢 **Trivial** — `if wallet.total == 0: continue` inside the `get_all_balances()` loop (paired with the "don't persist 0 balances" fix). Cherry-pick clean. | ~1 min |
+| `freqtrade/rpc/rpc.py` | +6 lines | 🟢 **Trivial** — adds `if prev_len > 0 and len(df_analyzed) == 0: raise RPCException(...)` after `trim_dataframe` in `pair_analysis` (guards against startup_candle_count trimming to empty). No fork override on this path. | ~1 min |
+| `freqtrade/rpc/telegram.py` | 1 line | 🟢 **Trivial** — help text change `/balance total` → `/balance full`. Fork's telegram customizations, if any, are elsewhere. | ~1 min |
+| `freqtrade/plugins/pairlist/AgeFilter.py`, `IPairList.py`, `StaticPairList.py` | 3 lines each | 🟢 **Trivial** — signature harmonization for the new pairlist API. Fork's `TrendRegularityFilter.py` follows the same `IPairList` shape; check it inherits the updated signature without warning after the sync. | ~5 min |
+
+**Past-conflict files (from PR #30) — NOT touched by 2026.7 → free ride:**
+- `freqtrade/data/metrics.py` (both `calculate_pvalue` and `calculate_p_value` remain)
+- `freqtrade/commands/deploy_ui.py` (fork's `.tar.gz` FreqUI installer preserved)
+- `freqtrade/rpc/api_server/api_v1.py` (`API_VERSION` renumbering)
+- `freqtrade/rpc/api_server/webserver.py` (stratdev routers)
+- `freqtrade/rpc/api_server/api_replay.py` (replay routers)
+
+**Estimated total conflict-resolution effort:** ~40 minutes (dominated by the `enter_positions` signature change and the `trade_model.to_json` refactor visual review), vs. the ~4 hours the 2026.6 sync took.
+
+**Structural note:** the fork history is squash-style vs. upstream (`git merge-base HEAD 2026.7` returns commit `4139b0b0c` — the ancient 2017 `add signal handler for SIGINT, SIGTERM and SIGABRT` commit). `git merge 2026.7 --allow-unrelated-histories` produces ~50 add/add conflicts because every file added since 2017 registers as add/add, so **the previous sync approach must be reused**: apply the upstream diff (`git diff 2026.6..2026.7 | git apply --3way`) rather than a git-merge, then hand-resolve the ~5 real conflict sites listed above.
+
+**Follow-up plan:**
+1. Merge this tracking PR (zero-risk documentation).
+2. Open a follow-up PR that applies the `2026.6..2026.7` diff via `git apply --3way`, hand-resolves the freqtradebot.py sites, runs `pytest --random-order -n auto` and the replay determinism harness, bumps the version marker to `2026.7`.
+3. Follow up on the `qtpylib` deprecation warning across the fork's strategies (`grep -r "freqtrade.vendor.qtpylib" user_data/` — expect several strategy files to need `from technical import qtpylib`).
+4. Let Dependabot flush the dep bumps (ccxt 4.5.61→4.5.68, sqlalchemy, tqdm 4.68.3→4.69.0, fastapi 0.139.0→0.139.2, ruff 0.15.18→0.15.22, mypy 2.2→2.3, filelock 3.29.7→3.31.1, ta-lib 0.6.8→0.7.1, lightgbm 4.6→4.7, numexpr 2.14.1→2.14.2, websockets 16.1→16.1.1) — six of these already have open Dependabot PRs.
+
 ### Branding & documentation
 - Renamed repository from `freqtrade-fork` to `freqtrade-ultimate`.
 - Full English-only README rewrite, emphasizing Freqtrade France brand and pointing to [`docs/FEATURES.md`](docs/FEATURES.md) for full technical reference.
