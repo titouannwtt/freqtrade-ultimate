@@ -112,6 +112,7 @@ from freqtrade.misc import (
     safe_value_fallback,
     safe_value_nested,
 )
+from freqtrade.order_identity import bot_fingerprint, new_client_order_id
 from freqtrade.util import FtTTLCache, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
 
@@ -201,6 +202,8 @@ class Exchange:
         self._ws_async: ccxt_pro.Exchange = None
         self._exchange_ws: ExchangeWS | None = None
         self._markets: dict = {}
+        # Derived lazily: identity stamped into every client order id we mint.
+        self._order_fingerprint: str | None = None
         self._trading_fees: dict[str, Any] = {}
         self._leverage_tiers: dict[str, list[LeverageTier]] = {}
         # Lock event loop. This is necessary to avoid race-conditions when using force* commands
@@ -1578,7 +1581,21 @@ class Exchange:
             # On a shared netted wallet (multi-bot), reduceOnly exits can be rejected
             # when the fleet's net position opposes this bot's trade direction.
             params.update({"reduceOnly": True})
+        if self._ft_has.get("supports_client_order_id", False):
+            # Stamp ownership into the order itself. On an account shared by several
+            # bots this is the only non-inferential answer to "is this order mine?" —
+            # see freqtrade/order_identity.py. Inert on exchanges that do not declare
+            # the capability, so nothing changes for single-account setups.
+            params.update({"clientOrderId": new_client_order_id(self.order_fingerprint)})
         return params
+
+    @property
+    def order_fingerprint(self) -> str:
+        """This bot's stable identity, embedded in every client order id it mints."""
+        if self._order_fingerprint is None:
+            self._order_fingerprint = bot_fingerprint(self._config)
+            logger.info("Order ownership fingerprint: %s", self._order_fingerprint)
+        return self._order_fingerprint
 
     def _order_needs_price(self, side: BuySell, ordertype: str) -> bool:
         return (

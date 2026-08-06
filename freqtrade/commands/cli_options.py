@@ -590,6 +590,11 @@ AVAILABLE_CLI_OPTIONS = {
         help="Show timerange available for available data. (May take a while to calculate).",
         action="store_true",
     ),
+    "verify_only": Arg(
+        "--verify",
+        help="Only verify the audit ledger's hash chain, without contacting the exchange.",
+        action="store_true",
+    ),
     "exchange": Arg(
         "--exchange",
         help="Exchange name. Only valid if no config is provided.",

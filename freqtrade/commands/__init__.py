@@ -9,6 +9,7 @@ Note: Be careful with file-scoped imports in these subfiles.
 
 from freqtrade.commands.analyze_commands import start_analysis_entries_exits
 from freqtrade.commands.arguments import Arguments
+from freqtrade.commands.audit_commands import start_position_audit
 from freqtrade.commands.build_config_commands import start_new_config, start_show_config
 from freqtrade.commands.data_commands import (
     start_convert_data,

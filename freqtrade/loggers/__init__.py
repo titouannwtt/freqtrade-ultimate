@@ -1,12 +1,14 @@
 import logging
 import logging.config
 import os
+import re
 from copy import deepcopy
 from logging import Formatter
 from pathlib import Path
 from typing import Any
 
 from freqtrade.constants import Config
+from freqtrade.enums import RunMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.loggers.buffering_handler import FTBufferingHandler
 from freqtrade.loggers.ft_rich_handler import FtRichHandler
@@ -123,11 +125,34 @@ def _add_formatter(log_config: dict[str, Any], format_name: str, format_: str):
         log_config["formatters"][format_name] = {"format": format_}
 
 
+def _default_trade_logfile(config: Config) -> str | None:
+    """Where a live/dry bot should log when the user configured nothing.
+
+    Upstream logs to the console only unless ``logfile`` is set, which is the right
+    default for one-off commands but leaves a long-running bot with no history beyond
+    the terminal scrollback. Diagnosing anything then depends on the operator having
+    scrolled to the right place at the right time — in practice, on luck.
+
+    So a bot gets a rotating file automatically, named after itself, next to its data.
+    Explicit configuration (``logfile`` or a full ``log_config``) always wins; this only
+    fills the gap, and only for ``trade``, where the process is meant to outlive the
+    session watching it.
+    """
+    if config.get("runmode") not in (RunMode.LIVE, RunMode.DRY_RUN):
+        return None
+    if config.get("log_config"):
+        return None  # user took control of handlers; do not second-guess them
+    name = config.get("bot_name") or "freqtrade"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(name)) or "freqtrade"
+    return str(Path(config.get("user_data_dir", "user_data")) / "logs" / f"{safe}.log")
+
+
 def _create_log_config(config: Config) -> dict[str, Any]:
     # Get log_config from user config or use default
     log_config = deepcopy(config.get("log_config", FT_LOGGING_CONFIG))
 
-    if logfile := config.get("logfile"):
+    logfile = config.get("logfile") or _default_trade_logfile(config)
+    if logfile:
         s = logfile.split(":")
         if s[0] == "syslog":
             logger.warning(

@@ -6,6 +6,53 @@ Versioning convention: `v<upstream_version>-fork.<n>` — e.g. `v2026.3-fork.5` 
 
 ## [Unreleased]
 
+### Position integrity on a shared exchange account (2026-08-06)
+
+Upstream assumes one bot owns one exchange account. On Hyperliquid several bots normally
+share one netted wallet, which invalidates that assumption for every account-scoped
+endpoint — and produced two silent failure modes in production: positions running on the
+exchange that no bot piloted (**orphans**), and books claiming positions with no
+counterpart (**phantoms**).
+
+**Added**
+
+- `freqtrade/order_identity.py` — per-bot client order ids (`0x<8-hex bot fingerprint><24 hex>`),
+  making order ownership provable instead of inferred. Enabled on exchanges declaring
+  `supports_client_order_id`; inert elsewhere.
+- `freqtrade/position_audit/` — append-only, hash-chained ledger; fleet attestation
+  comparing the exchange against every bot's book; break register that opens, ages and
+  closes each discrepancy. The ledger detects any alteration, reordering or deletion, and
+  can rebuild the book as of a past instant.
+- `freqtrade position-audit` — read-only CLI producing a dated attestation. Reads the
+  exchange directly rather than through the bots' shared cache, counts stopped bots as
+  owners of their positions, and exits non-zero on drift so a scheduler can alert.
+  Documented in `docs/position-audit.md`.
+- Live and dry-run bots now get a rotating logfile automatically when none is configured.
+  Diagnosing a long-running bot previously depended on terminal scrollback.
+
+**Fixed**
+
+- An external close may only be concluded from a positions view newer than the trade's own
+  last fill, confirmed by a cache-bypassing read. A cached snapshot predating the fill
+  legitimately shows no position; acting on it closed the trade while the position kept
+  running unpiloted.
+- Orders are no longer adopted from the account unless they carry this bot's client order
+  id. Two bots entering the same coin seconds apart each adopted the other's fill, and both
+  books claimed the full position.
+- Futures exits are capped at what the wallet actually holds. `reduceOnly` is evaluated
+  against the *wallet's* net, so while siblings hold the same side there is headroom for a
+  buy-back larger than this bot's own leg — one closed a 4003 short with 6911 and left a
+  2908 long.
+- Positions snapshots are timestamped at capture rather than arrival, so a cached hit
+  delivered instantly no longer reads as fresh.
+
+**Notes**
+
+- Nothing above requires configuration. Single-bot users see no behaviour change.
+- `position_iso_guard.mode` (`off` / `warn` / `block`) tunes the per-order assertion;
+  default `warn`. Exits are never blocked, by design.
+
+
 ### Upstream sync tracking — freqtrade 2026.7 (2026-07-31)
 
 Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/2026.7) was published 2026-07-31. This section documents the delta `2026.6..2026.7` and its impact on this fork. **No application code is changed in this tracking PR** — the sync itself must be applied as its own follow-up PR (same pattern as the previous `Merge upstream freqtrade 2026.6 (#30)`).

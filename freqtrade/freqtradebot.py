@@ -57,10 +57,12 @@ from freqtrade.fleet_coordination import PositionCoordinator
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
+from freqtrade.order_identity import is_ours
 from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_db
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.plugins.pairlistmanager import PairListManager
 from freqtrade.plugins.protectionmanager import ProtectionManager
+from freqtrade.position_audit import AuditLedger, safe_ledger_name
 from freqtrade.position_iso_guard import PositionIsoGuard
 from freqtrade.resolvers import ExchangeResolver, StrategyResolver
 from freqtrade.rpc import RPCManager
@@ -234,6 +236,14 @@ class FreqtradeBot(LoggingMixin):
             self._coordinator = PositionCoordinator(self.config)
             # Asserts the exchange/book position arithmetic around every order.
             self._iso_guard = PositionIsoGuard(self.config, self.exchange, self._coordinator)
+            # Per-bot append-only record of position-affecting events. Sharded by bot so
+            # writes never contend, and kept out of the trade DB so corrections to the
+            # working record cannot rewrite history. See freqtrade/position_audit/.
+            self._audit_ledger = AuditLedger(
+                Path(self.config.get("user_data_dir", "user_data"))
+                / "audit"
+                / f"{safe_ledger_name(self.config.get('bot_name') or 'freqtrade')}.jsonl"
+            )
 
             # Protect exit-logic from forcesell and vice versa
             self._exit_lock = RLock()
@@ -1058,11 +1068,13 @@ class FreqtradeBot(LoggingMixin):
                     # the sound precondition: where orders are account-scoped, an order
                     # missing from our book is not ours, whether or not we can currently
                     # enumerate who else is trading.
-                    if self.exchange.get_option("orders_are_account_scoped", False):
+                    if self.exchange.get_option(
+                        "orders_are_account_scoped", False
+                    ) and not self._order_is_ours(order):
                         logger.warning(
                             "%s: ignoring order %s — it is not in this bot's book and "
-                            "this exchange reports orders per account, not per bot, so "
-                            "it cannot be attributed to us.",
+                            "carries no proof of being ours, while this exchange "
+                            "reports orders per account rather than per bot.",
                             trade.pair,
                             order["id"],
                         )
@@ -1497,6 +1509,49 @@ class FreqtradeBot(LoggingMixin):
         )
         return False
 
+    def _record_fill(
+        self, pair: str, signed_amount: float, order: dict, phase: str, tag: str | None
+    ) -> None:
+        """Write a position-affecting fill to the append-only audit ledger.
+
+        Records the client order id alongside, which is what lets a later audit prove
+        the fill was ours rather than assume it. Failures are swallowed inside the
+        ledger itself: bookkeeping must never be able to stop trading.
+        """
+        try:
+            self._audit_ledger.append(
+                "fill",
+                bot=self.config.get("bot_name", ""),
+                coin=pair.split("/")[0],
+                pair=pair,
+                phase=phase,
+                signed_amount=signed_amount,
+                price=order.get("average") or order.get("price"),
+                order_id=order.get("id"),
+                cloid=order.get("clientOrderId"),
+                tag=tag or "",
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Could not record fill in the audit ledger", exc_info=True)
+
+    def _order_is_ours(self, order: dict) -> bool:
+        """True when the exchange itself confirms this order was placed by this bot.
+
+        Recovering an order the DB lost is a legitimate and necessary operation — it is
+        why upstream re-reads the account at all. What is not legitimate on a shared
+        account is recovering someone *else's* order. The client order id settles the
+        question with data the exchange echoes back, so the recovery path stays open for
+        our own orders and closed for everyone else's.
+
+        Orders minted before this bot started stamping ids carry none and read as "not
+        ours". That is the correct answer while the fleet rolls over: an unattributable
+        order is left to the reconciler rather than claimed on a hunch.
+        """
+        try:
+            return is_ours(order.get("clientOrderId"), self.exchange.order_fingerprint)
+        except Exception:
+            return False
+
     def _position_confirmed_absent(self, trade: Trade) -> bool:
         """Prove, against the exchange, that nothing is left on this pair.
 
@@ -1894,12 +1949,11 @@ class FreqtradeBot(LoggingMixin):
         except (TypeError, ValueError):
             filled = 0.0
         if filled:
+            signed = -filled if is_short else filled
             self._iso_guard.after_order(
-                pair,
-                -filled if is_short else filled,
-                phase="entry",
-                context={"order_id": order_id, "side": side},
+                pair, signed, phase="entry", context={"order_id": order_id, "side": side}
             )
+            self._record_fill(pair, signed, order, "entry", enter_tag)
 
         # we assume the order is executed at the price requested
         enter_limit_filled_price = enter_limit_requested
@@ -3180,12 +3234,14 @@ class FreqtradeBot(LoggingMixin):
         except (TypeError, ValueError):
             exit_filled = 0.0
         if exit_filled:
+            signed = exit_filled if trade.is_short else -exit_filled
             self._iso_guard.after_order(
                 trade.pair,
-                exit_filled if trade.is_short else -exit_filled,
+                signed,
                 phase="exit",
                 context={"order_id": order_obj.order_id, "exit_reason": exit_reason},
             )
+            self._record_fill(trade.pair, signed, order, "exit", exit_reason)
         # In case of market exit orders the order can be closed immediately
         if order.get("status", "unknown") in ("closed", "expired"):
             self.update_trade_state(trade, order_obj.order_id, order)

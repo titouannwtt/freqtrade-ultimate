@@ -48,6 +48,10 @@ class Hyperliquid(Exchange):
         # wrong here as soon as two bots share the wallet — which is the normal setup
         # on Hyperliquid, where positions are netted per coin account-wide.
         "orders_are_account_scoped": True,
+        # Accepts a 128-bit hex client order id (cloid) and echoes it back on reads,
+        # which is what makes ownership provable rather than inferred on a wallet
+        # shared by several bots. See freqtrade/order_identity.py.
+        "supports_client_order_id": True,
     }
     _ft_has_futures: FtHas = {
         "stoploss_on_exchange": True,

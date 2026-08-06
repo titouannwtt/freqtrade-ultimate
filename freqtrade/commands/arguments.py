@@ -156,6 +156,8 @@ ARGS_CONVERT_TRADES = [
     "trading_mode",
 ]
 
+ARGS_POSITION_AUDIT = ["exchange", "verify_only"]
+
 ARGS_LIST_DATA = [
     "exchange",
     "dataformat_ohlcv",
@@ -315,6 +317,7 @@ NO_CONF_REQURIED = [
     "hyperopt-list",
     "hyperopt-show",
     "list-data",
+    "position-audit",
     "list-freqaimodels",
     "list-hyperoptloss",
     "list-markets",
@@ -436,6 +439,7 @@ class Arguments:
             start_new_strategy,
             start_plot_dataframe,
             start_plot_profit,
+            start_position_audit,
             start_recursive_analysis,
             start_show_config,
             start_show_trades,
@@ -527,6 +531,15 @@ class Arguments:
         )
         convert_trade_data_cmd.set_defaults(func=start_convert_trades)
         self._build_args(optionlist=ARGS_CONVERT_TRADES, parser=convert_trade_data_cmd)
+
+        # Add position-audit subcommand
+        position_audit_cmd = subparsers.add_parser(
+            "position-audit",
+            help="Reconcile exchange positions against every bot's book (read-only).",
+            parents=[_common_parser],
+        )
+        position_audit_cmd.set_defaults(func=start_position_audit)
+        self._build_args(optionlist=ARGS_POSITION_AUDIT, parser=position_audit_cmd)
 
         # Add list-data subcommand
         list_data_cmd = subparsers.add_parser(
