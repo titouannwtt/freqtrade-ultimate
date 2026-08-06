@@ -217,6 +217,10 @@ class FleetRegistry:
 
         self._cache_ttl = cache_ttl
         self._cache_time = 0.0
+        # True when the last discovery attempt raised. Distinguishes "the fleet is
+        # empty" from "we could not find out" — the two must not be conflated by any
+        # caller making a safety decision.
+        self.last_discovery_failed = False
         self._cached: list[tuple[str, Path]] = []
 
     def _discover_from_dir(self, directory: Path) -> list[tuple[str, Path]]:
@@ -271,8 +275,15 @@ class FleetRegistry:
                 )
                 result = self._discover_from_dir(directory) if directory else []
         except Exception as e:
+            # "Assuming no siblings" is a permissive answer to a question we failed to
+            # answer, and callers cannot tell it apart from a genuine empty fleet. Keep
+            # returning [] so coordination degrades gracefully, but record the failure
+            # so a caller that needs certainty can ask.
             logger.warning("Coordination: fleet discovery failed (%s) — assuming no siblings", e)
+            self.last_discovery_failed = True
             result = []
+        else:
+            self.last_discovery_failed = False
 
         self._cached = result
         self._cache_time = now
@@ -365,13 +376,18 @@ class PositionCoordinator:
         return the fleet's activity, not ours, and anything that attributes those
         results to this bot will silently steal a sibling's fills.
 
-        Deliberately conservative: any failure to enumerate siblings returns True, so
-        the caller keeps the safe behaviour rather than the permissive one.
+        Deliberately conservative: if we could not find out, answer True, so a caller
+        keeps the safe behaviour rather than the permissive one. Note that discovery
+        swallows its own errors and returns an empty list, so "empty" alone is not
+        evidence of a lone bot — hence the explicit failure flag.
         """
         try:
-            return bool(self._registry.siblings())
+            siblings = self._registry.siblings()
         except Exception:
             return True
+        if getattr(self._registry, "last_discovery_failed", False):
+            return True
+        return bool(siblings)
 
     def opposite_side_sibling(self, pair: str, is_short: bool) -> bool:
         """

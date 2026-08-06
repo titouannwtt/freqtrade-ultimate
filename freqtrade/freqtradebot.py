@@ -1050,14 +1050,19 @@ class FreqtradeBot(LoggingMixin):
                     # the fleet double-counts a single on-chain position. Observed in
                     # the wild — two bots entered the same coin 5s apart and each
                     # adopted the other's entry, inflating both books by the full size.
-                    if (
-                        self.exchange.get_option("orders_are_account_scoped", False)
-                        and self._coordinator.shares_account()
-                    ):
+                    # Deliberately NOT gated on "are there siblings?": that question is
+                    # answered by fleet discovery, which swallows its own failures and
+                    # returns an empty list, so a transient hiccup silently disarmed the
+                    # guard for the duration of its 5-minute cache — and one adoption
+                    # did get through exactly that way. The exchange capability alone is
+                    # the sound precondition: where orders are account-scoped, an order
+                    # missing from our book is not ours, whether or not we can currently
+                    # enumerate who else is trading.
+                    if self.exchange.get_option("orders_are_account_scoped", False):
                         logger.warning(
                             "%s: ignoring order %s — it is not in this bot's book and "
-                            "the exchange account is shared with sibling bots, so it "
-                            "cannot be attributed to us.",
+                            "this exchange reports orders per account, not per bot, so "
+                            "it cannot be attributed to us.",
                             trade.pair,
                             order["id"],
                         )
@@ -2978,18 +2983,18 @@ class FreqtradeBot(LoggingMixin):
     def _clamp_exit_to_wallet_position(self, trade: Trade, pair: str, amount: float) -> float:
         """Cap a futures exit at what actually exists on the wallet for this pair.
 
-        Only ever shrinks an exit, and only on a shared account. An exit must never be
-        blocked, so every uncertainty resolves in favour of the caller's amount: no
-        sibling bots, no reading, a zero/absent position (which on a netted wallet
-        usually means siblings offset us, not that we are flat), or any error at all
-        leaves `amount` untouched. Capital that cannot be exited is a far worse
-        failure than an exit that overshoots.
+        Only ever shrinks an exit. An exit must never be blocked, so every uncertainty
+        resolves in favour of the caller's amount: no reading, a zero/absent position
+        (which on a netted wallet usually means siblings offset us, not that we are
+        flat), or any error at all leaves `amount` untouched. Capital that cannot be
+        exited is a far worse failure than an exit that overshoots.
+
+        Not gated on sibling discovery — see the note in `handle_onexchange_order`:
+        that lookup fails open, and a safety cap must not depend on it.
         """
         try:
             if not self.exchange.get_option("orders_are_account_scoped", False):
                 return amount  # one bot, one account: upstream's assumption holds
-            if not self._coordinator.shares_account():
-                return amount
             owned = abs(float(self.wallets.get_owned(pair, trade.base_currency) or 0.0))
         except Exception:
             return amount

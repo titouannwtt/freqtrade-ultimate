@@ -270,3 +270,50 @@ def test_cached_hit_is_stamped_at_capture_time_not_arrival():
     before = _t.time()
     m._ftcache_save_positions([], captured_age_s=15.0)
     assert m.positions_snapshot_wall_ts() <= before - 14.0
+
+
+# --------------------------------------- the adoption guard must not depend on discovery
+
+
+def test_adoption_guard_does_not_consult_sibling_discovery():
+    """Regression: gating on "are there siblings?" disarmed the guard in production.
+
+    Fleet discovery swallows its own errors and returns an empty list, so a transient
+    failure looked exactly like a lone bot and let a sibling's order be adopted (NIL,
+    2026-08-06 05:21). The exchange capability must be the only precondition.
+    """
+    import inspect
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    src = inspect.getsource(FreqtradeBot.handle_onexchange_order)
+    guard = src.split("orders_are_account_scoped")[1].split("continue")[0]
+    assert "shares_account" not in guard
+
+
+def test_exit_clamp_does_not_consult_sibling_discovery():
+    import inspect
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    src = inspect.getsource(FreqtradeBot._clamp_exit_to_wallet_position)
+    assert "shares_account" not in src
+
+
+def test_discovery_failure_is_not_reported_as_an_empty_fleet():
+    from freqtrade.fleet_coordination import PositionCoordinator
+
+    coord = PositionCoordinator(
+        {"bot_name": "x", "exchange": {"name": "hyperliquid"}, "user_data_dir": "/tmp"}
+    )
+
+    class _Registry:
+        last_discovery_failed = True
+
+        def siblings(self):
+            return []
+
+    coord._registry = _Registry()
+    assert coord.shares_account() is True, "a failed lookup must not read as 'no siblings'"
+    _Registry.last_discovery_failed = False
+    assert coord.shares_account() is False
