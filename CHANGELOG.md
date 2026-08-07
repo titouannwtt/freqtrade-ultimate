@@ -6,6 +6,38 @@ Versioning convention: `v<upstream_version>-fork.<n>` — e.g. `v2026.3-fork.5` 
 
 ## [Unreleased]
 
+### Upstream 2026.7 features ported (2026-08-07)
+
+Three headline items from upstream 2026.7, plus one fix the release notes do not mention.
+
+**Ported**
+
+- **OKX / MyOKX: stop-market *and* stop-limit orders** (`freqtrade/exchange/okx.py`), with the
+  upstream test coverage that goes with them.
+- **FreqAI: backtest pairs with partial data availability** — pairs listed later than the
+  backtest start no longer break the run (`freqai/data_kitchen.py`, `freqai/freqai_interface.py`).
+- **`_sync_pair_index`** (`optimize/backtesting.py`) — not in the release headline, but the more
+  consequential of the four: a dynamic pairlist that drops a pair and re-adds it later left
+  `indexes[pair]` pointing at old rows, so the pair silently *replayed candles it had already
+  seen*. Applied surgically rather than by file checkout, since this file carries fork changes
+  (`missing_data_pairs`, `_extract_strategy_params`, `wfa_silent` — all verified intact).
+- **`TimeRange.copy()`** — not a feature, a dependency: the new FreqAI code calls it, and a
+  file-by-file cherry-pick does not reveal that, so porting `data_kitchen.py` alone took the
+  FreqAI suite from 7 failures to 13.
+
+**Already present, no action**
+
+- Backtesting performance with `--export signals`: the `_is_backtest_runmode` guards had
+  already landed in an earlier backport pass.
+
+**Notes**
+
+- One fork patch became redundant and was dropped: we had fixed an always-true
+  `if "PyTorchMLPClassifier":` in the FreqAI tests; upstream fixed the same bug independently.
+- Verification: OKX 21/21 pass; backtesting + FreqAI interface 0 failures; FreqAI datakitchen
+  keeps exactly the same 7 pre-existing failures as `main` (compared set by set, not by count).
+
+
 ### Position integrity on a shared exchange account (2026-08-06)
 
 Upstream assumes one bot owns one exchange account. On Hyperliquid several bots normally
