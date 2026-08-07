@@ -268,47 +268,38 @@ Freqtrade Ultimate pairs with **[FreqUI Ultimate](https://github.com/titouannwtt
 
 A single screen for your whole fleet: live log console, cumulative profit vs BTC benchmark, per-bot comparison table (open/closed P&L, win/loss, monthly profit, DCA escalations), and every open position with duration-health bars.
 
-![FreqUI Ultimate — multi-bot dashboard](.readme_illustrations/frequi-dashboard-overview.png)
+<img width="2544" height="1320" alt="image" src="https://github.com/user-attachments/assets/e2a2e95f-415e-49cb-9f2d-1aec80b5a9e0" />
+
 
 ### Fleet comparison & alerts
 
 Compare every bot head-to-head — custom columns, tags, filters, groups, drag-drop ordering, CSV export, and **13 cross-bot alert types** that flag anomalies across the whole fleet at a glance.
 
-<p align="center">
-  <img src=".readme_illustrations/frequi-bot-comparison-alerts.png" width="49%" alt="FreqUI Ultimate — bot comparison alerts">
-  <img src=".readme_illustrations/frequi-bot-comparison-groups.png" width="49%" alt="FreqUI Ultimate — bot comparison groups">
-</p>
+<img width="2538" height="720" alt="image" src="https://github.com/user-attachments/assets/5a32c3d8-1501-4ba0-81a1-c3a3d22d0262" />
+
 
 ### Market Pulse & portfolio Risk Overview
 
 Context stock FreqUI never surfaces: BTC dominance, Fear & Greed, your fleet's performance vs BTC/ETH on the left — and on the right, portfolio-wide exposure, net/gross/long-short split, average leverage, largest position, worst drawdown, and correlation warnings.
 
-<p align="center">
-  <img src=".readme_illustrations/frequi-market-pulse.png" width="49%" alt="FreqUI Ultimate — Market & Performance Overview">
-  <img src=".readme_illustrations/frequi-risk-overview.png" width="49%" alt="FreqUI Ultimate — Risk Overview">
-</p>
+<img width="848" height="392" alt="image" src="https://github.com/user-attachments/assets/deef75ef-80da-4c28-a046-0c802604ce3c" />
+
 
 ### Analytics widgets
 
 Per-bot profit benchmarks, performance heatmap, activity timeline, and a Monte-Carlo stress test — the analytical depth a serious multi-bot operator needs.
+<img width="848" height="442" alt="image" src="https://github.com/user-attachments/assets/a4c6e52c-c99b-4279-a51f-c52dcb7c5285" />
 
-<p align="center">
-  <img src=".readme_illustrations/frequi-profit-benchmarks.png" width="49%" alt="FreqUI Ultimate — profit & benchmarks">
-  <img src=".readme_illustrations/frequi-performance-heatmap.png" width="49%" alt="FreqUI Ultimate — performance heatmap">
-</p>
-<p align="center">
-  <img src=".readme_illustrations/frequi-stress-test.png" width="49%" alt="FreqUI Ultimate — stress test">
-  <img src=".readme_illustrations/frequi-activity-timeline.png" width="49%" alt="FreqUI Ultimate — activity timeline">
-</p>
+<img width="848" height="596" alt="image" src="https://github.com/user-attachments/assets/96a9637c-20a8-4f3e-8a71-06931e37bd84" />
 
 ### Rich context popovers
 
 Hover any metric for a glassmorphism context card — open positions, DCA escalations, exit reasons, price levels, and more.
 
-<p align="center">
-  <img src=".readme_illustrations/frequi-popover-open-positions.png" width="49%" alt="FreqUI Ultimate — open positions popover">
-  <img src=".readme_illustrations/frequi-popover-dca-escalations.png" width="49%" alt="FreqUI Ultimate — DCA escalations popover">
-</p>
+<img width="1698" height="615" alt="image" src="https://github.com/user-attachments/assets/44d85ad0-65a5-49db-9659-cc44f1dd4e89" />
+<img width="417" height="527" alt="image" src="https://github.com/user-attachments/assets/8f75fd3b-0c87-4b7a-92eb-7d266de28d0a" />
+<img width="577" height="664" alt="image" src="https://github.com/user-attachments/assets/58ad99bc-b964-4c0c-a84d-5991bd698474" />
+
 
 More widgets, popovers, and the embedded strategy editor are shown in the [FreqUI Ultimate repo](https://github.com/titouannwtt/frequi-ultimate).
 
