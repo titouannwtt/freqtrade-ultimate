@@ -691,11 +691,18 @@ class RPC:
         # Duration
         dur: dict[str, list[float]] = {"wins": [], "draws": [], "losses": []}
         # Exit reason
-        exit_reasons = {}
+        exit_reasons: dict[str, dict[str, int]] = {}
         for trade in trades:
-            if trade.exit_reason not in exit_reasons:
-                exit_reasons[trade.exit_reason] = {"wins": 0, "losses": 0, "draws": 0}
-            exit_reasons[trade.exit_reason][trade_win_loss(trade)] += 1
+            # A closed trade can carry exit_reason=None — a position that left the book
+            # without the bot recording why (an external close, a fill it never saw). Used
+            # as a dict key it produces a null key, which the response model rejects, and
+            # the whole endpoint 500s: measured on 6 of 24 live bots here. Grouping those
+            # trades under an explicit label keeps them counted; dropping them would
+            # silently change the totals, and that is worse than an ugly label.
+            reason = trade.exit_reason if trade.exit_reason is not None else "unknown"
+            if reason not in exit_reasons:
+                exit_reasons[reason] = {"wins": 0, "losses": 0, "draws": 0}
+            exit_reasons[reason][trade_win_loss(trade)] += 1
 
             if trade.close_date is not None and trade.open_date is not None:
                 trade_dur = (trade.close_date - trade.open_date).total_seconds()

@@ -101,3 +101,32 @@ def test_open_profit_is_omitted_rather_than_guessed():
     src = inspect.getsource(FreqtradeBot._push_fleet_digest)
     assert "refresh=False" in src, "the digest must not trigger a rate fetch"
     assert "open_profit_abs" in src
+
+
+# ------------------------------------------------------ /stats robustness to missing data
+
+
+def test_stats_groups_trades_with_no_exit_reason_instead_of_dropping_them():
+    """Regression: a null exit_reason became a null dict key and 500'd the endpoint.
+
+    Observed on 6 of 24 live bots. A position can leave the book without the bot recording
+    why (external close, a fill it never saw). Those trades must still be counted — silently
+    dropping them would change the win/loss totals, which is worse than an ugly label.
+    """
+    import inspect
+
+    from freqtrade.rpc.rpc import RPC
+
+    src = inspect.getsource(RPC._rpc_stats)
+    assert 'trade.exit_reason is not None else "unknown"' in src
+    assert "exit_reasons[trade.exit_reason]" not in src, "the raw, nullable key must not be used"
+
+
+def test_stats_counts_unknown_profit_as_a_draw():
+    """The other null on the same endpoint: close_profit=None used to raise TypeError."""
+    import inspect
+
+    from freqtrade.rpc.rpc import RPC
+
+    src = inspect.getsource(RPC._rpc_stats)
+    assert "if trade.close_profit is None:" in src
