@@ -57,6 +57,26 @@ _SUPPORTED_CAPABILITIES = {
     "setMarginMode",
 }
 
+# Minimum order notional (in stake currency) advertised by the synthetic markets.
+#
+# Real venues refuse dust orders — Hyperliquid rejects anything below 10 USDC of
+# notional. The synthetic market used to advertise 0.0, and that omission was NOT
+# cosmetic: when a DCA strategy asks for a safety order while the wallet is fully
+# committed, `Wallets._check_available_stake_amount` clamps the requested stake to
+# whatever is free (routinely ~1e-06 USDC). With a real minimum, `validate_stake_amount`
+# returns 0 and `execute_entry()` bails out immediately. With a minimum of 0 the dust
+# order sails through to `handle_similar_open_order()`, which cancels *every* open order
+# of the trade to make room for it — including a pending EXIT. In dry-run that "cancel"
+# first fetches the order (filling it), books the exit and closes the trade, and then the
+# dust entry reopens the very same trade. Next candle the exit signal fires again on a
+# position that was already sold: the same P&L is realised two or three times over.
+# Observed on XYZ-MSTR (UltoscBbsqueezeLongV1, 2026-06-22): a -9.0 % trade recorded as
+# -28.5 % because its full size was sold three times.
+_MIN_NOTIONAL_BY_EXCHANGE = {
+    "hyperliquid": 10.0,
+}
+_DEFAULT_MIN_NOTIONAL = 10.0
+
 
 def resolve_base_exchange_class(config: dict) -> type[Exchange]:
     """
@@ -104,6 +124,15 @@ class ReplayExchangeMixin:
         self._replay_store = store
         self._replay_clock = clock
         self._slippage_pct = slippage_pct
+        # Minimum order notional the synthetic markets advertise (see the module-level
+        # note on _MIN_NOTIONAL_BY_EXCHANGE — 0.0 lets dust orders cancel pending exits).
+        exch_name = str(config.get("exchange", {}).get("name", "")).lower()
+        self._replay_min_notional = float(
+            config.get(
+                "replay_min_notional",
+                _MIN_NOTIONAL_BY_EXCHANGE.get(exch_name, _DEFAULT_MIN_NOTIONAL),
+            )
+        )
         super().__init__(config, validate=False)
         self._markets = {p: self._make_market(p) for p in pairs}
 
@@ -134,7 +163,9 @@ class ReplayExchangeMixin:
             "precision": {"amount": 8, "price": 5},
             "limits": {
                 "amount": {"min": 0.0, "max": None},
-                "cost": {"min": 0.0, "max": None},
+                # Real minimum notional — without it, dust orders become legal and can
+                # cancel a pending exit (see _MIN_NOTIONAL_BY_EXCHANGE above).
+                "cost": {"min": self._replay_min_notional, "max": None},
                 "price": {"min": None, "max": None},
                 "market": {"min": 0, "max": None},
                 "leverage": {"min": 1, "max": 50},

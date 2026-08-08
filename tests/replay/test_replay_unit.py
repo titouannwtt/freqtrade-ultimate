@@ -326,6 +326,55 @@ class TestExchange:
     def test_get_positions_empty(self, built):
         assert built.get_positions() == {}
 
+    def test_markets_advertise_a_real_min_notional(self, built):
+        """
+        Regression: the synthetic market must refuse dust orders.
+
+        With ``limits.cost.min == 0`` a DCA safety order requested on a fully
+        committed wallet gets clamped to ~1e-06 USDC and still passes
+        ``validate_stake_amount``. ``execute_entry()`` then reaches
+        ``handle_similar_open_order()``, which cancels every open order of the trade —
+        including a pending exit. In dry-run that cancellation fills the exit, books
+        it, closes the trade, and the dust entry immediately reopens it: the same
+        position gets sold (and its loss realised) again on the next candle.
+        """
+        market = built.get_markets()[self.PAIR]
+        assert market["limits"]["cost"]["min"] == 10.0
+
+        # The value freqtrade actually consults before placing an order.
+        min_stake = built.get_min_pair_stake_amount(self.PAIR, 100.0, -0.10)
+        assert min_stake is not None and min_stake >= 10.0
+        # A dust safety order must be rejected outright.
+        assert built.get_min_pair_stake_amount(self.PAIR, 100.0, -0.10) > 1e-06
+
+    def test_min_notional_is_configurable(self, tmp_path):
+        _make_feather(
+            tmp_path, self.PAIR, "15m", CandleType.FUTURES, "2026-01-01", 60, "15min", 100
+        )
+        cfg = {
+            "dry_run": True,
+            "runmode": RunMode.DRY_RUN,
+            "trading_mode": "futures",
+            "margin_mode": "isolated",
+            "stake_currency": "USDC",
+            "stake_amount": "unlimited",
+            "replay_min_notional": 25.0,
+            "exchange": {
+                "name": "hyperliquid",
+                "pair_whitelist": [self.PAIR],
+                "pair_blacklist": [],
+            },
+            "db_url": "sqlite:///user_data/x.replay.sqlite",
+        }
+        store = ReplayDataStore(tmp_path, trading_mode="futures")
+        clock = VirtualClock()
+        clock.start(pd.Timestamp("2026-01-01 06:00", tz="UTC").to_pydatetime())
+        try:
+            ex = build_replay_exchange(cfg, store, clock, [self.PAIR], slippage_pct=0.001)
+            assert ex.get_markets()[self.PAIR]["limits"]["cost"]["min"] == 25.0
+        finally:
+            clock.stop()
+
     @staticmethod
     def _stop_order(pair, side, trigger, limit):
         return {
