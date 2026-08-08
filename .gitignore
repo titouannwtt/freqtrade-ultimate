@@ -290,3 +290,11 @@ user_data/logs/
 
 # Résidu d’un promote de stratégie — expose le générateur privé, ne jamais versionner
 .uncompacted_edge_strategies_backup/
+
+# Recherche BTCUSDLONGS (ne jamais committer : données TV + résultats + datadir synthétique)
+user_data/research_btclongs/
+user_data/external_data/
+backtest_configs/BTC_longs_research_1d.json
+user_data/research_logsupports/
+user_data/research_gold/
+user_data/data_btclongs/
