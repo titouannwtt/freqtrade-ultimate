@@ -6,6 +6,77 @@ Versioning convention: `v<upstream_version>-fork.<n>` — e.g. `v2026.3-fork.5` 
 
 ## [Unreleased]
 
+### Dashboard performance at fleet scale (2026-08-08)
+
+A dashboard watching ~50 bots was slow in two unrelated ways that had long been treated as
+one. A previous pass had cut polling frequencies fourfold and changed nothing, because the
+bottleneck was never the polling. Everything below is justified by a measurement, taken
+with the harness added here.
+
+**Measured on a fleet of 56 real bots.** A full page load — 10 endpoints across every bot,
+issued concurrently the way a browser does — took **11.6 s of wall time**.
+
+| Endpoint | Before | After |
+|---|---|---|
+| `daily` | 211 ms | 83 ms (−61%) |
+| `stats` | 162 ms | 70 ms (−57%) |
+| `profit` | 736 ms | 324 ms (−56%) |
+| `status` | 326 ms | 155 ms (−53%) |
+| `trades?limit=500` | 1453 ms | 824 ms (−43%) |
+| **full page load** | **11.6 s** | **9.9 s** |
+
+Browser side, measured on the real static import graph:
+
+| | Before | After |
+|---|---|---|
+| Dashboard payload | 7.06 MB / 59 chunks | 3.23 MB (−54%) |
+| Periodic trade sweep | 8.1 MB | ~176 kB (−98%) |
+| Deeply-reactive objects | ~36 000 | 0 |
+| Fleet-wide read | 11.6 s of polling | 10 ms / 586 B |
+
+**Added**
+
+- `user_data/bench_dashboard.py` — measures wall time, tail latency and payload per
+  endpoint across the fleet concurrently, and diffs two runs. The tail matters more than
+  the median: a freeze is caused by the slowest bot, not the average one.
+- `GET /fleet/snapshot` and `useFleetSnapshot` — the whole fleet in one request, from
+  digests each bot pushes to the shared daemon on its own cycle. Degrades to per-bot
+  polling on any of three failure modes. See `docs/fleet-snapshot.md`.
+- `useVisibleInterval` — pollers skip ticks while the tab is hidden and refresh on return.
+- `scripts/deploy_ui.sh` — replaces `assets/` wholesale instead of copying over it. The
+  served directory had accumulated 66 stale chunks and 443 MB; a browser holding a stale
+  chunk reference gets served it, which looks like a code bug.
+
+**Fixed**
+
+- `/balance` no longer calls the exchange from inside a request handler, where it
+  inherited the rate limiter's queue: p95 was 54 s. It serves the snapshot the trading
+  loop maintains and reports `wallet_age_s` — serving stale figures is acceptable,
+  presenting them as current is not. Median went from 20-60 ms to 6-8 ms (A/B on live bots).
+- `/balance` counted trades with `len(Trade.get_trades_proxy())`, hydrating every trade
+  *and* every order for a length: 0.106 ms per order, 1.6 s on a bot with 15 000 orders.
+- `/stats` 500'd on two separate nulls — `close_profit` and `exit_reason`. It was failing
+  on 21 of 55 bots. The second was only found by re-measuring the fleet *after* deploying
+  the first: tests confirm what you thought to check, measurement shows what you did not.
+- The local rate limiter's `acquire()` was `while True:` with no exit condition, on a
+  thread `concurrent.futures` joins at interpreter exit. A cleanly shut-down bot could
+  hang forever, so its supervisor never relaunched it — a live bot was silently down for
+  15 minutes. Now bounded, and its sleeps are capped by the remaining deadline.
+- `TRADE_SNAPSHOT` echoed its full payload at INFO: ~72 000 lines/day across 50 bots,
+  which then inflated the `/logs` responses a dashboard polls.
+
+**Deliberately not done** (each documented where it belongs, with the reasoning)
+
+- Dropping nested orders from `/trades` measured −90% on the heaviest endpoint, but the UI
+  genuinely renders those orders in its popovers. The capability was added server-side
+  (`Trade.to_json(include_orders=False)`) for lighter clients instead.
+- Caching `/profit` (~2.8 s of fleet CPU per refresh). A TTL serves figures a client can
+  prove are outdated; a content-addressed key was exact for realised profit and still
+  wrong, because unrealised profit comes from live rates. The existing suite caught it.
+  Doing it right means splitting realised from unrealised — a change to money arithmetic
+  that deserves its own pass. See `docs/fleet-snapshot.md`.
+
+
 ### Upstream 2026.7 features ported (2026-08-07)
 
 Three headline items from upstream 2026.7, plus one fix the release notes do not mention.
