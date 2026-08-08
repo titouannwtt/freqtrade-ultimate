@@ -8,6 +8,10 @@ logfile.txt
 user_data/*
 !user_data/strategy/sample_strategy.py
 !user_data/export_strategies.py
+# Fleet tooling that ships with the fork — see docs/fleet-snapshot.md
+!user_data/bench_dashboard.py
+!user_data/netting_reconciler.py
+!user_data/monitor_429_orphans.py
 # Strategy export archives produced by user_data/export_strategies.py — NEVER commit
 # (they may contain sanitized configs, strategy code and backtest results)
 strategies_export_*.zip
