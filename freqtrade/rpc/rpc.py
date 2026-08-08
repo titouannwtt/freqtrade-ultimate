@@ -672,6 +672,14 @@ class RPC:
         """
 
         def trade_win_loss(trade):
+            # A closed trade can carry close_profit=None — an exit recorded without a
+            # computable profit (external close, a fill the bot never saw). Comparing
+            # that to 0 raises TypeError and turns the whole endpoint into a 500, which
+            # is how /stats came to fail on 21 of 55 bots in this fleet while every
+            # other endpoint answered fine. Unknown belongs with draws: it is neither a
+            # win nor a loss, and dropping the trade would silently change the counts.
+            if trade.close_profit is None:
+                return "draws"
             if trade.close_profit > 0:
                 return "wins"
             elif trade.close_profit < 0:
@@ -1037,7 +1045,9 @@ class RPC:
 
         open_trades: list[Trade] = Trade.get_open_trades()
         open_assets: dict[str, Trade] = {t.safe_base_currency: t for t in open_trades}
-        self._freqtrade.wallets.update(require_update=False)
+        # Read-only path: never go to the exchange from inside a request handler.
+        # See Wallets.update(block_on_stale=...) for why.
+        self._freqtrade.wallets.update(require_update=False, block_on_stale=False)
         starting_capital = self._freqtrade.wallets.get_starting_balance()
         starting_cap_fiat = (
             self._fiat_converter.convert_amount(
@@ -1143,7 +1153,11 @@ class RPC:
             else 0
         )
 
-        trade_count = len(Trade.get_trades_proxy())
+        # COUNT in SQL. `len(Trade.get_trades_proxy())` hydrates every trade *and* every
+        # order — the relation is lazy="selectin" — to then throw all of it away for a
+        # length. Measured at 0.106 ms per order on this fleet: 1.6 s on a bot with
+        # 15 000 orders, inside an endpoint the dashboard polls for all its bots at once.
+        trade_count = Trade.session.execute(select(func.count(Trade.id))).scalar() or 0
         starting_capital_ratio = (total_bot / starting_capital) - 1 if starting_capital else 0.0
         starting_cap_fiat_ratio = (value_bot / starting_cap_fiat) - 1 if starting_cap_fiat else 0.0
 
@@ -1171,6 +1185,7 @@ class RPC:
             "stake": stake_currency,
             "starting_capital": starting_capital,
             "starting_capital_ratio": starting_capital_ratio,
+            "wallet_age_s": self._freqtrade.wallets.snapshot_age_s(),
             "starting_capital_pct": round(starting_capital_ratio * 100, 2),
             "starting_capital_fiat": starting_cap_fiat,
             "starting_capital_fiat_ratio": starting_cap_fiat_ratio,

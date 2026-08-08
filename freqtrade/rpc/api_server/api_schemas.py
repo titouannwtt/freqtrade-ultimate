@@ -98,6 +98,11 @@ class Balances(BaseModel):
     note: str
     starting_capital: float
     starting_capital_ratio: float
+    # Age of the wallet snapshot these figures come from, in seconds. Present so a
+    # client can show how fresh the numbers are: the endpoint deliberately serves the
+    # last snapshot rather than blocking on the exchange, and staleness that is not
+    # surfaced is worse than staleness that is.
+    wallet_age_s: float | None = None
     starting_capital_pct: float
     starting_capital_fiat: float
     starting_capital_fiat_ratio: float

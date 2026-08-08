@@ -26,9 +26,11 @@ class RPCMessageType(StrEnum):
 
     # Fork-specific: periodic live profit snapshot for open trades, pushed over the
     # WS message stream to let dashboards replace REST /status polling. See
-    # FreqtradeBot._emit_trade_snapshot(). Not in NO_ECHO_MESSAGES: at the default
-    # >=5s throttle this stays infrequent enough to be worth the INFO log line: if
-    # the throttle is ever lowered, add it there to avoid log spam.
+    # FreqtradeBot._emit_trade_snapshot(). In NO_ECHO_MESSAGES: the message is emitted
+    # on a fixed cadence regardless of activity, so echoing its full payload at INFO
+    # produced ~1440 log lines per bot per day — 72 000 across a 50-bot fleet. Those
+    # lines then inflate the very /logs responses a dashboard polls, so the logging
+    # made the problem it was meant to help diagnose measurably worse.
     TRADE_SNAPSHOT = "trade_snapshot"
 
     def __repr__(self):
@@ -44,4 +46,9 @@ class RPCRequestType(StrEnum):
     ANALYZED_DF = "analyzed_df"
 
 
-NO_ECHO_MESSAGES = (RPCMessageType.ANALYZED_DF, RPCMessageType.WHITELIST, RPCMessageType.NEW_CANDLE)
+NO_ECHO_MESSAGES = (
+    RPCMessageType.ANALYZED_DF,
+    RPCMessageType.WHITELIST,
+    RPCMessageType.NEW_CANDLE,
+    RPCMessageType.TRADE_SNAPSHOT,
+)

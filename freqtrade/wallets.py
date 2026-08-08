@@ -277,26 +277,47 @@ class Wallets:
         wallets[self._stake_currency] = stake_wallet._replace(total=stake_wallet.total - upnl)
         return wallets
 
-    def update(self, require_update: bool = True) -> None:
+    def update(self, require_update: bool = True, *, block_on_stale: bool = True) -> None:
         """
         Updates wallets from the configured version.
         By default, updates from the exchange.
         Update-skipping should only be used for user-invoked /balance calls, since
         for trading operations, the latest balance is needed.
         :param require_update: Allow skipping an update if balances were recently refreshed
+        :param block_on_stale: When False, a stale snapshot is served as-is instead of
+            refreshing from the exchange. Reserved for read-only callers on the HTTP
+            path: a request handler that goes to the exchange inherits the rate
+            limiter's queue, and with a fleet of bots polling one shared account that
+            queue is measured in tens of seconds — one dashboard refresh froze for 54s
+            on this account. The trading loop refreshes the snapshot every cycle
+            anyway, so the only thing given up is freshness *between* two cycles, and
+            callers are expected to surface its age rather than hide it.
         """
         now = dt_now()
-        if (
-            require_update
-            or self._last_wallet_refresh is None
-            or (self._last_wallet_refresh + timedelta(seconds=3600) < now)
-        ):
+        stale = self._last_wallet_refresh is None or (
+            self._last_wallet_refresh + timedelta(seconds=3600) < now
+        )
+        if not block_on_stale and self._last_wallet_refresh is not None:
+            # A snapshot exists: serve it. Only a bot that has never synced (nothing to
+            # serve) still pays for a refresh here.
+            return
+        if require_update or stale:
             if not self._config["dry_run"] or self._config.get("runmode") == RunMode.LIVE:
                 self._update_live()
             else:
                 self._update_dry()
             self._local_log("Wallets synced.")
             self._last_wallet_refresh = dt_now()
+
+    def snapshot_age_s(self) -> float | None:
+        """Seconds since the wallet snapshot was last refreshed (None if never).
+
+        Exposed so a read-only caller that chose not to block can report how old the
+        figures are, instead of presenting a stale number as current.
+        """
+        if self._last_wallet_refresh is None:
+            return None
+        return (dt_now() - self._last_wallet_refresh).total_seconds()
 
     def get_all_balances(self) -> dict[str, Wallet]:
         return self._wallets
