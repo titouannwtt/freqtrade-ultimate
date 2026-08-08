@@ -87,8 +87,21 @@ class _LocalRateLimiter:
         self._window = [(ts, c) for ts, c in self._window if ts > cutoff]
         return sum(c for _, c in self._window)
 
+    # Hard ceiling on how long a single acquire may wait. Without one this loop had no
+    # exit condition at all, and it runs on a ThreadPoolExecutor worker — whose threads
+    # concurrent.futures joins at interpreter exit. A bot that had already shut down
+    # cleanly (web server stopped, caches persisted, DB committed) could therefore hang
+    # forever on the join, which meant its supervisor could never relaunch it: a live bot
+    # was silently down for 15 minutes this way on 2026-08-08.
+    #
+    # Failing open is the right trade-off here. This is the *local fallback* limiter, used
+    # only when the shared daemon cannot be reached; the daemon holds the real budget. A
+    # brief overshoot of a local estimate costs a rate-limit warning, while blocking costs
+    # the bot itself.
+    _MAX_ACQUIRE_WAIT_S: float = 30.0
+
     def acquire(self, cost: float = 1.0, priority: int | None = None) -> None:
-        """Block until weight budget allows ``cost``.
+        """Wait until the weight budget allows ``cost``, or until the ceiling is reached.
 
         CRITICAL priority (0) is never blocked — orders must always go through.
         """
@@ -99,12 +112,25 @@ class _LocalRateLimiter:
                 self._window.append((now, cost))
             return
 
+        deadline = time.monotonic() + self._MAX_ACQUIRE_WAIT_S
         while True:
             with self._lock:
                 now = time.monotonic()
                 used = self._purge(now)
                 if used + cost <= self._budget:
                     self._window.append((now, cost))
+                    return
+                if now >= deadline:
+                    # Record the cost anyway: the call is going out, and pretending it did
+                    # not happen would make the next window's accounting wrong too.
+                    self._window.append((now, cost))
+                    logger.warning(
+                        "local rate limiter: waited %.0fs for budget %.0f/%.0f and gave up "
+                        "— proceeding (the daemon holds the authoritative budget)",
+                        self._MAX_ACQUIRE_WAIT_S,
+                        used,
+                        self._budget,
+                    )
                     return
                 # Calculate sleep time: wait for oldest entry to expire
                 if self._window:
@@ -119,7 +145,10 @@ class _LocalRateLimiter:
                 wait,
                 cost,
             )
-            time.sleep(min(wait, 5.0))  # cap individual sleeps at 5s
+            # Never sleep past our own deadline: a 5s nap would otherwise overshoot a
+            # 1s ceiling and defeat the bound entirely.
+            remaining = deadline - time.monotonic()
+            time.sleep(max(0.0, min(wait, 5.0, remaining)))
 
 
 class CachedExchangeMixin:
