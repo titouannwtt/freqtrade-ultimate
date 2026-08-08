@@ -92,3 +92,27 @@ python user_data/bench_dashboard.py --compare before.json
 
 Wall time and the p95 tail matter more than the median here: a freeze is caused by the
 slowest bot, not the average one.
+
+## What was attempted and rejected: caching `/profit`
+
+`/profit` has an irreducible pandas floor of ~50 ms — measured on a bot holding **2**
+trades, so it is setup cost, not data cost. Across 55 bots that is ~2.8 s of pure CPU per
+dashboard refresh, recomputing figures that in most cases cannot have moved. Caching it
+looks like the obvious win.
+
+Two attempts, both rejected:
+
+**A 10-second TTL.** Wrong for a reason worth stating: it serves figures a client can
+prove are outdated. Right after a trade closes, the numbers a dashboard reads are money
+that has already moved.
+
+**A content-addressed key** — (closed trade count, last close date, open trade count) —
+was exact for realised profit and still wrong overall. Unrealised profit on open positions
+is derived from **live rates**, which no cheap token captures. The existing test suite
+caught it precisely: a test that makes `get_rate` fail expects `profit_all_coin` to become
+NaN, and the cache kept returning the previous successful figure.
+
+Doing this correctly means splitting the computation — cache the realised part, always
+recompute the unrealised part — which is a change to money arithmetic and deserves its own
+pass rather than being bolted onto a performance sweep. The measurement stands; the
+implementation is deliberately left undone.
