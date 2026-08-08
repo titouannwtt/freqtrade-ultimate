@@ -268,9 +268,18 @@ def maybe_autolaunch_replay(freqtrade) -> bool:
         logger.warning("[dry-run replay] dry_run_replay.automatic_launch ignored on a LIVE bot")
         _autolaunch_checked = True
         return False
+    # `reset_db` means "rebuild the seed from scratch", so it must win over the idempotency
+    # lock — otherwise the lock left by a previous seed makes reset_db a silent no-op and the
+    # DB keeps stale (possibly buggy) trades forever. Leaving reset_db on re-seeds at every
+    # restart, which is expensive: flip it back to false once the seed is satisfactory.
     if _already_seeded():
-        _autolaunch_checked = True
-        return False
+        if not cfg.get("reset_db"):
+            _autolaunch_checked = True
+            return False
+        logger.warning(
+            "[dry-run replay] already seeded, but reset_db=true — re-seeding from scratch. "
+            "Set reset_db=false once this seed is satisfactory, or it re-seeds at every restart."
+        )
     try:
         params = parse_autolaunch_config(cfg)
     except ValueError as exc:
