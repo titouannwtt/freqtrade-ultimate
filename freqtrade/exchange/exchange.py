@@ -377,6 +377,26 @@ class Exchange:
             logger.debug("Closing ws ccxt session.")
             self.loop.run_until_complete(self._ws_async.close())
 
+        # Release the loop's worker threads before the interpreter tries to.
+        #
+        # concurrent.futures joins every executor worker at interpreter exit — daemon or
+        # not, the join is explicit — so a worker still sitting in a network wait keeps a
+        # fully shut-down bot alive. Observed in production: a bot whose web server had
+        # finished, caches were persisted and DB committed stayed as a carcass for 15
+        # minutes, which meant its supervisor could never relaunch it and nothing reported
+        # it as down.
+        #
+        # cancel_futures drops work that has not started; work already running is bounded
+        # separately (_LocalRateLimiter._MAX_ACQUIRE_WAIT_S). Both are needed: this alone
+        # would not interrupt a call in flight, and that alone would still let a queue of
+        # them drain one by one.
+        try:
+            executor = getattr(self.loop, "_default_executor", None) if self.loop else None
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            logger.debug("Could not shut down the loop executor: %s", exc)
+
         if self.loop and not self.loop.is_closed():
             self.loop.close()
 

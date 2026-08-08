@@ -72,3 +72,32 @@ def test_acquire_succeeds_normally_when_there_is_room(budget):
     started = time.monotonic()
     lim.acquire(cost=1.0)
     assert time.monotonic() - started < 0.5
+
+
+# ------------------------------------------------- interpreter exit must not be held hostage
+
+
+def test_python_exit_joins_workers_regardless_of_daemon_status():
+    """Pins the fact that shaped the fix — and refutes the obvious remedy.
+
+    "Make the worker thread a daemon" is the intuitive fix for a hanging interpreter exit,
+    and it does not work here: concurrent.futures joins its workers explicitly at exit.
+    Daemon status only matters for threads the interpreter abandons, never for ones it
+    waits on by name. The fix therefore has to be bounding the work and releasing the
+    executor, not relabelling the thread.
+    """
+    import concurrent.futures.thread as cft
+    import inspect
+
+    assert "join()" in inspect.getsource(cft._python_exit)
+
+
+def test_exchange_close_releases_the_loop_executor():
+    """A shut-down bot must not leave workers for the interpreter to wait on."""
+    import inspect
+
+    from freqtrade.exchange.exchange import Exchange
+
+    src = inspect.getsource(Exchange.close)
+    assert "cancel_futures=True" in src
+    assert "wait=False" in src, "close() must not itself block on the workers it is releasing"
