@@ -221,6 +221,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **Guards around every order** — an external close requires a positions view newer than the trade's own fill; exits are capped at what the wallet holds; the position arithmetic is asserted after each fill.
 - **`freqtrade position-audit`** — dated attestation of exchange vs. every bot's book, with an append-only hash-chained ledger and a break register that ages each discrepancy until it is resolved. Read-only; exits non-zero on drift. See [docs/position-audit.md](docs/position-audit.md).
 - **Automatic bot logs** — a live/dry bot gets a rotating logfile without configuration.
+- **`user_data/bench_dashboard.py`** — measures what a dashboard page load costs the whole fleet (wall time, tail latency, payload per endpoint) and diffs two runs, so a performance claim can be checked rather than believed. See [docs/fleet-snapshot.md](docs/fleet-snapshot.md).
 
 ### Pairlists & risk
 - **`TrendRegularityFilter`** — Excludes pairs with a regular linear uptrend (essential for short strategies).

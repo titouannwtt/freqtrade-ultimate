@@ -27,6 +27,7 @@ nav:
     - Dry-Run Replay: dry-run-replay.md
     - Position Audit: position-audit.md
     - Fleet Snapshot: fleet-snapshot.md
+    - Fleet Reconciliation: fleet-reconciliation.md
     - Hyperopt: hyperopt.md
     - Custom Losses & Samplers: hyperopt-custom.md
     - PlateauSampler: hyperopt-plateausampler.md
