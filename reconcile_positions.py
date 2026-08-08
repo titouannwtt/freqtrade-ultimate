@@ -28,6 +28,7 @@ Usage
     python3 reconcile_positions.py --json         # machine output
     python3 reconcile_positions.py --telegram     # also push a Telegram alert on drift
     python3 reconcile_positions.py --tolerance 0.02
+    python3 reconcile_positions.py --dust-usd 25   # coarser dust floor, in stake currency
 
 Requires the wallet read creds in live_configs/_hyperliquid_freqtrade_access.json
 (only walletAddress is needed for reads; the private key is never used here).
@@ -46,6 +47,11 @@ import urllib.request
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 ACCESS = os.path.join(REPO, "live_configs", "_hyperliquid_freqtrade_access.json")
+
+# Drift below this notional is dust, not a position: Hyperliquid refuses orders under
+# 10 USDC, so no bot can have opened anything smaller. Used as the absolute floor of the
+# match tolerance, converted to coin units at the mark price of each coin.
+DUST_USD = 10.0
 
 
 def _deep(a: dict, b: dict) -> None:
@@ -128,18 +134,22 @@ def _hip3_dexes() -> set:
     return dexes
 
 
-def _hl_positions() -> dict[str, float]:
-    """Signed net position per coin on the wallet — MAIN dex + HIP-3 builder dexes.
+def _hl_positions() -> tuple[dict[str, float], dict[str, float]]:
+    """Signed net position per coin, plus its mark price — MAIN dex + HIP-3 builder dexes.
 
     Builder-dex positions (e.g. XYZ-KR200 on the "xyz" dex) are only returned by
     fetch_positions when called with params={"dex": <name>}; omitting them makes
     every builder-dex trade look like a phantom and its real position an orphan.
+
+    The mark price is returned alongside so the drift tolerance can be expressed in
+    stake currency rather than in coin units — see `reconcile()`.
     """
     import ccxt  # imported lazily so the module loads even without ccxt for --help
 
     acc = json.load(open(ACCESS))["exchange"]
     ex = ccxt.hyperliquid({"walletAddress": acc["walletAddress"], "privateKey": acc["privateKey"]})
-    net = {}
+    net: dict[str, float] = {}
+    px: dict[str, float] = {}
     batches = [ex.fetch_positions()]
     for dex in sorted(_hip3_dexes()):
         batches.append(ex.fetch_positions(None, params={"dex": dex}))
@@ -150,7 +160,12 @@ def _hl_positions() -> dict[str, float]:
             coin = p["symbol"].split("/")[0]
             signed = abs(float(p["contracts"]))
             net[coin] = net.get(coin, 0.0) + (signed if p["side"] == "long" else -signed)
-    return net
+            mark = p.get("markPrice") or p.get("entryPrice")
+            if mark:
+                px[coin] = float(mark)
+            elif p.get("notional") and signed:
+                px[coin] = abs(float(p["notional"])) / signed
+    return net, px
 
 
 def _telegram(msg: str) -> None:
@@ -169,15 +184,21 @@ def _telegram(msg: str) -> None:
                 continue
 
 
-def reconcile(tolerance: float = 0.01):
+def reconcile(tolerance: float = 0.01, dust_usd: float = DUST_USD):
     bots_net, detail, n_live = _live_bot_positions()
-    hl = _hl_positions()
+    hl, px = _hl_positions()
     coins = sorted(set(hl) | {c for c, v in bots_net.items() if abs(v) > 1e-6})
     rows, orphans, phantoms, ok = [], [], [], 0
     for c in coins:
         h, b = hl.get(c, 0.0), bots_net.get(c, 0.0)
         diff = h - b
-        tol = max(abs(h), abs(b)) * tolerance + 0.5
+        # Absolute floor expressed in stake currency, not in coin units. A flat 0.5-unit
+        # floor is sane on BOME (230k units) and catastrophic on XYZ-JP225 (~66k USDC a
+        # unit), where it would wave through a 33k USDC orphan as "ISO". Anchored on the
+        # venue's minimum order size: below it, no bot could have opened the position.
+        unit = px.get(c)
+        floor = (dust_usd / unit) if unit else 0.5
+        tol = max(abs(h), abs(b)) * tolerance + floor
         if abs(diff) <= tol:
             status = "ISO"
             ok += 1
@@ -203,9 +224,15 @@ def main():
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--telegram", action="store_true", help="push a Telegram alert if drift is found")
     ap.add_argument("--tolerance", type=float, default=0.01, help="relative match tolerance (default 1%%)")
+    ap.add_argument(
+        "--dust-usd",
+        type=float,
+        default=DUST_USD,
+        help=f"drift below this notional is dust, not a position (default {DUST_USD})",
+    )
     args = ap.parse_args()
 
-    r = reconcile(args.tolerance)
+    r = reconcile(args.tolerance, args.dust_usd)
     drift = bool(r["orphans"] or r["phantoms"])
 
     if args.json:
