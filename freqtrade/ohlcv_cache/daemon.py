@@ -992,6 +992,9 @@ class Daemon:
         )
         self.registry = BotRegistry()
         events_path = Path(global_cfg.get("persistence_path", "")) / "fleet_events.jsonl"
+        # Per-bot digests, keyed by bot_id. Bounded by the fleet size, not by time: a
+        # bot replaces its own entry on every push, so this cannot grow unbounded.
+        self._summaries: dict[str, dict[str, Any]] = {}
         self.event_log = EventLog(
             persist_path=events_path if global_cfg.get("persistence_path") else None,
         )
@@ -2382,6 +2385,54 @@ class Daemon:
         self.registry.update_state(conn_id, new_state, pairs_count)
         return {"req_id": req.get("req_id", ""), "ok": True}
 
+    def _handle_summary_put(self, req: dict, conn_id: int) -> dict:
+        """A bot pushes its own digest. Cheap fields only — see FreqtradeBot._fleet_digest.
+
+        Stored per bot_id rather than per connection, so a bot that restarts replaces its
+        own entry instead of accumulating ghosts.
+        """
+        bot_id = str(req.get("bot_id") or "")
+        if not bot_id:
+            return {
+                "req_id": req.get("req_id", ""),
+                "ok": False,
+                "error_message": "bot_id required",
+            }
+        data = req.get("data") or {}
+        if not isinstance(data, dict):
+            return {
+                "req_id": req.get("req_id", ""),
+                "ok": False,
+                "error_message": "data must be an object",
+            }
+        self._summaries[bot_id] = {"ts": time.time(), "data": data}
+        return {"req_id": req.get("req_id", ""), "ok": True}
+
+    def _handle_summary_get(self, req: dict) -> dict:
+        """One response describing the whole fleet.
+
+        Replaces the dashboard's per-bot fan-out: instead of N bots x M endpoints, a
+        client reads this once. Each entry carries `age_s` — the digest is pushed on the
+        bot's own cycle, so a client must be able to tell a fresh figure from one left by
+        a bot that has since gone quiet, and a stale number presented as current is worse
+        than a slow dashboard.
+        """
+        now = time.time()
+        max_age = float(req.get("max_age_s") or 0) or None
+        bots: dict[str, Any] = {}
+        for bot_id, entry in self._summaries.items():
+            age = now - entry["ts"]
+            if max_age is not None and age > max_age:
+                continue
+            bots[bot_id] = {**entry["data"], "age_s": round(age, 2)}
+        return {
+            "req_id": req.get("req_id", ""),
+            "ok": True,
+            "ts": now,
+            "bots": bots,
+            "bot_count": len(bots),
+        }
+
     def _handle_fleet_status(self, req: dict) -> dict:
         budget_stats: dict[str, dict] = {}
         for exchange, bucket in self.budgets.items():
@@ -2444,6 +2495,10 @@ class Daemon:
             return self._handle_state_update(req, conn_id)
         if op == "fleet_status":
             return self._handle_fleet_status(req)
+        if op == "summary_put":
+            return self._handle_summary_put(req, conn_id)
+        if op == "summary_get":
+            return self._handle_summary_get(req)
         if op == "fleet_events":
             return self._handle_fleet_events(req)
         if op == "stats":

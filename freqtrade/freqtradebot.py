@@ -511,6 +511,10 @@ class FreqtradeBot(LoggingMixin):
             self._record_profit_snapshot()
         except Exception as exc:  # never let profit sampling break the trading loop
             logger.debug("profit history snapshot failed: %s", exc)
+        try:
+            self._push_fleet_digest()
+        except Exception as exc:  # never let a dashboard convenience break trading
+            logger.debug("fleet digest push failed: %s", exc)
         _cp("snapshot")
 
         # Placed after the snapshot step (not before it) so a latency regression there
@@ -616,6 +620,55 @@ class FreqtradeBot(LoggingMixin):
         self._last_trade_snapshot_emit = now
         msg: RPCTradeSnapshotMsg = {"type": RPCMessageType.TRADE_SNAPSHOT, "data": entries}
         self.rpc.send_msg(msg)
+
+    def _push_fleet_digest(self) -> None:
+        """Publish a compact digest of this bot to the daemon, once per cycle.
+
+        Why push rather than let a dashboard pull: a client watching N bots otherwise
+        issues N requests per datum, and the expensive part of answering them (ORM
+        hydration, pandas aggregates, exchange round-trips) happens inside a request
+        handler where it competes with trading. Pushing moves that work onto the bot's
+        own cycle, where it is already paying for the data, and collapses the client's
+        fan-out to a single read.
+
+        Only fields the bot already has are included. A digest that recomputed
+        `/profit`-style aggregates would move the cost rather than remove it, so the
+        expensive ones are deliberately absent — a client that needs them still asks the
+        bot directly. `open_profit_abs` is best-effort for the same reason: it needs
+        current rates, so it is taken from the rate cache and simply omitted when that
+        cache cannot answer, rather than triggering a fetch.
+        """
+        push = getattr(self.exchange, "ftcache_push_summary", None)
+        if push is None:
+            return
+        open_trades = Trade.get_open_trades()
+        digest: dict[str, Any] = {
+            "bot_name": self.config.get("bot_name", ""),
+            "state": str(self.state),
+            "dry_run": bool(self.config.get("dry_run", True)),
+            "exchange": self.exchange.name,
+            "strategy": self.strategy.get_strategy_name(),
+            "stake_currency": self.config.get("stake_currency", ""),
+            "trading_mode": str(self.config.get("trading_mode", "spot")),
+            "open_trade_count": len(open_trades),
+            "max_open_trades": self.config.get("max_open_trades", 0),
+            "closed_profit_abs": Trade.get_total_closed_profit(),
+            "balance_total": self.wallets.get_total(self.config.get("stake_currency", "")),
+            "wallet_age_s": self.wallets.snapshot_age_s(),
+        }
+        try:
+            total = 0.0
+            for trade in open_trades:
+                rate = self.exchange.get_rate(
+                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
+                )
+                total += trade.calc_profit(rate=rate)
+            digest["open_profit_abs"] = total
+        except Exception as exc:
+            # Rate cache could not answer. Absent beats wrong: a client can tell the
+            # difference between "no figure" and "a figure computed from stale rates".
+            logger.debug("fleet digest: open profit unavailable from the rate cache (%s)", exc)
+        push(self.config.get("bot_name") or self.strategy.get_strategy_name(), digest)
 
     def _record_profit_snapshot(self) -> None:
         """

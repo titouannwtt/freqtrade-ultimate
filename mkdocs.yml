@@ -26,6 +26,7 @@ nav:
     - Backtesting: backtesting.md
     - Dry-Run Replay: dry-run-replay.md
     - Position Audit: position-audit.md
+    - Fleet Snapshot: fleet-snapshot.md
     - Hyperopt: hyperopt.md
     - Custom Losses & Samplers: hyperopt-custom.md
     - PlateauSampler: hyperopt-plateausampler.md

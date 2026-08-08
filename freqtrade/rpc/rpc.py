@@ -2155,6 +2155,27 @@ class RPC:
         except Exception as e:
             return {"error": str(e)}
 
+    def _rpc_fleet_snapshot(self, max_age_s: float = 0) -> dict[str, Any]:
+        """One digest per bot, from the daemon — the whole fleet in a single request.
+
+        A dashboard watching N bots would otherwise issue N requests per datum. Each
+        entry carries `age_s`, because the digests are pushed on each bot's own cycle:
+        a client must be able to distinguish a live figure from one left behind by a bot
+        that has since stopped.
+        """
+        try:
+            from freqtrade.ohlcv_cache.defaults import default_socket_path
+            from freqtrade.ohlcv_cache.healthcheck import _query_unix
+
+            req: dict[str, Any] = {"op": "summary_get", "req_id": "api-fleet-snapshot"}
+            if max_age_s:
+                req["max_age_s"] = max_age_s
+            return _query_unix(default_socket_path(), req)
+        except Exception as e:
+            # The caller is expected to fall back to polling the bots directly rather
+            # than show an empty fleet.
+            return {"error": str(e)}
+
     def _rpc_fleet_events(
         self,
         since_ts: float = 0,

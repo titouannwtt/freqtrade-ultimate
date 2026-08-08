@@ -501,6 +501,16 @@ class CachedExchangeMixin:
         """
         return self._ftcache_last_positions_wall
 
+    def ftcache_push_summary(self, bot_id: str, data: dict) -> None:
+        """Publish this bot's digest to the daemon. Never raises."""
+        try:
+            client = self._ftcache_get_client()
+            if client is None:
+                return
+            self._ftcache_run_on_loop(client.push_summary(bot_id, data))
+        except Exception as exc:
+            logger.debug("could not push fleet summary (%s)", exc)
+
     def ftcache_report_iso_breach(
         self,
         *,

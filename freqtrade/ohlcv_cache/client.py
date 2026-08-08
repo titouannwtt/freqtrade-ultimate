@@ -531,6 +531,26 @@ class OhlcvCacheClient:
         except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
             pass
 
+    async def push_summary(self, bot_id: str, data: dict) -> None:
+        """Fire-and-forget: publish this bot's digest for the fleet snapshot.
+
+        Never raises. A dashboard convenience must not be able to disturb trading, so a
+        daemon that is down simply means the snapshot ages out and clients fall back to
+        polling the bots directly.
+        """
+        try:
+            await self._send_and_receive(
+                {
+                    "op": "summary_put",
+                    "req_id": uuid.uuid4().hex,
+                    "exchange": self.exchange_id,
+                    "bot_id": bot_id,
+                    "data": data,
+                }
+            )
+        except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
+            pass
+
     async def push_balances(self, balances: dict) -> None:
         """Push get_balances() result into the daemon's shared cache."""
         req = {

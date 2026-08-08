@@ -235,6 +235,19 @@ def fleet_status(rpc: RPC = Depends(get_rpc)):
     return rpc._rpc_fleet_status()
 
 
+@router.get("/fleet/snapshot", tags=["Fleet"])
+def fleet_snapshot(
+    max_age_s: float = Query(0, ge=0, description="Omit bots whose digest is older than this"),
+    rpc: RPC = Depends(get_rpc),
+):
+    """Every bot's digest in one response, served from the shared daemon.
+
+    Read-only and cheap: the figures were computed by each bot on its own cycle, so this
+    handler does no ORM work, no pandas and no exchange calls.
+    """
+    return rpc._rpc_fleet_snapshot(max_age_s=max_age_s)
+
+
 @router.get("/fleet/events", tags=["Fleet"])
 def fleet_events(
     since: float = Query(0),
