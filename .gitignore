@@ -12,6 +12,11 @@ user_data/*
 !user_data/bench_dashboard.py
 !user_data/netting_reconciler.py
 !user_data/monitor_429_orphans.py
+
+# Weekly backup archives written by scripts/weekly_backup.sh. Untracked *and* ignored:
+# they are large, they are regenerated, and leaving them merely untracked means they show
+# up in every `git status` and can be swept into a commit by an over-broad `git add`.
+.backups/
 # Strategy export archives produced by user_data/export_strategies.py — NEVER commit
 # (they may contain sanitized configs, strategy code and backtest results)
 strategies_export_*.zip
