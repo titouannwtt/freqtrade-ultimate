@@ -14,6 +14,7 @@ class FakeDaemon:
         self._summaries = {}
         self._put = Daemon._handle_summary_put.__get__(self)
         self._get = Daemon._handle_summary_get.__get__(self)
+        self._evict_stale_summaries = Daemon._evict_stale_summaries.__get__(self)
 
     def put(self, bot_id, data, req_id="t"):
         return self._put({"req_id": req_id, "bot_id": bot_id, "data": data}, 1)
@@ -130,3 +131,69 @@ def test_stats_counts_unknown_profit_as_a_draw():
 
     src = inspect.getsource(RPC._rpc_stats)
     assert "if trade.close_profit is None:" in src
+
+
+def _retention(monkeypatch, seconds):
+    import freqtrade.ohlcv_cache.daemon as daemon
+
+    monkeypatch.setattr(daemon, "SUMMARY_RETENTION_S", seconds)
+
+
+def test_a_bot_that_stopped_pushing_is_evicted_not_merely_hidden(monkeypatch):
+    """A retired bot must leave the fleet, not linger as a permanently offline row.
+
+    Digests used to be kept forever: a bot retired days earlier still came back in
+    /fleet/snapshot, and the dashboard's comparator rendered it as an offline bot that no
+    action could ever remove.
+    """
+    _retention(monkeypatch, 3600)
+    d = FakeDaemon()
+    d.put("retired", {"state": "running"})
+    d._summaries["retired"]["ts"] = time.time() - 3601
+
+    assert d.get()["bots"] == {}
+    # Evicted from the store itself — not just filtered out of this one response.
+    assert "retired" not in d._summaries
+
+
+def test_a_restarting_bot_is_not_evicted(monkeypatch):
+    """A restart takes ~90s and a loaded cycle over a minute; neither may drop a bot."""
+    _retention(monkeypatch, 3600)
+    d = FakeDaemon()
+    d.put("restarting", {"state": "running"})
+    d._summaries["restarting"]["ts"] = time.time() - 300
+
+    assert "restarting" in d.get()["bots"]
+    assert "restarting" in d._summaries
+
+
+def test_eviction_also_runs_on_write(monkeypatch):
+    """A fleet where only one bot survives still sheds the others' digests."""
+    _retention(monkeypatch, 3600)
+    d = FakeDaemon()
+    d.put("gone", {"state": "running"})
+    d._summaries["gone"]["ts"] = time.time() - 7200
+    d.put("alive", {"state": "running"})
+
+    assert set(d._summaries) == {"alive"}
+
+
+def test_retention_of_zero_disables_eviction(monkeypatch):
+    """An escape hatch: 0 keeps every digest, for debugging a fleet that went quiet."""
+    _retention(monkeypatch, 0)
+    d = FakeDaemon()
+    d.put("ancient", {"state": "running"})
+    d._summaries["ancient"]["ts"] = time.time() - 86400
+
+    assert "ancient" in d._summaries
+
+
+def test_per_request_max_age_still_narrows_without_deleting(monkeypatch):
+    """max_age_s is a client's view, not a retention policy — it must not evict."""
+    _retention(monkeypatch, 3600)
+    d = FakeDaemon()
+    d.put("quiet", {"state": "running"})
+    d._summaries["quiet"]["ts"] = time.time() - 600
+
+    assert d.get(max_age_s=60)["bots"] == {}
+    assert "quiet" in d._summaries  # still retained for a caller that wants it

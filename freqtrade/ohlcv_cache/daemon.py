@@ -52,6 +52,19 @@ from freqtrade.ohlcv_cache.store import CandleSeries, CandleStore
 
 logger = logging.getLogger("ftcache.daemon")
 
+# How long a fleet digest survives after its bot last pushed.
+#
+# Digests were kept forever, so a retired bot lingered in /fleet/snapshot indefinitely and
+# showed up as a permanently "offline" row in the dashboard's comparator — observed with a
+# bot retired three days earlier, plus two connectivity probes, still listed.
+#
+# The window is deliberately generous rather than tight: a bot that is merely restarting
+# (~90s) or grinding through a slow cycle must NOT blink out of the fleet, and a bot that is
+# genuinely down for a few minutes should stay listed — an outage is a signal worth showing,
+# not one to hide. An hour is far past any restart yet short enough that a decommissioned bot
+# disappears on its own. Clients wanting a stricter view pass `max_age_s` per request.
+SUMMARY_RETENTION_S = float(os.environ.get("FTCACHE_SUMMARY_RETENTION_S", "3600"))
+
 
 def tf_to_ms(tf: str) -> int:
     unit = tf[-1]
@@ -2405,8 +2418,29 @@ class Daemon:
                 "ok": False,
                 "error_message": "data must be an object",
             }
-        self._summaries[bot_id] = {"ts": time.time(), "data": data}
+        now = time.time()
+        self._summaries[bot_id] = {"ts": now, "data": data}
+        self._evict_stale_summaries(now)
         return {"req_id": req.get("req_id", ""), "ok": True}
+
+    def _evict_stale_summaries(self, now: float) -> None:
+        """Drop digests whose bot stopped pushing — see SUMMARY_RETENTION_S.
+
+        Called on write as well as on read: a fleet where every bot has been retired stops
+        pushing entirely, and eviction that only ran on write would keep the corpses forever.
+        """
+        if SUMMARY_RETENTION_S <= 0:
+            return
+        dead = [b for b, e in self._summaries.items() if now - e["ts"] > SUMMARY_RETENTION_S]
+        for bot_id in dead:
+            del self._summaries[bot_id]
+        if dead:
+            logger.info(
+                "evicted %d fleet digest(s) idle for more than %.0fs: %s",
+                len(dead),
+                SUMMARY_RETENTION_S,
+                ", ".join(sorted(dead)),
+            )
 
     def _handle_summary_get(self, req: dict) -> dict:
         """One response describing the whole fleet.
@@ -2418,6 +2452,7 @@ class Daemon:
         than a slow dashboard.
         """
         now = time.time()
+        self._evict_stale_summaries(now)
         max_age = float(req.get("max_age_s") or 0) or None
         bots: dict[str, Any] = {}
         for bot_id, entry in self._summaries.items():
