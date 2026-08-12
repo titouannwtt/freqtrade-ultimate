@@ -32,6 +32,7 @@ import math
 import os
 import signal
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -64,6 +65,19 @@ logger = logging.getLogger("ftcache.daemon")
 # not one to hide. An hour is far past any restart yet short enough that a decommissioned bot
 # disappears on its own. Clients wanting a stricter view pass `max_age_s` per request.
 SUMMARY_RETENTION_S = float(os.environ.get("FTCACHE_SUMMARY_RETENTION_S", "3600"))
+
+# How long graceful shutdown may take before it is abandoned and the process exits anyway.
+#
+# SIGTERM used to start an UNBOUNDED cleanup: `Server.wait_closed()` waits for every open
+# connection to finish, and with a fleet of ~50 bots holding long-lived connections it may
+# never return. Meanwhile asyncio had already dropped the listening socket. That leaves the
+# worst possible state — a daemon alive and busy, holding its PID lock so no replacement can
+# spawn, yet unreachable by every client. Observed in production: the fleet ran without its
+# cache until the process was SIGKILLed by hand.
+#
+# A shutdown that cannot finish must still terminate. Cleanup is best-effort within this
+# budget; past it, the process exits and the OS reclaims what is left.
+SHUTDOWN_GRACE_S = float(os.environ.get("FTCACHE_SHUTDOWN_GRACE_S", "20"))
 
 
 def tf_to_ms(tf: str) -> int:
@@ -2886,35 +2900,52 @@ class Daemon:
         try:
             await self._shutdown_event.wait()
         finally:
-            positions_task.cancel()
-            for _c in self._positions_fetch_clients.values():
-                try:
-                    await _c.close()
-                except Exception:  # noqa: S110
-                    pass
-            watchdog_task.cancel()
-            flush_task.cancel()
-            stats_task.cancel()
-            self._server.close()
-            await self._server.wait_closed()
-            for f in list(self.fetchers.values()):
-                await f.close()
-            if self.persistence:
-                try:
-                    n = self.persistence.flush_dirty()
-                    logger.info("final flush: %d series written", n)
-                except Exception as e:
-                    logger.warning("final flush failed: %s", e)
-            self._save_rate_limit_state()
-            self.event_log.emit("daemon_stop", uptime_s=round(self.stats.uptime_s(), 1))
-            self.event_log.flush()
+            tasks = (positions_task, watchdog_task, flush_task, stats_task)
+            try:
+                await asyncio.wait_for(self._cleanup(tasks), timeout=SHUTDOWN_GRACE_S)
+                logger.info("daemon stopped cleanly")
+            except TimeoutError:
+                # Not fatal: everything below is cache and telemetry, and the OS reclaims
+                # sockets and file handles on exit. Terminating beats staying unreachable.
+                logger.warning(
+                    "shutdown did not finish within %.0fs — exiting anyway "
+                    "(clients reconnect to the replacement daemon)",
+                    SHUTDOWN_GRACE_S,
+                )
+            except Exception as e:
+                logger.warning("shutdown cleanup failed: %s — exiting anyway", e)
+            # Outside the budget on purpose: a leftover socket file would keep clients
+            # dialling a dead daemon. The inode check makes this safe against a successor
+            # that has already bound its own socket at the same path.
             try:
                 disk_ino = os.stat(self.socket_path).st_ino
                 if disk_ino == getattr(self, "_socket_ino", None):
                     os.unlink(self.socket_path)
             except (FileNotFoundError, OSError):
                 pass
-            logger.info("daemon stopped cleanly")
+
+    async def _cleanup(self, tasks) -> None:
+        """Best-effort teardown, bounded by the caller. Never unlinks the socket."""
+        for t in tasks:
+            t.cancel()
+        for _c in list(self._positions_fetch_clients.values()):
+            try:
+                await _c.close()
+            except Exception:  # noqa: S110
+                pass
+        self._server.close()
+        await self._server.wait_closed()
+        for f in list(self.fetchers.values()):
+            await f.close()
+        if self.persistence:
+            try:
+                n = self.persistence.flush_dirty()
+                logger.info("final flush: %d series written", n)
+            except Exception as e:
+                logger.warning("final flush failed: %s", e)
+        self._save_rate_limit_state()
+        self.event_log.emit("daemon_stop", uptime_s=round(self.stats.uptime_s(), 1))
+        self.event_log.flush()
 
     def request_shutdown(self) -> None:
         self._shutdown_event.set()
@@ -2999,9 +3030,33 @@ def main() -> int:
         exchange_overrides=exchange_overrides,
     )
 
+    stopping = threading.Event()
+
+    def _force_exit(why: str) -> None:
+        logger.warning("%s — forcing exit", why)
+        try:
+            logging.shutdown()
+        finally:
+            os._exit(1)
+
     def _sig_handler(*_):
+        if stopping.is_set():
+            # A second signal is an operator saying the polite path is not working.
+            _force_exit("second signal received")
+        stopping.set()
         logger.info("signal received — requesting shutdown")
         daemon.request_shutdown()
+        # The hard guarantee, and the reason it lives on a thread rather than in the event
+        # loop: if the loop itself is wedged, no coroutine — not even the shutdown one —
+        # will ever run again. A timer thread still fires, so SIGTERM always terminates
+        # this process instead of leaving it alive, unreachable and holding its PID lock.
+        killer = threading.Timer(
+            SHUTDOWN_GRACE_S + 10,
+            _force_exit,
+            args=(f"shutdown still unfinished {SHUTDOWN_GRACE_S + 10:.0f}s after the signal",),
+        )
+        killer.daemon = True
+        killer.start()
 
     signal.signal(signal.SIGTERM, _sig_handler)
     signal.signal(signal.SIGINT, _sig_handler)
