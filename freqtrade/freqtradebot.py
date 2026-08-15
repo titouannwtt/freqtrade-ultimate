@@ -1419,6 +1419,15 @@ class FreqtradeBot(LoggingMixin):
 
             # Close the trade
             trade.exit_reason = "external_close"
+            # Stamp the close at detection time, which is the only true instant available.
+            # LocalTrade.close() otherwise falls back to `_date_last_filled_utc` — the last
+            # FILLED order — and an external close has, by construction, no exit order: the
+            # position vanished from the exchange without the bot selling. That fallback
+            # therefore resolves to the ENTRY fill, so the trade records a close that
+            # precedes its own open and every external close reads as a zero-duration trade.
+            # Observed fleet-wide: dozens of sub-two-minute external closes skewing hold-time
+            # statistics, and a phantom-close detector misled by the very timestamps it read.
+            trade.close_date = dt_now()
             trade.close(close_price, show_msg=False)
             self._ensure_close_profit(trade)
             Trade.commit()

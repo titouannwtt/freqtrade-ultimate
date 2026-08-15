@@ -317,3 +317,37 @@ def test_discovery_failure_is_not_reported_as_an_empty_fleet():
     assert coord.shares_account() is True, "a failed lookup must not read as 'no siblings'"
     _Registry.last_discovery_failed = False
     assert coord.shares_account() is False
+
+
+def test_external_close_is_stamped_at_detection_not_at_the_entry_fill():
+    """Regression: an external close recorded a close_date BEFORE its own open_date.
+
+    `LocalTrade.close()` falls back to `_date_last_filled_utc` — the last *filled* order.
+    An external close has no exit order by construction (the position vanished from the
+    exchange without the bot selling), so that fallback resolved to the ENTRY fill. Every
+    external close then read as a zero-duration trade, corrupting hold-time statistics and
+    misleading a phantom-close detector that keyed on exactly those timestamps.
+    """
+    import inspect
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    src = inspect.getsource(FreqtradeBot._handle_external_close)
+    close_call = src.index("trade.close(close_price")
+    stamp = src.index("trade.close_date = dt_now()")
+    assert stamp < close_call, "the stamp must be set BEFORE close(), or the fallback wins"
+
+
+def test_external_close_still_verifies_absence_against_the_exchange():
+    """The timestamp fix must not weaken any of the three guards protecting the decision."""
+    import inspect
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    src = inspect.getsource(FreqtradeBot._handle_external_close)
+    for guard in (
+        "_positions_circuit_open",
+        "_positions_view_covers_fill",
+        "_position_confirmed_absent",
+    ):
+        assert guard in src, f"{guard} must still gate the external close"
