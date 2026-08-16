@@ -351,3 +351,52 @@ def test_external_close_still_verifies_absence_against_the_exchange():
         "_position_confirmed_absent",
     ):
         assert guard in src, f"{guard} must still gate the external close"
+
+
+class _Cfg(dict):
+    pass
+
+
+def _bot_with(config):
+    """A FreqtradeBot shell carrying only what the envelope guard reads."""
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    bot = FreqtradeBot.__new__(FreqtradeBot)
+    bot.config = config
+    return bot
+
+
+class _Trade:
+    def __init__(self, stake, pair="ACE/USDC:USDC"):
+        self.stake_amount = stake
+        self.pair = pair
+
+
+def test_a_safety_order_within_the_allocation_is_allowed():
+    bot = _bot_with({"available_capital": 2000, "max_position_stake_ratio": 1.0})
+    assert bot._position_within_capital_envelope(_Trade(500), 400) is True
+
+
+def test_a_safety_order_past_the_allocation_is_refused():
+    """The measured failure: 3 381 USDC of margin on a bot allocated 1 295."""
+    bot = _bot_with({"available_capital": 1295, "max_position_stake_ratio": 1.0})
+    assert bot._position_within_capital_envelope(_Trade(1200), 2181) is False
+
+
+def test_the_envelope_is_tightenable_per_bot():
+    bot = _bot_with({"available_capital": 2000, "max_position_stake_ratio": 0.4})
+    assert bot._position_within_capital_envelope(_Trade(700), 200) is False
+    assert bot._position_within_capital_envelope(_Trade(500), 200) is True
+
+
+def test_zero_disables_the_guard():
+    """An escape hatch: the guard must never be the reason a strategy cannot run."""
+    bot = _bot_with({"available_capital": 100, "max_position_stake_ratio": 0})
+    assert bot._position_within_capital_envelope(_Trade(1000), 5000) is True
+
+
+def test_a_bot_without_available_capital_is_not_blocked_by_a_missing_figure():
+    """No allocation and no wallet reading must fail open, never silently veto entries."""
+    bot = _bot_with({})
+    bot.wallets = None  # attribute access raises -> guard must allow
+    assert bot._position_within_capital_envelope(_Trade(10), 10) is True

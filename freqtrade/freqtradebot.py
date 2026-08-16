@@ -1779,6 +1779,52 @@ class FreqtradeBot(LoggingMixin):
                         f"Unable to adjust position of trade for {trade.pair}: {exception}"
                     )
 
+    def _position_within_capital_envelope(self, trade: Trade, added_stake: float) -> bool:
+        """Refuse a DCA reinforcement that would push one trade past the bot's own capital.
+
+        `available_capital` sizes the FIRST entry (available / max_open_trades) but does not
+        bound the safety orders that follow: freqtrade checks the stake against the wallet,
+        and on a shared wallet a bot "allocated" 1 295 USDC can keep drawing from the 10 000
+        that are actually there. Measured on this fleet before the guard existed:
+
+          hippo_dynv1  capital 1 295  ->  3 381 USDC of margin on ONE WLD trade   (261 %)
+          hippo_dynv2  capital 2 030  ->  1 669 USDC of margin on ONE ACE trade   ( 82 %)
+
+        The second of those was liquidated for -789 USDC, roughly 39 % of the bot's
+        allocation, wiping out thirty winning trades. A martingale ladder
+        (safety_order_volume_scale 3.7) reaches these sizes in two reinforcements.
+
+        The envelope is deliberately loose — a single position may commit up to the bot's
+        whole allocation — because it is a backstop against runaway compounding, not a
+        sizing policy. Tighten it per bot via `max_position_stake_ratio`; 0 disables it.
+        """
+        ratio = self.config.get("max_position_stake_ratio", 1.0)
+        if not ratio or ratio <= 0:
+            return True
+        allocated = self.config.get("available_capital")
+        if not allocated:
+            # No explicit allocation: fall back to what the bot may actually deploy.
+            try:
+                allocated = self.wallets.get_total_stake_amount()
+            except Exception:
+                return True
+        if not allocated or allocated <= 0:
+            return True
+        projected = (trade.stake_amount or 0.0) + added_stake
+        if projected <= allocated * ratio:
+            return True
+        logger.warning(
+            "%s: safety order of %.2f refused — it would take this single position to "
+            "%.2f of margin, past %.0f%% of the bot's %.2f allocation. "
+            "Raise max_position_stake_ratio to allow it.",
+            trade.pair,
+            added_stake,
+            projected,
+            ratio * 100,
+            allocated,
+        )
+        return False
+
     def check_and_call_adjust_trade_position(self, trade: Trade):
         """
         Check the implemented trading strategy for adjustment command.
@@ -1829,6 +1875,9 @@ class FreqtradeBot(LoggingMixin):
                     return
                 else:
                     logger.debug("Max adjustment entries is set to unlimited.")
+
+            if not self._position_within_capital_envelope(trade, stake_amount):
+                return
 
             self.execute_entry(
                 trade.pair,
