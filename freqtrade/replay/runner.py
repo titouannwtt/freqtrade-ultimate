@@ -88,6 +88,7 @@ def run_replay(
     seed: bool = False,
     sub_step: int = SUB_STEP_SECONDS,
     reset_db: bool = False,
+    dynamic_pairlist: bool = False,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     """
@@ -150,8 +151,28 @@ def run_replay(
     if exchange_cfg.get("pair_blacklist"):
         logger.info("Clearing pair_blacklist for replay (explicit --pairs): %s", pairs)
         exchange_cfg["pair_blacklist"] = []
-    # Dynamic pairlists are not replayable historically → pin to static.
-    config["pairlists"] = [{"method": "StaticPairList"}]
+    # Pairlist: static by default, the config's real chain on request.
+    #
+    # A live bot does not trade a fixed list — it trades whatever its VolumePairList /
+    # PerformanceFilter chain selects that day, and that selection IS part of the edge:
+    # dynv1 live trades ~40 rotating top-volume pairs, while a static replay of its 199
+    # candidates is a different strategy wearing the same name. A backtest cannot close
+    # this gap at all (it evaluates pairlists once, at start); the replay can, because it
+    # re-runs the chain every cycle against the synthetic tickers built from local
+    # candles (see ReplayExchangeMixin.get_tickers).
+    #
+    # Off by default: it is slower, and pinning to --pairs stays the right choice when
+    # the question is "how does this strategy behave on THESE pairs". Turn it on when
+    # the question is "what would this bot actually have traded".
+    if dynamic_pairlist:
+        logger.info(
+            "[dry-run replay] dynamic pairlist ENABLED — replaying the config's own chain "
+            "(%s) over %d candidate pairs.",
+            ", ".join(p.get("method", "?") for p in (config.get("pairlists") or [])),
+            len(pairs),
+        )
+    else:
+        config["pairlists"] = [{"method": "StaticPairList"}]
     # Don't touch the fork's shared OHLCV disk cache during a replay — we feed
     # candles ourselves and must not pollute the live bots' cache.
     config["shared_ohlcv_cache"] = {"enabled": False}

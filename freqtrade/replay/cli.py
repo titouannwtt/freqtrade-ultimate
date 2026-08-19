@@ -85,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seed mode: wipe the bot's dry-run trades first. Without it, existing trades are "
         "preserved and the replay stops at the first real (non-replay) trade.",
     )
+    p.add_argument(
+        "--dynamic-pairlist",
+        action="store_true",
+        help="Replay the config's real pairlist chain (VolumePairList + filters) instead of "
+        "pinning --pairs as a static list. --pairs then defines the CANDIDATE universe.",
+    )
     return p
 
 
@@ -140,6 +146,7 @@ def main(argv: list[str] | None = None) -> None:
             seed=args.seed,
             sub_step=args.sub_step,
             reset_db=args.reset_db,
+            dynamic_pairlist=args.dynamic_pairlist,
             progress_callback=progress_cb,
         )
         if args.progress_file:

@@ -141,6 +141,13 @@ class ReplayExchangeMixin:
         # (regenerate with ccxt load_markets when Hyperliquid relists assets).
         self._replay_lev_caps = self._load_leverage_caps(config)
         self._replay_lev_caps_missing: set[str] = set()
+        from freqtrade.enums import CandleType
+
+        self._replay_candle_type = (
+            CandleType.FUTURES
+            if str(config.get("trading_mode", "spot")).lower() == "futures"
+            else CandleType.SPOT
+        )
         super().__init__(config, validate=False)
         self._markets = {p: self._make_market(p) for p in pairs}
 
@@ -230,6 +237,58 @@ class ReplayExchangeMixin:
 
     def get_markets(self, *args, **kwargs) -> dict:
         return self._markets
+
+    # ------------------------------------------------------------------
+    # Tickers — synthesised from candles so dynamic pairlists can run
+    # ------------------------------------------------------------------
+
+    def get_tickers(self, symbols: list[str] | None = None, *, cached: bool = False) -> dict:
+        """Ticker snapshot at the virtual clock, built from the local candles.
+
+        VolumePairList in ticker mode (``needstickers``) is the first stage of most
+        live pairlist chains: without tickers a replay cannot reproduce the fleet's
+        actual universe and must fall back to a static list — which is precisely the
+        divergence this harness exists to eliminate. A backtest cannot do this at all
+        (it evaluates pairlists once, at start); the replay can, because it drives the
+        real live loop and re-runs the chain every cycle.
+
+        ``quoteVolume`` is the trailing-24h quote volume (sum of volume x close), the
+        same quantity a venue reports. It is causal by construction: the store only
+        returns candles whose CLOSE has passed the virtual clock, so a pair cannot be
+        selected on volume it has not yet traded.
+        """
+        now = self._replay_clock.now()
+        out: dict[str, dict] = {}
+        for pair in symbols or list(self._markets):
+            quote_vol = 0.0
+            last = None
+            for tf, n in (("1h", 24), ("15m", 96), ("5m", 288), ("1d", 1)):
+                try:
+                    df = self._replay_store.get_candles(
+                        pair, tf, self._replay_candle_type, now, max_candles=n
+                    )
+                except Exception:  # noqa: S112 — a missing timeframe is normal, try the next
+                    continue
+                if df is None or df.empty:
+                    continue
+                tail = df.tail(n)
+                quote_vol = float((tail["volume"] * tail["close"]).sum())
+                last = float(tail["close"].iloc[-1])
+                break
+            if last is None:
+                continue
+            out[pair] = {
+                "symbol": pair,
+                "last": last,
+                "close": last,
+                "bid": last,
+                "ask": last,
+                "quoteVolume": quote_vol,
+                "baseVolume": quote_vol / last if last else 0.0,
+                "percentage": None,
+                "info": {},
+            }
+        return out
 
     def get_positions(self, *args, **kwargs) -> dict:
         return {}
