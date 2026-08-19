@@ -111,3 +111,18 @@ def test_synthetic_markets_carry_the_real_leverage_cap(tmp_path):
     assert mixin._leverage_cap("NEW/USDC:USDC") == mixin._DEFAULT_LEVERAGE_CAP
     market = mixin._make_market("ACE/USDC:USDC")
     assert market["limits"]["leverage"]["max"] == 3
+
+
+def test_replays_force_fleet_coordination_off():
+    """A replay simulates one bot alone in the past; coordination reads the sibling
+    registry — the real fleet's databases as they are TODAY. Left on, January's entries
+    answer to August's positions: a 36-pair replay produced 0 trades over two simulated
+    months while its signals fired and its sizing passed, every entry BLOCKED by
+    anachronistic siblings."""
+    import inspect
+
+    from freqtrade.replay import runner
+
+    src = inspect.getsource(runner.run_replay)
+    assert '"position_coordination"' in src
+    assert '"off"' in src

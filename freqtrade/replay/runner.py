@@ -108,6 +108,15 @@ def run_replay(
             raise ValueError("run_replay needs either config or config_path")
         config = Configuration.from_files([config_path])
     config = deepcopy(config)
+    # A replay simulates ONE bot, alone, in the PAST. Fleet coordination reads the
+    # sibling registry — i.e. the real fleet's databases as they are TODAY — so leaving
+    # it on makes January's entries answer to August's positions: every coin currently
+    # held by a live sibling is silently BLOCKED for the whole replay. Observed: a
+    # 36-pair replay produced 0 trades over two simulated months while its signals fired
+    # and its sizing passed; the arbiter replay ran coordination='strict' against the
+    # live fleet without anyone noticing. Coordination is a LIVE-fleet concern; in a
+    # replay it is pure anachronism, so it is forced off unconditionally.
+    config["position_coordination"] = {"mode": "off"}
 
     # Seed guard: refuse to populate a non-dry-run bot's database.
     if seed and config.get("dry_run") is not True:
