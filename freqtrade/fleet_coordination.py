@@ -449,6 +449,20 @@ class PositionCoordinator:
             return Decision(True, my_leverage)
 
         siblings = self._sibling_positions(pair)
+        # Fail CLOSED on a broken discovery. Sibling discovery swallows its own errors
+        # and returns an empty list, so "no siblings" and "could not look" are
+        # indistinguishable here without the explicit flag. Treating them the same
+        # opened a real hole: one transient registry failure and compat waved through
+        # a LONG on BTC while a sibling held the SHORT — the exact netting this mode
+        # exists to prevent (observed 2026-08-12, vwap_exhaust vs ema_slope). A missed
+        # entry costs opportunity; a netted opposite costs real money.
+        if getattr(self._registry, "last_discovery_failed", False):
+            return Decision(
+                False,
+                my_leverage,
+                "sibling discovery failed — refusing entry rather than trusting an "
+                "empty sibling list (fail-closed)",
+            )
         if not siblings:
             return Decision(True, my_leverage)
 

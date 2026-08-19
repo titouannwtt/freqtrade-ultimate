@@ -249,6 +249,8 @@ class FreqtradeBot(LoggingMixin):
             self._exit_lock = RLock()
             timeframe_secs = timeframe_to_seconds(self.strategy.timeframe)
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
+            # Foreign (sibling) order ids already warned about — see manage_open_orders.
+            self._foreign_orders_warned: set[str] = set()
             LoggingMixin.__init__(self, logger, timeframe_secs)
 
             self._schedule = Scheduler()
@@ -1124,13 +1126,24 @@ class FreqtradeBot(LoggingMixin):
                     if self.exchange.get_option(
                         "orders_are_account_scoped", False
                     ) and not self._order_is_ours(order):
-                        logger.warning(
-                            "%s: ignoring order %s — it is not in this bot's book and "
-                            "carries no proof of being ours, while this exchange "
-                            "reports orders per account rather than per bot.",
-                            trade.pair,
-                            order["id"],
-                        )
+                        # Once per order id at WARNING, then debug: a sibling's resting
+                        # ladder is re-seen every cycle, and repeating the same warning
+                        # dozens of times per minute buries the signals that matter.
+                        if order["id"] not in self._foreign_orders_warned:
+                            self._foreign_orders_warned.add(order["id"])
+                            if len(self._foreign_orders_warned) > 2000:
+                                self._foreign_orders_warned.clear()
+                            logger.warning(
+                                "%s: ignoring order %s — it is not in this bot's book and "
+                                "carries no proof of being ours, while this exchange "
+                                "reports orders per account rather than per bot.",
+                                trade.pair,
+                                order["id"],
+                            )
+                        else:
+                            logger.debug(
+                                "%s: still ignoring foreign order %s.", trade.pair, order["id"]
+                            )
                         continue
                     logger.info(f"Found previously unknown order {order['id']} for {trade.pair}.")
 

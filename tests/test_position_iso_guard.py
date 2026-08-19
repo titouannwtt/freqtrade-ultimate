@@ -400,3 +400,51 @@ def test_a_bot_without_available_capital_is_not_blocked_by_a_missing_figure():
     bot = _bot_with({})
     bot.wallets = None  # attribute access raises -> guard must allow
     assert bot._position_within_capital_envelope(_Trade(10), 10) is True
+
+
+def test_coordination_fails_closed_when_sibling_discovery_breaks():
+    """Regression 2026-08-12: one transient registry failure and compat waved a LONG
+    through while a sibling held the SHORT on the same coin — the exact netting the
+    mode exists to prevent. Discovery swallows its errors and returns [], so without
+    the explicit flag "no siblings" and "could not look" are indistinguishable."""
+    from types import SimpleNamespace
+
+    from freqtrade.fleet_coordination import PositionCoordinator
+
+    pc = PositionCoordinator.__new__(PositionCoordinator)
+    pc.enabled = True
+    pc.mode = "compat"
+    pc._is_futures = True
+    pc._registry = SimpleNamespace(last_discovery_failed=True, siblings=lambda: [])
+    pc._sibling_positions = lambda pair: []
+
+    d = pc.evaluate("BTC/USDC:USDC", False, 1.0)
+    assert d.allow is False
+    assert "fail-closed" in d.reason
+
+
+def test_coordination_still_allows_when_discovery_is_healthy_and_empty():
+    from types import SimpleNamespace
+
+    from freqtrade.fleet_coordination import PositionCoordinator
+
+    pc = PositionCoordinator.__new__(PositionCoordinator)
+    pc.enabled = True
+    pc.mode = "compat"
+    pc._is_futures = True
+    pc._registry = SimpleNamespace(last_discovery_failed=False, siblings=lambda: [])
+    pc._sibling_positions = lambda pair: []
+
+    assert pc.evaluate("BTC/USDC:USDC", False, 1.0).allow is True
+
+
+def test_foreign_order_warning_fires_once_per_order():
+    """A sibling's resting ladder is re-seen every cycle; the warning must not be."""
+    import inspect
+
+    from freqtrade.freqtradebot import FreqtradeBot
+
+    src = inspect.getsource(FreqtradeBot.handle_onexchange_order)
+    seg = src[src.index("orders_are_account_scoped") :][:1200]
+    assert "_foreign_orders_warned" in seg
+    assert seg.index("_foreign_orders_warned") < seg.index("logger.warning")
