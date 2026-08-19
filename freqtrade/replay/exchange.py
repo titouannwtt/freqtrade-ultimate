@@ -47,6 +47,10 @@ _SUPPORTED_CAPABILITIES = {
     "fetchL2OrderBook",
     "fetchOHLCV",
     "fetchTicker",
+    # Serves the dynamic pairlist chain: validate_pairlists vetoes a dynamic whitelist
+    # unless the exchange reports fetchTickers, and get_tickers() below genuinely
+    # answers it from the local candle store (causally).
+    "fetchTickers",
     "createOrder",
     "cancelOrder",
     "fetchOrder",
@@ -241,6 +245,15 @@ class ReplayExchangeMixin:
     # ------------------------------------------------------------------
     # Tickers — synthesised from candles so dynamic pairlists can run
     # ------------------------------------------------------------------
+
+    def ohlcv_candle_limit(self, timeframe: str, candle_type=None, since_ms=None) -> int:
+        """No request-size limit: candles come from local feather files, not an API.
+
+        The inherited value is the venue's per-request cap (500 on Hyperliquid), which
+        several pairlist filters validate their lookback against — TrendRegularityFilter
+        asks for 5000 1h candles and was rejected outright. That cap is meaningless here.
+        """
+        return 100_000
 
     def get_tickers(self, symbols: list[str] | None = None, *, cached: bool = False) -> dict:
         """Ticker snapshot at the virtual clock, built from the local candles.
