@@ -133,12 +133,58 @@ class ReplayExchangeMixin:
                 _MIN_NOTIONAL_BY_EXCHANGE.get(exch_name, _DEFAULT_MIN_NOTIONAL),
             )
         )
+        # Real per-pair leverage caps. Hyperliquid derives maintenance margin from the
+        # asset's MAX leverage (mm = 1 / (2 * max_lev)): an alt capped at 3x carries
+        # 16.7% maintenance, not the 1% a uniform 50x implies. The synthetic markets
+        # used to advertise 50x for every pair, which made every informational
+        # liquidation price far too generous. Snapshot file: user_data/replay_leverage_caps.json
+        # (regenerate with ccxt load_markets when Hyperliquid relists assets).
+        self._replay_lev_caps = self._load_leverage_caps(config)
+        self._replay_lev_caps_missing: set[str] = set()
         super().__init__(config, validate=False)
         self._markets = {p: self._make_market(p) for p in pairs}
 
     # ------------------------------------------------------------------
     # Markets
     # ------------------------------------------------------------------
+
+    _DEFAULT_LEVERAGE_CAP = 10  # median Hyperliquid alt cap; used when a pair is unknown
+
+    def _load_leverage_caps(self, config: dict) -> dict:
+        import json as _json
+        from pathlib import Path as _Path
+
+        path = config.get("replay_leverage_caps_file")
+        if not path:
+            userdir = config.get("user_data_dir") or "user_data"
+            path = _Path(userdir) / "replay_leverage_caps.json"
+        try:
+            return {str(k): int(v) for k, v in _json.loads(_Path(path).read_text()).items()}
+        except FileNotFoundError:
+            logger.warning(
+                "[replay] no leverage caps file at %s — assuming %dx for every pair. "
+                "Liquidation prices will be wrong for 3x/5x assets; regenerate the snapshot "
+                "with ccxt load_markets.",
+                path,
+                self._DEFAULT_LEVERAGE_CAP,
+            )
+            return {}
+        except Exception as exc:
+            logger.warning("[replay] unreadable leverage caps file %s: %s", path, exc)
+            return {}
+
+    def _leverage_cap(self, pair: str) -> int:
+        cap = self._replay_lev_caps.get(pair)
+        if cap:
+            return cap
+        if self._replay_lev_caps and pair not in self._replay_lev_caps_missing:
+            self._replay_lev_caps_missing.add(pair)
+            logger.warning(
+                "[replay] %s absent from the leverage caps snapshot — assuming %dx.",
+                pair,
+                self._DEFAULT_LEVERAGE_CAP,
+            )
+        return self._DEFAULT_LEVERAGE_CAP
 
     def _make_market(self, pair: str) -> dict:
         base = pair.split("/")[0]
@@ -168,7 +214,10 @@ class ReplayExchangeMixin:
                 "cost": {"min": self._replay_min_notional, "max": None},
                 "price": {"min": None, "max": None},
                 "market": {"min": 0, "max": None},
-                "leverage": {"min": 1, "max": 50},
+                # Real cap, not a flat 50: Hyperliquid's maintenance margin is derived
+                # from it, so an inflated cap silently halves-to-tenths the maintenance
+                # requirement and pushes liquidation prices far away from reality.
+                "leverage": {"min": 1, "max": self._leverage_cap(pair)},
             },
             "info": {},
         }

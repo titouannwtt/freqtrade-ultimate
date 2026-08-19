@@ -366,6 +366,55 @@ def _enforce_intracandle_sl(bot, store, clock, candle_type) -> None:
                 logger.warning("[replay-SL] failed to exit %s: %s", trade.pair, exc)
 
 
+def _enforce_liquidations(bot, store, clock, candle_type) -> None:
+    """Liquidate trades whose liquidation price was crossed by the sub-step candle.
+
+    Nothing else in the replay can do this: dry-run freqtrade never liquidates an open
+    position (on a real venue the EXCHANGE does it, and the bot only detects the
+    aftermath), and the fake exchange holds no positions at all. Without this hook a
+    replayed loser can ride forever — measured on the dynv1 audit: 15 legitimate
+    backtest liquidations against 0 possible in replay, which silently turned the
+    replay into the optimistic simulator it was built to keep honest.
+
+    Runs AFTER the intra-candle stoploss hook on purpose: for a short, the stop sits
+    below the liquidation price, so a candle that crosses both is a stop exit in
+    reality — the stop hook has already closed it by the time we look.
+
+    The close fills at the liquidation price with the standard taker fee. Real
+    Hyperliquid liquidations are slightly worse (mark-price execution, maintenance
+    penalty), so this stays marginally optimistic — but bounded and documented, not
+    unbounded and silent."""
+    now = clock.now()
+    for trade in Trade.get_open_trades():
+        lp = trade.liquidation_price
+        if not lp:
+            continue
+        candle = None
+        for tf in ("1m", "5m", "15m"):
+            candle = store.get_candle_ohlc(trade.pair, tf, candle_type, now)
+            if candle is not None:
+                break
+        if candle is None:
+            continue
+        breached = (trade.is_short and candle["high"] >= lp) or (
+            not trade.is_short and candle["low"] <= lp
+        )
+        if breached:
+            try:
+                exit_check = ExitCheckTuple(exit_type=ExitType.LIQUIDATION)
+                bot.execute_trade_exit(trade, lp, exit_check)
+                logger.info(
+                    "[replay-LIQ] %s liquidated: liq=%.6f candle=[%.6f, %.6f] lev=%s",
+                    trade.pair,
+                    lp,
+                    candle["low"],
+                    candle["high"],
+                    trade.leverage,
+                )
+            except Exception as exc:
+                logger.warning("[replay-LIQ] failed to liquidate %s: %s", trade.pair, exc)
+
+
 def _drive_loop(
     bot,
     clock,
@@ -407,6 +456,10 @@ def _drive_loop(
         if store is not None and candle_type is not None:
             try:
                 _enforce_intracandle_sl(bot, store, clock, candle_type)
+            except Exception:
+                pass
+            try:
+                _enforce_liquidations(bot, store, clock, candle_type)
             except Exception:
                 pass
 
