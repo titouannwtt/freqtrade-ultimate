@@ -16,7 +16,7 @@ months):
 | Mode | Engine | Speed | Fidelity |
 |------|--------|-------|----------|
 | **Backtest** | `Backtesting.backtest()` (simplified) | Seconds | Low — DCA before exit, no funding, static pairlist |
-| **Dry-run replay** | `FreqtradeBot.process()` (real) | Hours | High — exit before DCA, real funding, 1-min resolution |
+| **Dry-run replay** | `FreqtradeBot.process()` (real) | Hours | High — exit before DCA, real funding, 1-min resolution, **the config's own pairlist chain** |
 | **Real dry-run** | `FreqtradeBot.process()` (real) | Months | Highest — dynamic pairlist, real orderbook |
 
 ## Key properties
@@ -33,8 +33,19 @@ months):
 - **Seed mode.** Replay writes trades directly into the bot's dry-run SQLite DB. When
   the replay finishes, the bot transitions to normal dry-run with the replay history
   already in place.
-- **Static pairlist (main limitation).** The pairlist is a snapshot taken at launch time.
-  It does not rotate dynamically like a `VolumePairList` would in a real dry-run.
+- **The config's pairlist chain is replayed** (default since 2026-08). `--pairs` defines
+  the CANDIDATE universe; the chain then selects from it every cycle, exactly as it would
+  live. Tickers are synthesised from the local candle store (24h quote volume, last price,
+  24h percentage) and are causal by construction: the store only returns candles whose
+  CLOSE has passed the virtual clock, so a pair can never be selected on volume it has not
+  yet traded. Use `--static-pairlist` to pin `--pairs` as a fixed list instead.
+
+  Handlers that reach the network or read state that only exists now are REFUSED up front,
+  each with its own reason — `MarketCapPairList`, `RemotePairList`, `ProducerPairList`,
+  `DelistFilter`, `SpreadFilter` (synthetic tickers price bid=ask, so it would be silently
+  inert), `PairInformationFilter`, `CrossMarketPairList`. An unknown handler is refused
+  too: silently skipping one would produce a plausible run whose universe never matched
+  the bot's. See `_REPLAYABLE_PAIRLISTS` in `freqtrade/replay/runner.py`.
 - **Dry-run only (structurally enforced).** Quadruple-guarded: `safety.py` checks
   `dry_run=true`, blanks credentials, and namespaces the DB. The replay cannot run on a
   live bot.
@@ -114,7 +125,8 @@ python -m freqtrade.replay --config user_data/config.json --seed --sub-step 60 -
 | `--sub-step` | Resolution in seconds (60 = 1m, 300 = 5m) |
 | `--timerange` | Standard freqtrade timerange format |
 | `--reset-db` | Wipe the DB before seeding |
-| `--pairs` | Override pairs (default: use the config's pairlist) |
+| `--pairs` | Candidate universe the pairlist chain selects from (default: the config's whitelist) |
+| `--static-pairlist` | Pin `--pairs` as a fixed list instead of replaying the chain |
 
 ## Architecture
 
