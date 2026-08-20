@@ -27,6 +27,7 @@ from pathlib import Path
 
 from freqtrade.configuration import Configuration
 from freqtrade.enums import CandleType, ExitCheckTuple, ExitType, State
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import timeframe_to_seconds
 from freqtrade.freqtradebot import FreqtradeBot
 from freqtrade.persistence import Trade
@@ -71,6 +72,74 @@ def _resolve_wallet(config: dict, wallet: float | None) -> float:
     return wallet
 
 
+# Which pairlist handlers a replay can honour, and why the others cannot.
+#
+# A replay re-runs the real chain every cycle against local data, so anything derived
+# from candles, from the synthetic tickers, or from the bot's own trade history is
+# faithful. What it cannot do is reach the network or read state that only exists now:
+# replaying those would silently substitute TODAY's answer for the past's, which is
+# worse than refusing — it looks like a result.
+_REPLAYABLE_PAIRLISTS = {
+    "StaticPairList",
+    "VolumePairList",  # ticker mode via get_tickers, range mode via candles
+    "AgeFilter",  # listing age from candle history
+    "ExtremeMoveFilter",  # daily candles
+    "TrendRegularityFilter",  # candles
+    "VolatilityFilter",  # candles
+    "RangeStabilityFilter",
+    "PerformanceFilter",  # the bot's own trades — the replay writes them
+    "PriceFilter",  # synthetic ticker last price
+    "PrecisionFilter",  # market metadata
+    "PercentChangePairList",  # synthetic ticker 24h percentage
+    "FullTradesFilter",
+    "ShuffleFilter",
+    "OffsetFilter",
+}
+
+_NON_REPLAYABLE_PAIRLISTS = {
+    "MarketCapPairList": "queries an external market-cap API; a replay would rank past "
+    "pairs by TODAY's capitalisation",
+    "RemotePairList": "fetches the list from a remote URL that has no historical form",
+    "ProducerPairList": "mirrors another running bot's live whitelist",
+    "DelistFilter": "needs the venue's current delisting notices, which do not exist "
+    "for a past date",
+    "SpreadFilter": "needs a real bid/ask spread; the synthetic tickers price bid=ask, "
+    "so every pair would pass and the filter would be silently inert",
+    "PairInformationFilter": "declares itself biased in backtesting for the same reason",
+    "CrossMarketPairList": "reads another exchange's live markets",
+}
+
+
+def _validate_replayable_pairlists(config: dict) -> None:
+    """Refuse to start rather than replay a chain we cannot honour faithfully.
+
+    Silently dropping an unsupported handler would produce a plausible-looking run whose
+    universe never matched the bot's — the class of error that makes a whole audit
+    worthless without ever raising.
+    """
+    methods = [p.get("method") for p in (config.get("pairlists") or [])]
+    blocked = [m for m in methods if m in _NON_REPLAYABLE_PAIRLISTS]
+    unknown = [m for m in methods if m not in _REPLAYABLE_PAIRLISTS and m not in blocked]
+    if not blocked and not unknown:
+        return
+    lines = ["[dry-run replay] this config's pairlist chain cannot be replayed faithfully:"]
+    for m in blocked:
+        lines.append(f"  - {m}: {_NON_REPLAYABLE_PAIRLISTS[m]}")
+    for m in unknown:
+        lines.append(
+            f"  - {m}: unknown to the replay harness. If it derives only from candles, "
+            f"tickers or the bot's own trades, add it to _REPLAYABLE_PAIRLISTS in "
+            f"freqtrade/replay/runner.py."
+        )
+    lines.append(
+        "Remove the handler from the config used for the replay, or run with "
+        "--static-pairlist to pin --pairs as a fixed list instead."
+    )
+    msg = "\n".join(lines)
+    logger.error(msg)
+    raise OperationalException(msg)
+
+
 def run_replay(
     pairs: list[str],
     start_dt: datetime,
@@ -88,7 +157,7 @@ def run_replay(
     seed: bool = False,
     sub_step: int = SUB_STEP_SECONDS,
     reset_db: bool = False,
-    dynamic_pairlist: bool = False,
+    dynamic_pairlist: bool = True,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     """
@@ -165,6 +234,7 @@ def run_replay(
     # the question is "how does this strategy behave on THESE pairs". Turn it on when
     # the question is "what would this bot actually have traded".
     if dynamic_pairlist:
+        _validate_replayable_pairlists(config)
         logger.info(
             "[dry-run replay] dynamic pairlist ENABLED — replaying the config's own chain "
             "(%s) over %d candidate pairs.",

@@ -90,14 +90,79 @@ def test_a_pair_without_candles_is_absent_not_zero():
     assert "GHOST/USDC:USDC" not in m.get_tickers()
 
 
-def test_static_pinning_is_still_the_default():
-    """Opt-in by design: pinning --pairs stays right when the question is 'how does
-    this strategy behave on THESE pairs'."""
+def test_static_pinning_remains_available():
+    """The chain is replayed by default, but pinning --pairs stays reachable: it is the
+    right answer when the question is 'how does this strategy behave on THESE pairs'."""
     import inspect
 
     from freqtrade.replay import runner
 
-    assert inspect.signature(runner.run_replay).parameters["dynamic_pairlist"].default is False
     src = inspect.getsource(runner.run_replay)
     assert "if dynamic_pairlist:" in src
     assert 'config["pairlists"] = [{"method": "StaticPairList"}]' in src
+
+
+# ── the chain is replayed by default, and refused when it cannot be honoured ──
+
+
+def test_the_pairlist_chain_is_replayed_by_default():
+    """A replay that silently pinned a static list would answer a different question
+    than the one asked: the bot's universe IS part of its behaviour."""
+    import inspect
+
+    from freqtrade.replay import runner
+
+    assert inspect.signature(runner.run_replay).parameters["dynamic_pairlist"].default is True
+
+
+def test_a_network_bound_handler_is_refused_with_a_reason():
+    """Silently dropping it would produce a plausible run whose universe never matched
+    the bot's — the class of error that voids an audit without ever raising."""
+    from freqtrade.exceptions import OperationalException
+    from freqtrade.replay.runner import _validate_replayable_pairlists
+
+    with pytest.raises(OperationalException) as e:
+        _validate_replayable_pairlists({"pairlists": [{"method": "MarketCapPairList"}]})
+    msg = str(e.value)
+    assert "MarketCapPairList" in msg
+    assert "market-cap API" in msg
+    assert "--static-pairlist" in msg, "the message must say how to proceed"
+
+
+def test_a_handler_that_would_be_inert_is_refused_too():
+    """SpreadFilter would pass every pair (synthetic bid==ask): inert, not faithful."""
+    from freqtrade.exceptions import OperationalException
+    from freqtrade.replay.runner import _validate_replayable_pairlists
+
+    with pytest.raises(OperationalException):
+        _validate_replayable_pairlists({"pairlists": [{"method": "SpreadFilter"}]})
+
+
+def test_an_unknown_handler_is_refused_rather_than_assumed_safe():
+    from freqtrade.exceptions import OperationalException
+    from freqtrade.replay.runner import _validate_replayable_pairlists
+
+    with pytest.raises(OperationalException) as e:
+        _validate_replayable_pairlists({"pairlists": [{"method": "SomeNewFilter"}]})
+    assert "_REPLAYABLE_PAIRLISTS" in str(e.value), "tell the maintainer where to add it"
+
+
+def test_the_live_chain_of_this_fleet_is_accepted():
+    """Regression on the real thing: dynv1's own chain must replay."""
+    from freqtrade.replay.runner import _validate_replayable_pairlists
+
+    _validate_replayable_pairlists(
+        {
+            "pairlists": [
+                {"method": "VolumePairList"},
+                {"method": "PerformanceFilter"},
+                {"method": "VolumePairList"},
+                {"method": "TrendRegularityFilter"},
+            ]
+        }
+    )
+
+
+def test_tickers_carry_a_24h_percentage_for_percentchange_handlers():
+    m = _mixin(_Clock(datetime(2026, 1, 2)))
+    assert m.get_tickers()["AAA/USDC:USDC"]["percentage"] is not None

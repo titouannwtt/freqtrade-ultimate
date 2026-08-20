@@ -33,6 +33,7 @@ Usage
 Requires the wallet read creds in live_configs/_hyperliquid_freqtrade_access.json
 (only walletAddress is needed for reads; the private key is never used here).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import subprocess
 import sys
 import urllib.request
@@ -112,9 +114,11 @@ def _live_bot_positions() -> tuple[dict[str, float], dict[str, list[str]], int]:
         if not db or not os.path.exists(db):
             continue
         try:
-            rows = sqlite3.connect(db).execute(
-                "select pair, amount, is_short from trades where is_open = 1"
-            ).fetchall()
+            rows = (
+                sqlite3.connect(db)
+                .execute("select pair, amount, is_short from trades where is_open = 1")
+                .fetchall()
+            )
         except Exception:
             continue
         for pair, amount, is_short in rows:
@@ -184,7 +188,48 @@ def _telegram(msg: str) -> None:
                 continue
 
 
-def reconcile(tolerance: float = 0.01, dust_usd: float = DUST_USD):
+CONFIRM_DELAY_S = 6.0
+
+
+def reconcile(tolerance: float = 0.01, dust_usd: float = DUST_USD, confirm: bool = True):
+    """Compare wallet vs bot books, confirming any break with a second read.
+
+    The two sides are sampled at different instants and from different systems: the bot
+    books come from live SQLite files that their owners are actively writing, the wallet
+    from a network call. A trade committed between the two reads therefore shows up as a
+    perfect phantom or orphan that never existed. Observed 2026-08-20: a 367-unit SEI
+    "orphan" reported while the bot holding it was mid-INSERT; gone on the next run.
+
+    A false alarm is worse here than a missed one. This report exists to be trusted at a
+    glance, and an operator who has learned that breaks evaporate on re-run has learned
+    to ignore the panel — which is exactly how a real orphan rides to liquidation
+    unnoticed. So a break is only reported when it survives a fresh read of BOTH sides,
+    a few seconds later: a genuine drift persists, a race does not.
+
+    ``confirm=False`` skips the second pass (used by callers that already hold a lock,
+    and by the tests).
+    """
+    res = _reconcile_once(tolerance, dust_usd)
+    if not confirm or not (res["orphans"] or res["phantoms"]):
+        return res
+
+    suspect = {c for c, _ in res["orphans"]} | {c for c, _ in res["phantoms"]}
+    time.sleep(CONFIRM_DELAY_S)
+    again = _reconcile_once(tolerance, dust_usd)
+    still = {c for c, _ in again["orphans"]} | {c for c, _ in again["phantoms"]}
+
+    transient = suspect - still
+    if transient:
+        logger_msg = (
+            f"  (ignored {len(transient)} transient break(s) that did not survive "
+            f"re-reading: {', '.join(sorted(transient))} — concurrent bot writes)"
+        )
+        again["transient"] = sorted(transient)
+        again["note"] = logger_msg
+    return again
+
+
+def _reconcile_once(tolerance: float = 0.01, dust_usd: float = DUST_USD):
     bots_net, detail, n_live = _live_bot_positions()
     hl, px = _hl_positions()
     coins = sorted(set(hl) | {c for c, v in bots_net.items() if abs(v) > 1e-6})
@@ -220,10 +265,16 @@ def reconcile(tolerance: float = 0.01, dust_usd: float = DUST_USD):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("--telegram", action="store_true", help="push a Telegram alert if drift is found")
-    ap.add_argument("--tolerance", type=float, default=0.01, help="relative match tolerance (default 1%%)")
+    ap.add_argument(
+        "--telegram", action="store_true", help="push a Telegram alert if drift is found"
+    )
+    ap.add_argument(
+        "--tolerance", type=float, default=0.01, help="relative match tolerance (default 1%%)"
+    )
     ap.add_argument(
         "--dust-usd",
         type=float,
@@ -238,12 +289,18 @@ def main():
     if args.json:
         print(json.dumps(r, indent=2))
     else:
-        print(f"Live bots: {r['n_live_bots']}  |  coins: {r['total']}  |  ISO: {r['ok']}  "
-              f"|  orphans: {len(r['orphans'])}  |  phantoms: {len(r['phantoms'])}\n")
+        print(
+            f"Live bots: {r['n_live_bots']}  |  coins: {r['total']}  |  ISO: {r['ok']}  "
+            f"|  orphans: {len(r['orphans'])}  |  phantoms: {len(r['phantoms'])}\n"
+        )
         print(f"{'COIN':<10}{'HL_net':>14}{'BOTS_net':>14}{'DIFF':>12}   status")
         for row in r["rows"]:
             if row["status"] != "ISO":
-                print(f"{row['coin']:<10}{row['hl']:>14.3f}{row['bots']:>14.3f}{row['diff']:>12.3f}   {row['status']}")
+                print(
+                    f"{row['coin']:<10}{row['hl']:>14.3f}{row['bots']:>14.3f}{row['diff']:>12.3f}   {row['status']}"
+                )
+        if r.get("note"):
+            print(r["note"])
         if r["orphans"]:
             print("\n⚠️  ORPHANS (position on the wallet no live bot backs):")
             for c, d in r["orphans"]:

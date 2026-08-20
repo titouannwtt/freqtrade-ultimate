@@ -275,6 +275,7 @@ class ReplayExchangeMixin:
         for pair in symbols or list(self._markets):
             quote_vol = 0.0
             last = None
+            pct = None
             for tf, n in (("1h", 24), ("15m", 96), ("5m", 288), ("1d", 1)):
                 try:
                     df = self._replay_store.get_candles(
@@ -287,6 +288,8 @@ class ReplayExchangeMixin:
                 tail = df.tail(n)
                 quote_vol = float((tail["volume"] * tail["close"]).sum())
                 last = float(tail["close"].iloc[-1])
+                first = float(tail["close"].iloc[0])
+                pct = ((last / first) - 1.0) * 100.0 if first else None
                 break
             if last is None:
                 continue
@@ -298,7 +301,7 @@ class ReplayExchangeMixin:
                 "ask": last,
                 "quoteVolume": quote_vol,
                 "baseVolume": quote_vol / last if last else 0.0,
-                "percentage": None,
+                "percentage": pct,
                 "info": {},
             }
         return out
