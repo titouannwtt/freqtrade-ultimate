@@ -172,20 +172,34 @@ def _hl_positions() -> tuple[dict[str, float], dict[str, float]]:
     return net, px
 
 
+def _push(token: str | None, chat: str | None, msg: str) -> bool:
+    """Send one Telegram message. Returns True on success, False on any failure."""
+    if not token or not chat:
+        return False
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": msg}).encode()
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 - best-effort notifier, never break the report
+        print(f"[telegram] push failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return False
+
+
 def _telegram(msg: str) -> None:
-    """Best-effort Telegram push using the first bot config that has telegram creds."""
+    """Best-effort Telegram push, env vars first then bot configs.
+
+    Env first because under cron there is no shell profile, and the bot configs on this
+    fleet carry no telegram block at all — a config-only lookup pushed nothing, silently.
+    The cron entry sources EDGE_TG_* from ~/.zshrc, as exposure_guardrail.py does.
+    """
+    if _push(os.environ.get("EDGE_TG_BOT_TOKEN"), os.environ.get("EDGE_TG_CHAT_ID"), msg):
+        return
     for cfg in _running_bot_configs():
         tg = cfg.get("telegram", {})
-        token, chat = tg.get("token"), tg.get("chat_id")
-        if token and chat:
-            try:
-                data = urllib.parse.urlencode({"chat_id": chat, "text": msg}).encode()
-                urllib.request.urlopen(
-                    f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10
-                )
-                return
-            except Exception:
-                continue
+        if _push(tg.get("token"), tg.get("chat_id"), msg):
+            return
 
 
 CONFIRM_DELAY_S = 6.0

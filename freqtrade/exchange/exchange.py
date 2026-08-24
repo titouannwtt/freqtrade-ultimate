@@ -1644,6 +1644,7 @@ class Exchange:
             return dry_order
 
         params = self._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+        self._guard_shared_wallet_exit(pair, side, amount, reduceOnly, params)
 
         max_attempts = 2
         for attempt in range(max_attempts):
@@ -2102,6 +2103,79 @@ class Exchange:
             ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
+
+    def _guard_shared_wallet_exit(
+        self, pair: str, side: BuySell, amount: float, reduceOnly: bool, params: dict
+    ) -> None:
+        """
+        Stop an exit order from OPENING an inverted position on a shared netted wallet.
+
+        Incident 2026-08-21 (ENA): a 3498 short was liquidated at 08:44:09; the bot's own
+        close order landed 15s later, found nothing to reduce, and opened a 3498 LONG that
+        no bot tracked. `shared_wallet: true` disables reduceOnly fleet-wide (see
+        `_get_params`) precisely because reduceOnly exits get rejected when the fleet's net
+        opposes this bot — so nothing stopped the flip.
+
+        Two narrow, provable guards — deliberately NOT a sign check on the net. On a netted
+        wallet a legitimate exit routinely pushes the net further in one direction (bot A
+        closes a short while bot B holds a bigger long), so refusing on sign alone would
+        block real exits and strand trades.
+
+        1. REFUSE when the wallet is flat on this coin. Then no close order can be reducing
+           anything — it can only open. This is the exact incident shape. The trade stays
+           open and the fork's existing external-close path settles it next cycle.
+        2. RE-ENABLE reduceOnly when it provably cannot be rejected: the net is on the same
+           side as what we are closing AND at least as large as this order. Recovers the
+           protection `shared_wallet` gives up, without the rejection risk it was avoiding.
+
+        Unknown net (dry-run, no fetchPositions, API error) fails OPEN: trading continues.
+        """
+        if not reduceOnly or self.trading_mode != TradingMode.FUTURES:
+            return
+        if not self._config["exchange"].get("shared_wallet", False):
+            return  # reduceOnly is already set by _get_params; nothing to add.
+        net = self.net_position_size(pair)
+        if net is None:
+            return
+        if abs(net) < abs(amount) * 1e-3:
+            raise InvalidOrderException(
+                f"Refusing to {side} {amount} {pair} as an exit: the wallet is flat on this "
+                f"coin (net={net}). The position this order would close no longer exists, so "
+                f"the order would OPEN an inverted one (ENA 2026-08-21). Leaving the trade "
+                f"open for the external-close path to settle."
+            )
+        closing_long = side == "sell"
+        reducible = net if closing_long else -net
+        if reducible >= abs(amount):
+            params["reduceOnly"] = True
+
+    def net_position_size(self, pair: str) -> float | None:
+        """
+        Signed net position held by the WALLET on this pair (long +, short -).
+
+        On a shared netted wallet this is the fleet's aggregate, not this bot's slice —
+        which is exactly what an exit order acts on. Returns None when it cannot be
+        established (dry-run, exchange without fetchPositions, or any API failure), so
+        callers must treat None as "unknown" and fail open rather than block trading.
+        """
+        if self._config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+            return None
+        if not self.exchange_has("fetchPositions"):
+            return None
+        try:
+            positions = self.fetch_positions(pair)
+        except Exception as e:
+            logger.warning(f"[net-position] could not read {pair}: {e.__class__.__name__}: {e}")
+            return None
+        for pos in positions:
+            if pos.get("symbol") != pair:
+                continue
+            contracts = pos.get("contracts")
+            if contracts is None:
+                continue
+            size = abs(float(contracts))
+            return -size if str(pos.get("side", "")).lower() == "short" else size
+        return 0.0
 
     @retrier
     def fetch_positions(
