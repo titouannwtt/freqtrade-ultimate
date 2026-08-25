@@ -281,8 +281,14 @@ class OhlcvCacheClient:
                 await self.close()
                 raise CacheTimedOut(f"daemon timed out: {e.__class__.__name__}: {e}") from e
             except (
-                ConnectionError,
-                BrokenPipeError,
+                # OSError, not just ConnectionError: a dead unix socket surfaces as a bare
+                # `OSError: [Errno 22] Invalid argument` from the selector's sock.recv(),
+                # which is NOT a ConnectionError. Left uncaught, the connection was never
+                # torn down, so _reader/_writer kept pointing at the dead transport and
+                # every later call failed identically until the process restarted —
+                # measured at 916 consecutive reload_markets failures on one live bot
+                # (2026-08-24). OSError subsumes ConnectionError and BrokenPipeError.
+                OSError,
                 ValueError,
                 EOFError,
             ) as e:
