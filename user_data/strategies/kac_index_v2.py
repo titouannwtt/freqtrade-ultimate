@@ -68,16 +68,37 @@ def add_tv_graph(dataframe: pd.DataFrame, backtest=True):
 
     # Chargement des données depuis TradingView, avec fallback si erreur
     if cache_key not in cache:
+        # tvDatafeed est un scraper non officiel : il casse pour des raisons hors de notre
+        # controle (limite de debit, changement d'API TradingView, coupure reseau). La 3e
+        # tentative n'etait pas protegee, donc son echec remontait hors de
+        # populate_indicators et interrompait le cycle du bot. Or le stop de cette
+        # strategie n'existe que tant que le processus tourne (stoploss_on_exchange=False),
+        # donc un plantage ici retire la seule protection d'une position ouverte.
+        # On degrade maintenant au lieu de lever : indicateurs neutres pour ce cycle,
+        # exactement comme le chemin "donnees vides" plus bas. L'echec n'est PAS mis en
+        # cache, donc le prochain cycle retentera.
         tv = TvDatafeed()
-        try:
-            cache[cache_key] = tv.get_hist(symbol, exchange, interval, n_bars=4000)
-        except:
-            time.sleep(10)
+        hist = None
+        for n_bars, pause_after_failure in ((4000, 10), (2000, 20), (2000, 0)):
             try:
-                cache[cache_key] = tv.get_hist(symbol, exchange, interval, n_bars=2000)
-            except:
-                time.sleep(20)
-                cache[cache_key] = tv.get_hist(symbol, exchange, interval, n_bars=2000)
+                hist = tv.get_hist(symbol, exchange, interval, n_bars=n_bars)
+                break
+            except Exception as e:
+                logger.warning(
+                    f"tvDatafeed {symbol}@{exchange} n_bars={n_bars} a echoue : "
+                    f"{e.__class__.__name__}: {e}"
+                )
+                if pause_after_failure:
+                    time.sleep(pause_after_failure)
+        if hist is None:
+            logger.warning(
+                f"tvDatafeed indisponible apres 3 tentatives pour {symbol} — indicateurs "
+                f"neutres pour ce cycle (aucun signal ne sera genere)."
+            )
+            for ohlc in [''] + ohlc_types:
+                dataframe[f'{column_name}_{ohlc}'.rstrip('_')] = dataframe['close'] * 0 - 1
+            return dataframe
+        cache[cache_key] = hist
 
     # Nettoyage de cache obsolète si le bot est en live (sinon au bout de plusieurs jours, le cache peut devenir assez conséquent)
     if not backtest:
