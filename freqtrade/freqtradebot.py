@@ -1922,10 +1922,29 @@ class FreqtradeBot(LoggingMixin):
                 )
                 return
 
-            remaining = (trade.amount - amount) * current_exit_rate
-            if min_exit_stake and remaining != 0 and remaining < min_exit_stake:
+            # `min_exit_stake` is a STAKE (margin) figure — get_min_pair_stake_amount()
+            # divides the exchange's notional floor by the leverage. `amount * rate` is a
+            # NOTIONAL. Comparing them directly makes the check too permissive by exactly
+            # the leverage factor, so on a 3x trade it waves through slices three times
+            # smaller than the exchange will accept. Measured 2026-08-23 (KNEIRO 3x):
+            # remaining notional 9.60 vs min_exit_stake 4.12 passed, while the real
+            # margin value was 3.20 — the exchange then refused the order ("Order must
+            # have minimum value of $10") and, the trigger still being true, the strategy
+            # re-sent it every cycle: 32 rejected orders in 3 minutes against an API that
+            # is already rate-limited. Dividing by leverage is a no-op at 1x, so spot and
+            # unleveraged futures behave exactly as before.
+            lev = trade.leverage or 1.0
+            exit_stake = amount * current_exit_rate / lev
+            remaining_stake = (trade.amount - amount) * current_exit_rate / lev
+            if min_exit_stake and exit_stake < min_exit_stake:
                 logger.info(
-                    f"Remaining amount of {remaining} would be smaller "
+                    f"Partial exit of {exit_stake} would be smaller than the minimum of "
+                    f"{min_exit_stake} — the exchange would reject it, not exiting."
+                )
+                return
+            if min_exit_stake and remaining_stake != 0 and remaining_stake < min_exit_stake:
+                logger.info(
+                    f"Remaining amount of {remaining_stake} would be smaller "
                     f"than the minimum of {min_exit_stake}."
                 )
                 return
