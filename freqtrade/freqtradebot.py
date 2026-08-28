@@ -251,6 +251,12 @@ class FreqtradeBot(LoggingMixin):
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
             # Foreign (sibling) order ids already warned about — see manage_open_orders.
             self._foreign_orders_warned: set[str] = set()
+            # trade_id -> last time we warned that its exit is under the exchange minimum.
+            # Throttles a per-cycle message down to hourly; see _exit_meets_exchange_minimum.
+            self._undersized_exit_warned: dict[int, float] = {}
+            # (trade_id, hour) already warned about a refused safety order; the guard runs
+            # every cycle, and one bot logged the identical line 7848 times in 36h.
+            self._envelope_warned: set[tuple[int, int]] = set()
             LoggingMixin.__init__(self, logger, timeframe_secs)
 
             self._schedule = Scheduler()
@@ -1826,16 +1832,22 @@ class FreqtradeBot(LoggingMixin):
         projected = (trade.stake_amount or 0.0) + added_stake
         if projected <= allocated * ratio:
             return True
-        logger.warning(
-            "%s: safety order of %.2f refused — it would take this single position to "
-            "%.2f of margin, past %.0f%% of the bot's %.2f allocation. "
-            "Raise max_position_stake_ratio to allow it.",
-            trade.pair,
-            added_stake,
-            projected,
-            ratio * 100,
-            allocated,
-        )
+        # The guard runs every cycle while the DCA trigger stays true, so the same line was
+        # logged 7848 times in 36h by one bot. Once per trade per hour is enough to notice.
+        key = (trade.id or 0, int(datetime.now(UTC).timestamp() // 3600))
+        if key not in self._envelope_warned:
+            self._envelope_warned.add(key)
+            logger.warning(
+                "%s: safety order of %.2f refused — it would take this single position to "
+                "%.2f of margin, past %.0f%% of the bot's %.2f allocation. "
+                "Raise max_position_stake_ratio to allow it (further identical refusals "
+                "for this trade are logged at most hourly).",
+                trade.pair,
+                added_stake,
+                projected,
+                ratio * 100,
+                allocated,
+            )
         return False
 
     def check_and_call_adjust_trade_position(self, trade: Trade):
@@ -3248,6 +3260,50 @@ class FreqtradeBot(LoggingMixin):
                 f"Not enough amount to exit trade. Trade-amount: {amount}, Wallet: {wallet_amount}"
             )
 
+    def _exit_meets_exchange_minimum(self, trade: Trade, amount: float, rate: float) -> bool:
+        """Do not send an exit the exchange will certainly refuse for being too small.
+
+        A winning short shrinks in notional as it wins: `amount * rate` falls, and once it
+        drops under the venue's minimum order value the position can no longer be closed
+        at all. Freqtrade re-sent that doomed order every cycle. Measured over 36h on this
+        fleet: 5002 rejected orders, ~139/h, on an API that was already returning 429s —
+        e.g. KAITO amount 20.0 at 0.31992 = $6.40 against Hyperliquid's $10 floor, retried
+        2746 times by one bot.
+
+        Refusing locally costs nothing and frees that budget. The position stays open and
+        is retried when the notional recovers; nothing is silently abandoned. The warning
+        is emitted once per trade per hour instead of once per cycle.
+
+        Fails OPEN: if the exchange reports no minimum, the exit goes out as before.
+        """
+        if amount <= 0 or rate <= 0:
+            # Degenerate input: nothing to judge. Blocking here would turn a
+            # previously-successful exit path into a refusal and break handle_trade's
+            # contract — leave these to the existing amount checks downstream.
+            return True
+        try:
+            min_stake = self.exchange.get_min_pair_stake_amount(
+                trade.pair, rate, self.strategy.stoploss, trade.leverage or 1.0
+            )
+        except Exception:
+            return True
+        if not min_stake:
+            return True
+        exit_stake = amount * rate / (trade.leverage or 1.0)
+        if exit_stake >= min_stake:
+            return True
+        now = datetime.now(UTC).timestamp()
+        last = self._undersized_exit_warned.get(trade.id or 0, 0.0)
+        if now - last > 3600:
+            self._undersized_exit_warned[trade.id or 0] = now
+            logger.warning(
+                f"{trade.pair}: exit of {amount} at {rate} is worth {exit_stake:.2f} in stake "
+                f"terms, under the exchange minimum of {min_stake:.2f} — not sending an order "
+                f"the venue would refuse. The position stays open and will be retried when "
+                f"its notional recovers."
+            )
+        return False
+
     def execute_trade_exit(
         self,
         trade: Trade,
@@ -3336,6 +3392,9 @@ class FreqtradeBot(LoggingMixin):
         if trade.has_open_orders:
             if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
                 return False
+
+        if not self._exit_meets_exchange_minimum(trade, amount, limit):
+            return False
 
         # ISO guard checkpoint 1/2 (exits are sampled but never blocked).
         self._iso_guard.before_order(trade.pair, trade.exit_side, amount, is_entry=False)
