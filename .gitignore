@@ -298,3 +298,5 @@ backtest_configs/BTC_longs_research_1d.json
 user_data/research_logsupports/
 user_data/research_gold/
 user_data/data_btclongs/
+
+user_data/research_altlongs/
