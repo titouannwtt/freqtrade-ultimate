@@ -851,7 +851,40 @@ def _ensure_daemon_running(
                     pass
 
         logger.info("spawning ftcache daemon (socket=%s)", socket_path)
-        log_f = Path(log_path).open("ab", buffering=0)
+        # ⛔️⛔️ NE JAMAIS REDIRIGER stdout/stderr VERS `log_path` — INCIDENT DU 30 AOÛT 2026.
+        #
+        # Le disque du VPS s'est rempli à 100 % : **un seul fichier occupait 197 Go**,
+        # `~/.freqtrade/ftcache/logs/daemon.log.5`, **DÉJÀ SUPPRIMÉ** mais encore ouvert par le
+        # démon. Sous Linux l'espace n'est rendu qu'à la fermeture du descripteur : le fichier
+        # n'existait plus et pesait quand même 197 Go. Toute la machine était bloquée, y compris
+        # des projets sans aucun rapport avec Freqtrade.
+        #
+        # ## Le mécanisme, DIAGNOSTIQUÉ et non supposé (`/proc/<pid>/fd`) :
+        #   fd 1 (stdout) → daemon.log.1     ← le fichier ROTATÉ
+        #   fd 2 (stderr) → daemon.log.1     ← idem
+        #   fd 4 (logging) → daemon.log      ← correct, celui-ci tourne bien
+        # `setup_daemon_logger` fait tourner le journal (5 Mo × 5). À chaque rotation le fichier
+        # devient `.1`, `.2`, … `.5`, puis est **supprimé**. Mais stdout/stderr, hérités de ce
+        # `Popen`, gardent le MÊME descripteur et continuent d'y écrire — **sans aucune rotation,
+        # sans aucune borne, indéfiniment**. La rotation ne protégeait donc qu'un descripteur sur
+        # trois. Le démon tournait depuis 584 jours.
+        #
+        # ## Le correctif
+        # stdout/stderr vont dans un fichier SÉPARÉ, que le logging ne fait jamais tourner (donc
+        # aucun renommage sous les pieds du descripteur), et qui est **tronqué au démarrage** s'il
+        # dépasse 5 Mo ou 7 jours. Il ne porte que ce que le logging ne peut pas capter : traces
+        # de plantage et messages de bibliothèques tierces. Quelques kilo-octets en régime normal.
+        _std_path = Path(log_path).with_name("daemon.stdout.log")
+        try:
+            if _std_path.exists():
+                _st = _std_path.stat()
+                _trop_gros = _st.st_size > 5 * 1024 * 1024
+                _trop_vieux = (time.time() - _st.st_mtime) > 7 * 86400
+                if _trop_gros or _trop_vieux:
+                    _std_path.unlink()          # repart à zéro : aucun descripteur ne le tient
+        except Exception:
+            pass                                 # jamais fatal : on ne bloque pas un démarrage
+        log_f = _std_path.open("ab", buffering=0)
         try:
             subprocess.Popen(
                 [
