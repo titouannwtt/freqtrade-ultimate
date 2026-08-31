@@ -171,10 +171,25 @@ def test_get_signal_old_dataframe(default_conf, mocker, caplog, ohlcv_history):
     caplog.set_level(logging.INFO)
     mocker.patch("freqtrade.strategy.interface.StrategyResultValidator.assert_df")
 
+    # Fork: stale pairs are REPORTED AS A BATCH, one grouped line instead of one
+    # warning per pair (a large whitelist otherwise buried every other signal).
+    # Nothing is logged on the first sighting: the batch window lets a whole cycle
+    # contribute first. Cf. `IStrategy._note_outdated_pair`.
+    _STRATEGY._outdated_pending = {}
+    _STRATEGY._outdated_pending_since = 0.0
+    _STRATEGY._outdated_last_flush = 0.0
+
     assert (None, None) == _STRATEGY.get_latest_candle(
         "xyz", default_conf["timeframe"], mocked_history
     )
-    assert log_has("Outdated history for pair xyz. Last tick is 16 minutes old", caplog)
+    assert _STRATEGY._outdated_pending.get("xyz") == 16
+
+    # Once the window has elapsed, the batch surfaces as a single line naming it.
+    _STRATEGY._outdated_pending_since -= _STRATEGY.OUTDATED_BATCH_WINDOW_S + 1
+    assert (None, None) == _STRATEGY.get_latest_candle(
+        "xyz", default_conf["timeframe"], mocked_history
+    )
+    assert log_has_re(r"Outdated history for 1 pair\(s\), worst 16m behind: xyz \(16m\)", caplog)
 
 
 def test_get_signal_no_sell_column(default_conf, mocker, caplog, ohlcv_history):

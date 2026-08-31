@@ -153,7 +153,11 @@ class IStrategy(ABC, HyperStrategyMixin):
         self.config = config
         # Dict to determine if analysis is necessary
         self.__last_candle_seen_per_pair: dict[str, datetime] = {}
-        self._outdated_warned: dict[str, float] = {}
+        # Outdated-history reporting: ONE grouped line per batch, not one per pair.
+        # `_outdated_pending` maps pair -> age in minutes, accumulated between flushes.
+        self._outdated_pending: dict[str, int] = {}
+        self._outdated_pending_since: float = 0.0
+        self._outdated_last_flush: float = 0.0
         super().__init__(config)
 
         # Gather informative pairs from @informative-decorated methods.
@@ -1312,19 +1316,66 @@ class IStrategy(ABC, HyperStrategyMixin):
         timeframe_minutes = timeframe_to_minutes(timeframe)
         offset = self.config.get("exchange", {}).get("outdated_offset", 5)
         if latest_date < (dt_now() - timedelta(minutes=timeframe_minutes * 2 + offset)):
-            import time
-
-            now_ts = time.monotonic()
-            last_warned = self._outdated_warned.get(pair, 0.0)
-            if now_ts - last_warned >= 3600:
-                logger.warning(
-                    "Outdated history for pair %s. Last tick is %s minutes old",
-                    pair,
-                    int((dt_now() - latest_date).total_seconds() // 60),
-                )
-                self._outdated_warned[pair] = now_ts
+            self._note_outdated_pair(pair, int((dt_now() - latest_date).total_seconds() // 60))
             return None, None
         return latest, latest_date
+
+    # One grouped report at most this often (seconds).
+    OUTDATED_REPORT_INTERVAL_S = 3600
+    # Wait this long after the first stale pair before reporting, so a whole cycle
+    # has time to contribute. Without it the very first report names one pair and
+    # the rest stay silent for an hour behind it.
+    OUTDATED_BATCH_WINDOW_S = 60
+    # Cap the names printed. A whitelist can hold hundreds of pairs, and a log line
+    # that wraps for a full screen is as unreadable as the flood it replaced.
+    OUTDATED_MAX_NAMES = 12
+
+    def _note_outdated_pair(self, pair: str, age_minutes: int) -> None:
+        """Record a pair whose candles are stale, and report the batch as ONE line.
+
+        Upstream logs one warning per pair, throttled per pair. With a large
+        whitelist that is still hundreds of near-identical lines an hour, per bot:
+        measured on this fleet, "Outdated history" alone accounted for ~7400 of the
+        warnings in a log sample, drowning every other signal. The condition is
+        almost never about ONE pair anyway. It means the feed is behind, so the
+        useful unit of information is the SET of affected pairs and the worst age,
+        which is exactly what a single grouped line carries.
+
+        Throttling stays time-based rather than count-based on purpose: a stale feed
+        that persists must keep saying so, or a silent log would read as recovery.
+        """
+        import time
+
+        now_ts = time.monotonic()
+        if not self._outdated_pending:
+            self._outdated_pending_since = now_ts
+        # Keep the WORST age seen for a pair within the batch, never the latest:
+        # the peak is what tells how far behind the feed actually fell.
+        self._outdated_pending[pair] = max(age_minutes, self._outdated_pending.get(pair, 0))
+
+        if now_ts - self._outdated_pending_since < self.OUTDATED_BATCH_WINDOW_S:
+            return
+        if (
+            self._outdated_last_flush
+            and now_ts - self._outdated_last_flush < self.OUTDATED_REPORT_INTERVAL_S
+        ):
+            return
+
+        # Worst offender first: on a truncated list, the pairs that matter survive.
+        ranked = sorted(self._outdated_pending.items(), key=lambda kv: kv[1], reverse=True)
+        shown = ranked[: self.OUTDATED_MAX_NAMES]
+        names = ", ".join(f"{p} ({m}m)" for p, m in shown)
+        hidden = len(ranked) - len(shown)
+        if hidden > 0:
+            names += f", and {hidden} more"
+        logger.warning(
+            "Outdated history for %d pair(s), worst %dm behind: %s",
+            len(ranked),
+            ranked[0][1],
+            names,
+        )
+        self._outdated_pending = {}
+        self._outdated_last_flush = now_ts
 
     def get_exit_signal(
         self, pair: str, timeframe: str, dataframe: DataFrame, is_short: bool | None = None
