@@ -55,6 +55,10 @@ class DataProvider:
         # Empty-dataframe reporting: ONE grouped line per batch, not one per pair.
         # Keyed by (timeframe, candle_type) so a missing funding_rate feed and a
         # missing OHLCV feed never end up folded into the same sentence.
+        # Meme regroupement pour les bougies perimees : cle = timeframe.
+        self.__stale_pending: dict[str, dict[str, float]] = {}
+        self.__stale_pending_since: float = 0.0
+        self.__stale_last_flush: float = 0.0
         self.__nodata_pending: dict[tuple[str, str], set[str]] = {}
         self.__nodata_pending_since: float = 0.0
         self.__nodata_last_flush: float = 0.0
@@ -128,16 +132,7 @@ class DataProvider:
                     age_seconds = (now - ts).total_seconds()
                     tf_seconds = timeframe_to_seconds(timeframe)
                     if age_seconds > tf_seconds * 2:
-                        last_warned = self.__last_stale_warning.get(pair_key)
-                        if last_warned is None or (now - last_warned).total_seconds() >= 3600:
-                            logger.warning(
-                                "Stale candle data for %s/%s: %.0fs old (%.1f candles)",
-                                pair,
-                                timeframe,
-                                age_seconds,
-                                age_seconds / tf_seconds,
-                            )
-                            self.__last_stale_warning[pair_key] = now
+                        self._note_stale_candles(pair, timeframe, age_seconds / tf_seconds)
             except Exception:
                 pass
         with self.__cached_pairs_lock:
@@ -445,6 +440,53 @@ class DataProvider:
     # Cap the names printed; a line that wraps for a full screen is as unreadable as
     # the flood it replaces.
     NODATA_MAX_NAMES = 12
+
+    def _note_stale_candles(self, pair: str, timeframe: str, candles_old: float) -> None:
+        """Bougies perimees : UNE ligne groupee par timeframe, pas une par paire.
+
+        Troisieme membre de la meme famille que `_note_missing_data` et
+        `IStrategy._note_outdated_pair`, et corrige pour la meme raison : releve
+        1103 occurrences dans un echantillon de journaux de flotte. L'ancien
+        etranglement etait HORAIRE PAR PAIRE, ce qui reste des centaines de lignes
+        quand la whitelist compte des centaines de paires.
+
+        Groupe par TIMEFRAME parce que c'est la l'information : « 40 paires en 2h
+        ont plus de 3 bougies de retard » designe un flux, alors qu'une paire
+        isolee ne dit rien. L'age est exprime en BOUGIES, pas en secondes : 6000 s
+        ne se lit pas, « 3,2 bougies de retard » se lit.
+        """
+        import time
+
+        now_ts = time.monotonic()
+        if not self.__stale_pending:
+            self.__stale_pending_since = now_ts
+        bucket = self.__stale_pending.setdefault(timeframe, {})
+        bucket[pair] = max(candles_old, bucket.get(pair, 0.0))
+
+        if now_ts - self.__stale_pending_since < self.NODATA_BATCH_WINDOW_S:
+            return
+        if (
+            self.__stale_last_flush
+            and now_ts - self.__stale_last_flush < self.NODATA_REPORT_INTERVAL_S
+        ):
+            return
+
+        for tf, pairs in sorted(self.__stale_pending.items()):
+            ranked = sorted(pairs.items(), key=lambda kv: kv[1], reverse=True)
+            shown = ranked[: self.NODATA_MAX_NAMES]
+            listed = ", ".join(f"{p} ({n:.1f})" for p, n in shown)
+            hidden = len(ranked) - len(shown)
+            if hidden > 0:
+                listed += f", and {hidden} more"
+            logger.warning(
+                "Stale candle data on %s for %d pair(s), worst %.1f candles behind: %s",
+                tf,
+                len(ranked),
+                ranked[0][1],
+                listed,
+            )
+        self.__stale_pending = {}
+        self.__stale_last_flush = now_ts
 
     def _note_missing_data(self, pair: str, timeframe: str, candle_type: str) -> None:
         """Record an empty dataframe, and report the batch as ONE line per feed.
