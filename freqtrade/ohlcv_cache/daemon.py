@@ -1033,6 +1033,10 @@ class Daemon:
         self._flush_interval_s = float(global_cfg.get("flush_interval_s", 30))
         self._pending_fetches = 0
         self._peak_pending = 0
+        # La profondeur de file est journalisee au TEMPS, pas au compteur :
+        # cf. `_maybe_log_queue_depth`.
+        self._queue_depth_logged_at = 0.0
+        self._queue_depth_high_water = 0
         # Shared caches for centralized rate limiting
         self._tickers_cache: dict[str, _TickersCacheEntry] = {}
         self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 30.0))
@@ -2607,13 +2611,7 @@ class Daemon:
             self._pending_fetches += 1
             if self._pending_fetches > self._peak_pending:
                 self._peak_pending = self._pending_fetches
-            if self._pending_fetches > 10 and self._pending_fetches % 10 == 0:
-                logger.info(
-                    "fetch queue depth: %d pending (peak=%d, inflight=%d)",
-                    self._pending_fetches,
-                    self._peak_pending,
-                    self.coordinator.active_count(),
-                )
+            self._maybe_log_queue_depth()
             try:
                 resp = await self._handle_fetch(req, conn_id)
                 resp["pending_fetches"] = self._pending_fetches
@@ -2638,6 +2636,50 @@ class Daemon:
             "error_type": "UnknownOp",
             "error_message": f"Unknown op: {op}",
         }
+
+    # Au plus une ligne de profondeur de file a cette cadence (secondes).
+    QUEUE_DEPTH_LOG_INTERVAL_S = 60
+    # En dessous, une file n'est que du travail en vol : rien a signaler.
+    QUEUE_DEPTH_LOG_FLOOR = 10
+
+    def _maybe_log_queue_depth(self) -> None:
+        """Signale l'arriere de fetch au plus une fois par minute, avec son pic.
+
+        Le declencheur etait `pending > 10 and pending % 10 == 0`, c'est-a-dire a
+        chaque franchissement d'un multiple de dix. Acceptable quand la file est
+        occasionnellement chargee, pathologique quand elle est durablement
+        profonde : mesure sur cette flotte, la file n'etait JAMAIS vide (mediane
+        110 en attente) et cette seule ligne representait ~77 % de tout ce que le
+        daemon ecrivait, soit environ 60 Mo par jour. Un signal de saturation qui
+        noie son propre journal cesse d'etre un signal.
+
+        Etrangle au TEMPS plutot qu'a la valeur du compteur, et il rapporte le PIC
+        atteint depuis la ligne precedente, pas la profondeur instantanee. Un
+        echantillon par minute d'une file en dents de scie sous-estimerait
+        l'arriere, et sous-estimer la saturation est precisement la panne que ce
+        journal existe pour eviter.
+        """
+        import time
+
+        depth = self._pending_fetches
+        if depth > self._queue_depth_high_water:
+            self._queue_depth_high_water = depth
+        if depth < self.QUEUE_DEPTH_LOG_FLOOR:
+            return
+        now = time.monotonic()
+        if now - self._queue_depth_logged_at < self.QUEUE_DEPTH_LOG_INTERVAL_S:
+            return
+        logger.info(
+            "fetch queue depth: %d pending now, %d peak over the last %ds "
+            "(all-time peak=%d, inflight=%d)",
+            depth,
+            self._queue_depth_high_water,
+            self.QUEUE_DEPTH_LOG_INTERVAL_S,
+            self._peak_pending,
+            self.coordinator.active_count(),
+        )
+        self._queue_depth_logged_at = now
+        self._queue_depth_high_water = depth
 
     # --------- server loop
 
