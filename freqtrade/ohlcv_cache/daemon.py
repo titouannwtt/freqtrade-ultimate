@@ -1514,7 +1514,9 @@ class Daemon:
             served_from = "fetch"
 
         data_rows = series.slice_range(start_ms, end_ms)
-        if not data_rows and errors:
+        # `.size`, jamais `not data_rows` : slice_range rend un ndarray, dont la
+        # valeur de verite leve ValueError des qu'il a plus d'un element.
+        if data_rows.size == 0 and errors:
             if shed_errors > 0:
                 err_type = "RateLimitShed"
                 err_msg = f"{errors} chunk(s) shed during backoff, no cached data"

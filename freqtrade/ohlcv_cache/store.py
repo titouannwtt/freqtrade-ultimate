@@ -65,13 +65,25 @@ class CandleSeries:
     def align_up(self, ts_ms: int) -> int:
         return -(-ts_ms // self.tf_ms) * self.tf_ms
 
-    def slice_range(self, start_ms: int, end_ms_exclusive: int) -> list[list]:
-        """Return candles with start_ms <= ts < end_ms_exclusive as list-of-lists."""
+    def slice_range(self, start_ms: int, end_ms_exclusive: int):
+        """Candles with start_ms <= ts < end_ms_exclusive, as a numpy VIEW-COPY.
+
+        ⚠️ Returns an ndarray, NOT a list-of-lists. The `.tolist()` this used to
+        end with was, after orjson landed, the single largest CPU consumer in the
+        daemon: 64% of a profile of 2034 samples, against 18.5% for the whole
+        serializer. Converting 5000x6 float64 into 30 000 boxed Python floats,
+        only for the serializer to walk them straight back out, is pure waste.
+        orjson serializes the ndarray directly (`OPT_SERIALIZE_NUMPY`).
+
+        ⚠️ CALLERS: an ndarray has no truth value. Test emptiness with `.size`,
+        never with `if not rows`, which raises ValueError on more than one element.
+        Both call sites live in `daemon.py` (_handle_fetch).
+        """
         if len(self.candles) == 0:
-            return []
+            return self.candles[:0]
         ts = self.candles[:, 0]
         mask = (ts >= start_ms) & (ts < end_ms_exclusive)
-        return self.candles[mask].tolist()
+        return self.candles[mask]
 
     def merge(self, new_candles: list[list]) -> int:
         """Merge new candles into this series.
