@@ -19,9 +19,9 @@ from freqtrade.data.dataprovider import DataProvider
 def _dp(monkeypatch, clock):
     dp = DataProvider.__new__(DataProvider)
     # Name-mangled attributes: the class body writes them as __nodata_*.
-    setattr(dp, "_DataProvider__nodata_pending", {})
-    setattr(dp, "_DataProvider__nodata_pending_since", 0.0)
-    setattr(dp, "_DataProvider__nodata_last_flush", 0.0)
+    dp._DataProvider__nodata_pending = {}
+    dp._DataProvider__nodata_pending_since = 0.0
+    dp._DataProvider__nodata_last_flush = 0.0
     monkeypatch.setattr("time.monotonic", lambda: clock.t)
     return dp
 
@@ -108,4 +108,4 @@ def test_the_batch_empties_after_a_report(monkeypatch, caplog):
         dp._note_missing_data("AAA/USDC:USDC", "1h", "funding_rate")
         clock.t += dp.NODATA_BATCH_WINDOW_S + 1
         dp._note_missing_data("AAA/USDC:USDC", "1h", "funding_rate")
-    assert getattr(dp, "_DataProvider__nodata_pending") == {}
+    assert dp._DataProvider__nodata_pending == {}
