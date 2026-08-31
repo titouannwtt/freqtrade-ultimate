@@ -285,7 +285,24 @@ def _query_cache_daemons() -> dict:
                 "cache_hits": hits,
                 "cache_partial": stats.get("cache_partial", 0),
                 "cache_misses": stats.get("cache_misses", 0),
+                # Served-from-cache = strict hits + stale-while-revalidate + partial.
+                # SWR answers immediately from the store and merely schedules a
+                # background refresh, so counting it as a miss understated the cache
+                # by a factor of ~7 (13% reported against ~100% real). `hit_rate_pct`
+                # keeps the strict meaning for anyone already parsing it; the honest
+                # figure is `served_from_cache_pct`.
+                "cache_swr": stats.get("cache_swr", 0),
                 "hit_rate_pct": round(hits / total * 100, 1) if total > 0 else 0,
+                "served_from_cache_pct": (
+                    round(
+                        (hits + stats.get("cache_swr", 0) + stats.get("cache_partial", 0))
+                        / total
+                        * 100,
+                        2,
+                    )
+                    if total > 0
+                    else 0
+                ),
                 "fetch_errors": stats.get("fetch_errors", 0),
                 "series_count": stats.get("series_count", 0),
                 "pending_fetches": stats.get("pending_fetches", 0),

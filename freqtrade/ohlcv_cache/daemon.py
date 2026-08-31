@@ -2563,6 +2563,15 @@ class Daemon:
                 "active_clients": self.stats.active_clients,
                 "requests_total": self.stats.requests_total,
                 "cache_hits": self.stats.cache_hits,
+                # ⚠️ Served from cache too, and by far the largest branch (~86% of
+                # all requests). Omitting it made `hit_rate_pct` read 13% on a
+                # cache that actually answers ~100% of requests without touching
+                # the venue (106 misses out of 2 239 190). That gauge sent a whole
+                # investigation down the wrong path on 2026-08-31, hunting a cache
+                # problem that did not exist while the real wall was CPU-bound
+                # serialization. A metric that is merely incomplete is worse than
+                # one that is absent: it looks like an answer.
+                "cache_swr": self.stats.cache_swr,
                 "cache_partial": self.stats.cache_partial,
                 "cache_misses": self.stats.cache_misses,
                 "fetch_errors": self.stats.fetch_errors,

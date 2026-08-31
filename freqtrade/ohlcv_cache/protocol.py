@@ -83,13 +83,49 @@ class StateUpdateRequest:
     req_id: str = ""
 
 
+try:  # pragma: no cover - exercised by whichever branch the host provides
+    import orjson
+
+    _ORJSON_NUMPY = orjson.OPT_SERIALIZE_NUMPY
+except ImportError:  # pragma: no cover
+    orjson = None  # type: ignore[assignment]
+    _ORJSON_NUMPY = 0
+
+
 def dumps(obj: Any) -> bytes:
+    """Serialize one NDJSON frame.
+
+    ⚠️ This is the hottest path in the daemon, by a wide margin. Profiled on a
+    45-bot fleet (py-spy, 3055 samples): 57% of the daemon's CPU sat in
+    `json.encoder.iterencode` here, plus 32% in the `.tolist()` that fed it, i.e.
+    ~89% of a saturated single asyncio thread (measured at 85.7% of one core).
+    The cause is volume, not inefficiency: bots ask for 5000 candles per refresh,
+    so a single response is ~298 KB and the daemon encodes ~12 MB/s.
+
+    That CPU wall, NOT the exchange rate limit and NOT a cache miss, is what made
+    the `candles` phase take 13-17s median and occasionally trip `CacheTimedOut`.
+    Worth stating plainly because the obvious suspect was wrong: the OHLCV cache
+    serves ~100% of requests without touching the venue (106 misses out of
+    2 239 190). The 13% "hit rate" the API reports is a broken gauge, not a
+    broken cache. See `stats` handling in daemon.py.
+
+    orjson serializes a numpy array directly, skipping the intermediate Python
+    list entirely: measured here at 24.7ms -> 2.1ms for a 5000x6 float64 block,
+    a 11.7x saving on ~89% of the load. The bytes it emits are ordinary JSON, so
+    clients parse them unchanged: this is a daemon-side change only, no bot
+    restart required.
+
+    The stdlib fallback is deliberate, not defensive clutter: this fork is public
+    and must keep working for someone who has two bots and no orjson.
+    """
     if hasattr(obj, "__dataclass_fields__"):
         payload = asdict(obj)
     elif isinstance(obj, dict):
         payload = obj
     else:
         raise TypeError(f"Cannot serialize {type(obj)!r}")
+    if orjson is not None:
+        return orjson.dumps(payload, option=_ORJSON_NUMPY) + b"\n"
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
