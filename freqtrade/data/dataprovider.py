@@ -52,6 +52,12 @@ class DataProvider:
         self.__cached_pairs: dict[PairWithTimeframe, tuple[DataFrame, datetime]] = {}
         self.__cached_pairs_lock = threading.Lock()
         self.__last_stale_warning: dict[PairWithTimeframe, datetime] = {}
+        # Empty-dataframe reporting: ONE grouped line per batch, not one per pair.
+        # Keyed by (timeframe, candle_type) so a missing funding_rate feed and a
+        # missing OHLCV feed never end up folded into the same sentence.
+        self.__nodata_pending: dict[tuple[str, str], set[str]] = {}
+        self.__nodata_pending_since: float = 0.0
+        self.__nodata_last_flush: float = 0.0
         self.__slice_index: dict[str, int] = {}
         self.__slice_date: datetime | None = None
 
@@ -428,8 +434,59 @@ class DataProvider:
                 cutoff_date = timeframe_to_prev_date(timeframe, self.__slice_date)
                 data = data.loc[data["date"] < cutoff_date]
         if len(data) == 0:
-            logger.warning(f"No data found for ({pair}, {timeframe}, {candle_type}).")
+            self._note_missing_data(pair, str(timeframe), str(candle_type))
         return data
+
+    # One grouped report at most this often (seconds).
+    NODATA_REPORT_INTERVAL_S = 3600
+    # Let a whole cycle contribute before the first report, otherwise the first line
+    # names a single pair and the rest stay silent behind its hourly throttle.
+    NODATA_BATCH_WINDOW_S = 60
+    # Cap the names printed; a line that wraps for a full screen is as unreadable as
+    # the flood it replaces.
+    NODATA_MAX_NAMES = 12
+
+    def _note_missing_data(self, pair: str, timeframe: str, candle_type: str) -> None:
+        """Record an empty dataframe, and report the batch as ONE line per feed.
+
+        Same reasoning as `IStrategy._note_outdated_pair`, applied to a different
+        symptom. Upstream warns once per (pair, timeframe, candle_type); on a
+        futures fleet whose venue publishes no funding rate for a whole family of
+        instruments, that is one line per pair per cycle forever. Measured here:
+        ~2400 of the warnings in a single log sample came from this one call site.
+
+        Grouping is keyed by FEED, not flattened into a single list: "no
+        funding_rate for 38 pairs" is a venue fact worth acting on, while a missing
+        OHLCV feed is a data problem. Merging them into one sentence would hide
+        both. Throttling stays time-based so a persistent gap keeps reporting.
+        """
+        import time
+
+        now_ts = time.monotonic()
+        if not self.__nodata_pending:
+            self.__nodata_pending_since = now_ts
+        self.__nodata_pending.setdefault((timeframe, candle_type), set()).add(pair)
+
+        if now_ts - self.__nodata_pending_since < self.NODATA_BATCH_WINDOW_S:
+            return
+        if (
+            self.__nodata_last_flush
+            and now_ts - self.__nodata_last_flush < self.NODATA_REPORT_INTERVAL_S
+        ):
+            return
+
+        for (tf, ct), pairs in sorted(self.__nodata_pending.items()):
+            names = sorted(pairs)
+            shown = names[: self.NODATA_MAX_NAMES]
+            listed = ", ".join(shown)
+            hidden = len(names) - len(shown)
+            if hidden > 0:
+                listed += f", and {hidden} more"
+            logger.warning(
+                "No data found for %d pair(s) on (%s, %s): %s", len(names), tf, ct, listed
+            )
+        self.__nodata_pending = {}
+        self.__nodata_last_flush = now_ts
 
     def get_analyzed_dataframe(self, pair: str, timeframe: str) -> tuple[DataFrame, datetime]:
         """
