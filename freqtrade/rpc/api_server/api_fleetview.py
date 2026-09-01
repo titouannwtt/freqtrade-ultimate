@@ -22,6 +22,8 @@ before acting, so a stale UI can never trigger a wrong operation:
 """
 
 import base64
+import gzip
+import hashlib
 import json
 import logging
 import sqlite3
@@ -33,11 +35,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
 
 from freqtrade.rpc.api_server.deps import get_config
+from freqtrade.rpc.api_server.ui_static import accepted_encodings, etag_matches
 
 
 logger = logging.getLogger(__name__)
@@ -846,3 +849,225 @@ def fleetview_exposure(config=Depends(get_config)):
         data["age_s"] = None
         data["stale"] = None
     return data
+
+
+# ---------------------------------------------------------------------------
+# Fleet-wide profit-history aggregate (read-only SQLite, no HTTP fan-out)
+# ---------------------------------------------------------------------------
+#
+# The per-bot GET /profit_history is already incremental, but the dashboard
+# multiplies it by ~45 (14.7 MB measured on a real HAR, and 45 slots in a
+# 6-connections-per-host browser queue). This endpoint answers for the whole
+# fleet in ONE request, decimated server-side: a 900 px curve has no use for
+# 9700 points, and that is exactly where the weight is.
+#
+# Deployment note: only the bot that SERVES the dashboard needs this code, so
+# adopting it costs one restart, not 45 (grouped restarts trigger Hyperliquid
+# 429 storms).
+
+# Target number of points per bot after server-side decimation.
+PH_DEFAULT_POINTS = 300
+PH_MAX_POINTS = 2000
+# Whole-request wall-clock budget; bots not reached in time are reported, never
+# silently dropped.
+PH_BUDGET_S = 8.0
+PH_DB_TIMEOUT_S = 3.0
+# Filenames in the database directory that are never a live bot ledger.
+PH_DB_SKIP_TOKENS = ("backup", "-bak", ".bak", "replay", "tmp", "temp")
+
+
+def _ph_error_code(exc: BaseException) -> str:
+    """Normalised, leak-free error code.
+
+    Never returns a path or a raw exception message: those can carry a db_url
+    with credentials.
+    """
+    if isinstance(exc, sqlite3.OperationalError):
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            return "db_locked"
+        if "no such table" in msg:
+            return "no_history_table"
+        if "unable to open" in msg or "not a database" in msg:
+            return "db_corrupt"
+        return "db_error"
+    if isinstance(exc, sqlite3.DatabaseError):
+        return "db_corrupt"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    return "db_error"
+
+
+def _ph_read_one(db_path: str, since_ms: int, points: int) -> dict:
+    """Decimated profit_history for one SQLite ledger. Raises on failure."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=PH_DB_TIMEOUT_S)
+    try:
+        cur = con.cursor()
+        params: list[Any] = []
+        where = ""
+        if since_ms > 0:
+            cutoff = datetime.fromtimestamp(since_ms / 1000, tz=UTC).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            )
+            where = "WHERE timestamp > ?"
+            params.append(cutoff)
+        cur.execute(f"SELECT COUNT(*), MAX(timestamp) FROM profit_history {where}", params)
+        total, last_ts = cur.fetchone()
+        total = total or 0
+        if total == 0:
+            return {"points": [], "total": 0, "last_ts": None}
+        stride = max(1, -(-total // max(1, points)))  # ceil division
+        # Keep every stride-th sample plus the newest one, so the curve's head is
+        # always exact even when the tail is thinned.
+        cur.execute(
+            "SELECT timestamp, profit_closed_abs, profit_open_abs, open_trades FROM ("
+            "  SELECT timestamp, profit_closed_abs, profit_open_abs, open_trades,"
+            "         ROW_NUMBER() OVER (ORDER BY timestamp ASC) AS rn"
+            f"  FROM profit_history {where}"
+            ") WHERE rn % ? = 0 OR rn = 1 OR rn = ? ORDER BY timestamp ASC",
+            [*params, stride, total],
+        )
+        out = []
+        for ts, closed, open_abs, n_open in cur.fetchall():
+            ms = _ph_ts_to_ms(ts)
+            if ms is None:
+                continue
+            out.append([ms, closed, open_abs, n_open])
+        return {"points": out, "total": total, "last_ts": _ph_ts_to_ms(last_ts)}
+    finally:
+        con.close()
+
+
+def _ph_ts_to_ms(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, int | float):
+        return int(raw)
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1000)
+
+
+def _ph_orphan_ledgers(running: list[dict]) -> list[dict]:
+    """Ledgers on disk with no running process: a stopped bot still has a curve.
+
+    Only looks in the directories already used by running bots, so a machine
+    with two bots behaves exactly like one with forty-five.
+    """
+    claimed = {str(Path(b["db_path"]).resolve()) for b in running if b.get("db_path")}
+    dirs = {Path(b["db_path"]).parent for b in running if b.get("db_path")}
+    out: list[dict] = []
+    for directory in dirs:
+        try:
+            candidates = sorted(directory.glob("*.sqlite"))
+        except OSError:
+            continue
+        for path in candidates:
+            resolved = str(path.resolve())
+            if resolved in claimed:
+                continue
+            lowered = path.name.lower()
+            if any(tok in lowered for tok in PH_DB_SKIP_TOKENS):
+                continue
+            out.append({"bot_name": path.stem, "db_path": str(path), "state": "stopped"})
+    return out
+
+
+def _ph_fleet_payload(since_ms: int, points: int) -> dict:
+    running = discover_bots()
+    entries = [
+        {
+            # WHITELIST: only these keys ever leave discover_bots(), which also
+            # collects api_pw / private_key / wallet.
+            "bot_name": b["bot_name"],
+            "db_path": b["db_path"],
+            "port": b["port"],
+            "dry_run": b["dry_run"],
+            "strategy": b["strategy"],
+            "state": "running",
+        }
+        for b in running
+        if b.get("db_path")
+    ]
+    for orphan in _ph_orphan_ledgers(running):
+        entries.append({**orphan, "port": None, "dry_run": None, "strategy": None})
+
+    deadline = time.monotonic() + PH_BUDGET_S
+    bots: list[dict] = []
+    errors: dict[str, str] = {}
+    truncated = False
+    for entry in sorted(entries, key=lambda e: e["bot_name"]):
+        name = entry["bot_name"]
+        if time.monotonic() > deadline:
+            truncated = True
+            errors[name] = "budget_exhausted"
+            continue
+        db_path = entry["db_path"]
+        if not db_path or not Path(db_path).exists():
+            errors[name] = "db_missing"
+            continue
+        try:
+            res = _ph_read_one(db_path, since_ms, points)
+        except Exception as exc:  # one bad ledger must not kill the fleet
+            errors[name] = _ph_error_code(exc)
+            logger.warning("fleet profit_history: %s -> %s", name, errors[name])
+            continue
+        bots.append(
+            {
+                "bot_name": name,
+                "port": entry["port"],
+                "dry_run": entry["dry_run"],
+                "strategy": entry["strategy"],
+                "state": entry["state"],
+                "length": len(res["points"]),
+                "total": res["total"],
+                "last_ts": res["last_ts"],
+                "data": res["points"],
+            }
+        )
+    generation = "-".join(f"{b['bot_name']}:{b['last_ts']}:{b['total']}" for b in bots)
+    # Not a security primitive: a change detector for conditional requests.
+    digest = hashlib.blake2s(generation.encode(), digest_size=8).hexdigest()
+    etag = f'"ph-{since_ms}-{points}-{digest}"'
+    return {
+        "generated_at": time.time(),
+        "since": since_ms,
+        "points": points,
+        "bot_count": len(bots),
+        "truncated": truncated,
+        "etag": etag,
+        "bots": bots,
+        "errors": errors,
+    }
+
+
+@router.get("/fleetview/profit_history", tags=["FleetView"])
+def fleetview_profit_history(
+    request: Request,
+    since: int = Query(0, ge=0, description="Only samples strictly after this timestamp (ms)"),
+    points: int = Query(
+        PH_DEFAULT_POINTS, ge=2, le=PH_MAX_POINTS, description="Target points per bot"
+    ),
+):
+    """Decimated profit-history curves for every local bot, in one call.
+
+    Reads each bot's SQLite ledger read-only (no exchange call, no HTTP fan-out).
+    A stopped bot whose ledger is readable is returned with ``state="stopped"``;
+    any per-bot failure lands in ``errors`` as a normalised code and never
+    aborts the response.
+    """
+    payload = _ph_fleet_payload(since, points)
+    etag = payload["etag"]
+    if etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if len(body) >= 1024 and "gzip" in accepted_encodings(request.headers.get("accept-encoding")):
+        body = gzip.compress(body, 6)
+        headers["Content-Encoding"] = "gzip"
+    return Response(content=body, media_type="application/json", headers=headers)
