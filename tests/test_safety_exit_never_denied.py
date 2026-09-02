@@ -114,31 +114,12 @@ def _has_safety_guard(body: str) -> bool:
 # passer le test : corrigez la stratégie. Chaque nom ici est une position qui,
 # le jour où elle passe sous l'eau, ne pourra pas être coupée autrement qu'en
 # fermeture on-chain (incident coppock_keltner_short_v2, 2026-09-02).
-DETTE_CONNUE = {
-    "HippoDCA_hyp_dynv1_short_sharpe_bearE.py",
-    "HippoDCA_hyp_dynv1_short_sharpe_deepF.py",
-    "HippoDCA_hyp_dynv1_short_sharpe_divA.py",
-    "HippoDCA_hyp_dynv1_short_sharpe_effC.py",
-    "HippoDCA_hyp_dynv1_short_sharpe_v2.py",
-    "ath_sroc_fade_short_v2.py",
-    "edge_strategy137_v1.py",
-    "edge_strategy146_v2_dual_v1.py",
-    "edge_strategy146_v2_mirror_v0.py",
-    "edge_strategy169_v2.py",
-    "edge_strategy169_v2_dual_v1.py",
-    "edge_strategy169_v2_mirror_v0.py",
-    "ema_slope_short_v2.py",
-    "fading_bounce_short_v2.py",
-    "hippo_original.py",
-    "hippo_original_btc.py",
-    "keltner_rsi_breakdown_short_v2.py",
-    "obv_divergence_fade_v1.py",
-    "phoenix_rsi.py",
-    "rsi_keltner_fade_v2.py",
-    "sma_repulse_fade_short_v2.py",
-    "wavetrend_fade_v1.py",
-    "wt_divergence_short_v2.py",
-}
+DETTE_CONNUE: set[str] = set()
+# ✅ VIDE, et c'est le but. Les 23 strategies deployees qui pouvaient refuser une
+# sortie de securite ont ete corrigees le 2026-09-02. Cette liste n'existe plus que
+# comme soupape : si une dette devait reapparaitre, elle serait NOMMEE ici plutot
+# que de rendre le test rouge en permanence. Elle ne doit que retrecir, jamais
+# grossir pour faire passer un test. Corrigez la strategie.
 
 
 @pytest.mark.parametrize("path", list(_deployed_strategy_files()), ids=lambda p: p.name)
