@@ -8,10 +8,13 @@ import pytest
 class FakeDaemon:
     """The two handlers under test, lifted out of the daemon's socket plumbing."""
 
-    def __init__(self):
-        from freqtrade.ohlcv_cache.daemon import Daemon
+    def __init__(self, ports=None):
+        from freqtrade.ohlcv_cache.daemon import BotRegistry, Daemon
 
         self._summaries = {}
+        self.registry = BotRegistry()
+        for bot_id, port in (ports or {}).items():
+            self.registry.register(bot_id, {"api_port": port}, conn_id=hash(bot_id))
         self._put = Daemon._handle_summary_put.__get__(self)
         self._get = Daemon._handle_summary_get.__get__(self)
         self._evict_stale_summaries = Daemon._evict_stale_summaries.__get__(self)
@@ -131,6 +134,45 @@ def test_stats_counts_unknown_profit_as_a_draw():
 
     src = inspect.getsource(RPC._rpc_stats)
     assert "if trade.close_profit is None:" in src
+
+
+def test_the_snapshot_carries_the_port_each_bot_serves_on():
+    """Breaks the chicken-and-egg: a client knows the port before it knows the name.
+
+    The digest is indexed by the name a bot *reports*, learned only by calling that bot.
+    Publishing the registered API port lets a cold browser match its own bots to their
+    digest on the first tick, instead of fanning out to discover the names first.
+    """
+    d = FakeDaemon(ports={"alpha": 9501})
+    d.put("alpha", {"state": "running"})
+    assert d.get()["bots"]["alpha"]["api_port"] == 9501
+
+
+def test_a_bot_without_an_api_port_omits_the_field_rather_than_publishing_zero():
+    """Absent beats wrong: a 0 would match every client that has no port either."""
+    d = FakeDaemon(ports={"alpha": 0})
+    d.put("alpha", {"state": "running"})
+    assert "api_port" not in d.get()["bots"]["alpha"]
+
+
+def test_a_digest_from_a_bot_absent_from_the_registry_still_comes_back():
+    """Graceful degradation: the digest outlives the connection that registered it."""
+    d = FakeDaemon()
+    d.put("orphan", {"state": "running"})
+    entry = d.get()["bots"]["orphan"]
+    assert entry["state"] == "running"
+    assert "api_port" not in entry
+
+
+def test_the_port_comes_from_the_registry_not_from_the_pushed_digest():
+    """Load-bearing: sourcing it from the digest would force a fleet-wide restart.
+
+    The registry is filled when a bot connects, so the field appears for bots that are
+    already running. Grouped restarts on this fleet trigger 429 bursts at the venue.
+    """
+    d = FakeDaemon(ports={"alpha": 9501})
+    d.put("alpha", {"state": "running", "api_port": 1234})  # a bot lying about its port
+    assert d.get()["bots"]["alpha"]["api_port"] == 9501
 
 
 def _retention(monkeypatch, seconds):

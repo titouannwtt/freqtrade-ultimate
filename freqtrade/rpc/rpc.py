@@ -2233,6 +2233,11 @@ class RPC:
         entry carries `age_s`, because the digests are pushed on each bot's own cycle:
         a client must be able to distinguish a live figure from one left behind by a bot
         that has since stopped.
+
+        Entries also carry `api_port` when the daemon's registry knows it, so a client can
+        match a bot to its digest by port — which it knows from its own settings — instead
+        of by the reported name, which it can only learn by calling that bot. The field is
+        omitted, never zeroed, when the port is unknown.
         """
         try:
             from freqtrade.ohlcv_cache.defaults import default_socket_path

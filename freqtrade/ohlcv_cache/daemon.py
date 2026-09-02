@@ -853,6 +853,16 @@ class BotRegistry:
             return None
         return self._bots.pop(bot_id, None)
 
+    def api_port_of(self, bot_id: str) -> int:
+        """API port a bot registered with, or 0 when unknown / no API server.
+
+        Read from the REGISTRY, filled at connection time — not from the digest a bot
+        pushes. That is the whole point: enriching the digest would force the fleet to
+        restart to publish the new field, and grouped restarts trigger 429 bursts.
+        """
+        entry = self._bots.get(bot_id)
+        return int(entry.api_port) if entry else 0
+
     def get_fleet_status(self) -> list[dict]:
         now = time.monotonic()
         result = []
@@ -2479,7 +2489,17 @@ class Daemon:
             age = now - entry["ts"]
             if max_age is not None and age > max_age:
                 continue
-            bots[bot_id] = {**entry["data"], "age_s": round(age, 2)}
+            item = {**entry["data"], "age_s": round(age, 2)}
+            # The digest is indexed by the name a bot reports, which a browser only learns
+            # by calling that bot — a chicken-and-egg that defeats the decimation on a cold
+            # load. The port it serves on is known client-side from the very first tick, so
+            # publishing it here lets a client match without asking anyone.
+            api_port = self.registry.api_port_of(bot_id)
+            if api_port:
+                # Absent beats wrong: a bot with no API server would otherwise publish a 0
+                # that every portless client could match on.
+                item["api_port"] = api_port
+            bots[bot_id] = item
         return {
             "req_id": req.get("req_id", ""),
             "ok": True,
