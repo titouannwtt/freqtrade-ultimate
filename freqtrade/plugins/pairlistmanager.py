@@ -127,6 +127,16 @@ class PairListManager(LoggingMixin):
         """Get list of loaded Pairlist Handler names"""
         return [p.name for p in self._pairlist_handlers]
 
+    @property
+    def pairlist_handlers(self) -> list[IPairList]:
+        """List of instantiated Pairlist Handlers (read-only copy)"""
+        return list(self._pairlist_handlers)
+
+    @property
+    def tickers_needed(self) -> bool:
+        """Whether any configured Pairlist Handler needs ticker data"""
+        return self._tickers_needed
+
     def short_desc(self) -> list[dict]:
         """List of short_desc for each Pairlist Handler"""
         return [{p.name: p.short_desc()} for p in self._pairlist_handlers]

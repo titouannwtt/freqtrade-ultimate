@@ -31,10 +31,12 @@ from tests.conftest import (
 )
 
 
-# Exclude RemotePairList and PairInformationFilter from tests.
+# Exclude RemotePairList, PairInformationFilter and MultiMarketPairList from tests.
 # They have mandatory parameters, and require special handling, which happens in explicit tests.
 TESTABLE_PAIRLISTS = [
-    p for p in AVAILABLE_PAIRLISTS if p not in ["RemotePairList", "PairInformationFilter"]
+    p
+    for p in AVAILABLE_PAIRLISTS
+    if p not in ["RemotePairList", "PairInformationFilter", "MultiMarketPairList"]
 ]
 
 

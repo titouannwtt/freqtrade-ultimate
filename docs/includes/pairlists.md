@@ -6,7 +6,7 @@ In your configuration, you can use Static Pairlist (defined by the [`StaticPairL
 
 Additionally, [`AgeFilter`](#agefilter), [`DelistFilter`](#delistfilter), [`PrecisionFilter`](#precisionfilter), [`PriceFilter`](#pricefilter), [`ShuffleFilter`](#shufflefilter), [`SpreadFilter`](#spreadfilter) and [`VolatilityFilter`](#volatilityfilter) act as Pairlist Filters, removing certain pairs and/or moving their positions in the pairlist.
 
-If multiple Pairlist Handlers are used, they are chained and a combination of all Pairlist Handlers forms the resulting pairlist the bot uses for trading and backtesting. Pairlist Handlers are executed in the sequence they are configured. You can define either `StaticPairList`, `VolumePairList`, `ProducerPairList`, `RemotePairList`, `MarketCapPairList`, `PercentChangePairList` or `CrossMarketPairList` as the starting Pairlist Handler.
+If multiple Pairlist Handlers are used, they are chained and a combination of all Pairlist Handlers forms the resulting pairlist the bot uses for trading and backtesting. Pairlist Handlers are executed in the sequence they are configured. You can define either `StaticPairList`, `VolumePairList`, `ProducerPairList`, `RemotePairList`, `MarketCapPairList`, `PercentChangePairList`, `CrossMarketPairList` or `MultiMarketPairList` as the starting Pairlist Handler.
 
 Inactive markets are always removed from the resulting pairlist. Explicitly blacklisted pairs (those in the `pair_blacklist` configuration setting) are also always removed from the resulting pairlist.
 
@@ -27,6 +27,7 @@ You may also use something like `.*DOWN/BTC` or `.*UP/BTC` to exclude leveraged 
 * [`RemotePairList`](#remotepairlist)
 * [`MarketCapPairList`](#marketcappairlist)
 * [`CrossMarketPairList`](#crossmarketpairlist)
+* [`MultiMarketPairList`](#multimarketpairlist)
 * [`AgeFilter`](#agefilter)
 * [`DelistFilter`](#delistfilter)
 * [`FullTradesFilter`](#fulltradesfilter)
@@ -411,6 +412,64 @@ Coins like 1000PEPE/USDT or KPEPE/USDT:USDT are detected on a best effort basis,
 Generate or filter pairs based of their availability on the opposite market.
 
 The `pairs_exist_on` setting defines whether the pairs should exists on both spot and futures market (`both_markets`) or only exist on the specified trading mode (`current_market_only`). By default, the plugin will be in `both_markets` setting, which means whitelisted pairs have to exists on both spot and futures markets.
+
+#### MultiMarketPairList
+
+`MultiMarketPairList` combines several independent pairlist chains ("markets"), each with its own generator/filters and its own scope, into a single ordered union whitelist. This allows a single bot to trade several unrelated markets at once, for example crypto perps on the main exchange together with synthetic stocks or commodities on a Hyperliquid HIP-3 DEX, each keeping its own pairlist logic.
+
+```json
+"pairlists": [
+    {
+        "method": "MultiMarketPairList",
+        "markets": [
+            {
+                "name": "crypto",
+                "scope": "main",
+                "pairlists": [
+                    {"method": "MarketCapPairList", "number_assets": 60, "max_rank": 60, "refresh_period": 86400}
+                ]
+            },
+            {
+                "name": "stocks",
+                "scope": "hip3:xyz",
+                "pair_whitelist": ["XYZ-NVDA/USDC:USDC", "XYZ-GOOGL/USDC:USDC"],
+                "pairlists": [{"method": "StaticPairList"}]
+            },
+            {
+                "name": "mat",
+                "scope": "hip3:xyz",
+                "pair_whitelist": ["XYZ-GOLD/USDC:USDC"],
+                "pairlists": [{"method": "StaticPairList"}]
+            }
+        ]
+    }
+]
+```
+
+`markets` is an ordered list of markets. Each entry requires:
+
+* `name`: a unique identifier for the market (used in logs, `market_of()` and `market_of_pair()`).
+* `pairlists`: a self-contained pairlist chain for this market, following the same rules as the top-level `pairlists` setting - its first entry must be a Pairlist generator (e.g. `StaticPairList`, `VolumePairList`, `MarketCapPairList`), optionally followed by filters.
+
+Each entry optionally accepts:
+
+* `scope`: restricts which pairs this market's chain is allowed to produce. One of `all` (default), `main` (pairs on the main/default exchange, i.e. not a HIP-3 DEX) or `hip3:<dex>` (pairs on the named HIP-3 DEX, e.g. `hip3:xyz`). The scope is enforced right after the market's generator runs (before its filters), so a dynamic generator (e.g. `MarketCapPairList`) can never leak a pair from another market's scope, and a scoped `StaticPairList` is never polluted by another market's pairs.
+* `pair_regex`: an additional regular expression applied to the pair symbol, combined with `scope`.
+* `pair_whitelist` / `pair_blacklist`: override `exchange.pair_whitelist`/`exchange.pair_blacklist` for this market's chain only. When omitted, the market's chain uses the bot's regular `exchange.pair_whitelist`/`pair_blacklist`.
+
+Resulting whitelist rules:
+
+* The final whitelist is the ordered union of every market's resulting whitelist, in the order `markets` are declared.
+* If the same pair is produced by more than one market, it is kept in the **first** market that produced it and dropped from the later ones.
+* The bot-level `exchange.pair_blacklist` always applies to the final union, regardless of any per-market `pair_blacklist` override.
+* Each market's generator respects its own `refresh_period`, independently of the other markets.
+
+HIP-3 DEX detection uses the exchange's market metadata (`info.hip3` / `info.dex`) when available, and falls back to the `<DEX>-` symbol prefix convention (e.g. `XYZ-AAPL/USDC:USDC` belongs to DEX `xyz`) when it isn't.
+
+A strategy can find out which market a pair belongs to without holding a reference to the pairlist manager, using `market_of_pair(config, pair)` from `freqtrade.plugins.pairlist.MultiMarketPairList`. It classifies a pair purely from the `MultiMarketPairList` configuration: a pair listed in a market's static `pair_whitelist` belongs to that market; otherwise the first market whose `scope` (and `pair_regex`) matches wins; otherwise it returns `None`.
+
+!!! Warning "Backtesting"
+    `MultiMarketPairList` does not support backtesting, since its markets may combine generators with very different backtesting characteristics (e.g. biased vs. unbiased). Use it in dry-run/live only.
 
 #### AgeFilter
 
