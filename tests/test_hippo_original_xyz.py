@@ -57,6 +57,13 @@ XYZ_CONFIGS = {
 }
 
 
+def _config_path(name: str) -> Path:
+    """Config vivante dans live_configs/, sinon archivée dans live_configs/_retired/
+    (les deux bots ont été fusionnés dans hippo_original_multi le 2026-09-05)."""
+    live = LIVE_CONFIGS_DIR / name
+    return live if live.is_file() else LIVE_CONFIGS_DIR / "_retired" / name
+
+
 def _load_strategy(mocker, testdatadir, strategy_name):
     conf = get_default_conf(testdatadir)
     conf["strategy_path"] = str(STRATEGY_DIR)
@@ -146,7 +153,7 @@ def test_isomorphisme_avec_hippo_original(mocker, testdatadir, strategy_name, da
 
 @pytest.mark.parametrize("config_name,strategy_name", XYZ_CONFIGS.items())
 def test_configs_xyz_valides(config_name, strategy_name):
-    cfg_path = LIVE_CONFIGS_DIR / config_name
+    cfg_path = _config_path(config_name)
     assert cfg_path.is_file()
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
 
@@ -180,7 +187,10 @@ def test_configs_xyz_valides(config_name, strategy_name):
 def test_les_deux_ports_xyz_sont_distincts():
     ports = {}
     for name in XYZ_CONFIGS:
-        cfg = json.loads((LIVE_CONFIGS_DIR / name).read_text(encoding="utf-8"))
+        path = _config_path(name)
+        if path.parent.name == "_retired":
+            pytest.skip("configs archivées : les ports ne sont plus réservés")
+        cfg = json.loads(path.read_text(encoding="utf-8"))
         ports[name] = cfg["api_server"]["listen_port"]
     assert len(set(ports.values())) == len(ports), ports
 
