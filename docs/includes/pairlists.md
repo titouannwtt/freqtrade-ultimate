@@ -453,9 +453,12 @@ The `pairs_exist_on` setting defines whether the pairs should exists on both spo
 
 Each entry optionally accepts:
 
-* `scope`: restricts which pairs this market's chain is allowed to produce. One of `all` (default), `main` (pairs on the main/default exchange, i.e. not a HIP-3 DEX) or `hip3:<dex>` (pairs on the named HIP-3 DEX, e.g. `hip3:xyz`). The scope is enforced right after the market's generator runs (before its filters), so a dynamic generator (e.g. `MarketCapPairList`) can never leak a pair from another market's scope, and a scoped `StaticPairList` is never polluted by another market's pairs.
-* `pair_regex`: an additional regular expression applied to the pair symbol, combined with `scope`.
-* `pair_whitelist` / `pair_blacklist`: override `exchange.pair_whitelist`/`exchange.pair_blacklist` for this market's chain only. When omitted, the market's chain uses the bot's regular `exchange.pair_whitelist`/`pair_blacklist`.
+* `scope`: restricts which pairs this market's chain is allowed to produce. One of `all` (default), `main` (pairs on the main/default exchange, i.e. not a HIP-3 DEX) or `hip3:<dex>` (pairs on the named HIP-3 DEX, e.g. `hip3:xyz`). The scope is enforced right after the market's generator runs (before its filters), so a dynamic generator (e.g. `MarketCapPairList`) can never leak a pair from another market's scope, and a scoped `StaticPairList` is never polluted by another market's pairs. **When `exchange.hip3_dexes` is set, every `hip3:<dex>` scope must name a DEX listed there** - an undeclared DEX raises an error at startup instead of silently producing an empty market forever (Hyperliquid rejects any HIP-3 DEX absent from `hip3_dexes` as "not tradable").
+* `pair_regex`: an additional regular expression applied to the pair symbol, combined with `scope`. Matched case-insensitively with `re.search` (i.e. unanchored - it does not need to match the whole symbol), unlike the wildcards used by `exchange.pair_blacklist`.
+* `pair_whitelist`: overrides `exchange.pair_whitelist` for this market's chain only. **When omitted, the market's chain gets an empty whitelist**, not the bot's global one - a market that needs the global whitelist must set `inherit_global_whitelist: true` explicitly. A market whose first Pairlist Handler is `StaticPairList` **requires** its own `pair_whitelist` (or `inherit_global_whitelist: true`): otherwise the bot refuses to start, instead of silently running with an empty (or unexpectedly the whole global) whitelist.
+* `pair_blacklist`: adds to `exchange.pair_blacklist` for this market's chain - it can only narrow the market's own pairlist, never widen the final union: the bot-level `exchange.pair_blacklist` always re-applies to the union regardless of what any market's `pair_blacklist` says.
+* `inherit_global_whitelist` (bool, default `false`): opt-in to explicitly reuse `exchange.pair_whitelist` for a market with no `pair_whitelist` of its own.
+* `stale_grace_period` (seconds): see "Empty and failing markets" below.
 
 Resulting whitelist rules:
 
@@ -463,10 +466,20 @@ Resulting whitelist rules:
 * If the same pair is produced by more than one market, it is kept in the **first** market that produced it and dropped from the later ones.
 * The bot-level `exchange.pair_blacklist` always applies to the final union, regardless of any per-market `pair_blacklist` override.
 * Each market's generator respects its own `refresh_period`, independently of the other markets.
+* Tickers (when any market needs them) are fetched **once per refresh cycle** by the top-level pairlist manager and shared with every sub-manager - a market chain does not trigger its own `fetchTickers` call.
 
-HIP-3 DEX detection uses the exchange's market metadata (`info.hip3` / `info.dex`) when available, and falls back to the `<DEX>-` symbol prefix convention (e.g. `XYZ-AAPL/USDC:USDC` belongs to DEX `xyz`) when it isn't.
+HIP-3 DEX detection uses the exchange's market metadata (`info.hip3` / `info.dex`) when available, and falls back to the `<DEX>-` symbol prefix convention (e.g. `XYZ-AAPL/USDC:USDC` belongs to DEX `xyz`) when it isn't. A market confirmed as HIP-3 (`info.hip3` truthy) whose DEX name isn't exposed (`info.dex` missing/empty) never leaks into `main` - it falls back to the symbol prefix, or is excluded from every scope if it has none.
 
-A strategy can find out which market a pair belongs to without holding a reference to the pairlist manager, using `market_of_pair(config, pair)` from `freqtrade.plugins.pairlist.MultiMarketPairList`. It classifies a pair purely from the `MultiMarketPairList` configuration: a pair listed in a market's static `pair_whitelist` belongs to that market; otherwise the first market whose `scope` (and `pair_regex`) matches wins; otherwise it returns `None`.
+### Empty and failing markets
+
+A single market's problem never brings the whole whitelist (or the bot) down:
+
+* If a market's chain **raises** (network error, exchange down, a bug in a filter, ...), that market keeps its **last known whitelist** for this cycle (empty if it never had one), and the other markets keep refreshing normally. A throttled warning names the market and the error.
+* If a market's chain returns an **empty** pairlist after previously having a non-empty one, the previous pairlist is kept for up to `stale_grace_period` seconds (default: 3x that market's generator `refresh_period`, or 3600s if it has none) - useful when the cause is transient (e.g. a rate-limited ticker fetch, a CoinGecko outage). Past the grace period, the empty result is accepted as genuine, with a warning either way.
+
+Logs from a sub-market are prefixed with `[market:<name>]` (or `market:<name>` inside the `refresh_pairlist()` "Whitelist with N pairs" line) so they can be told apart; the per-market summary line is logged immediately (not throttled) whenever a market's pair count changes.
+
+A strategy can find out which market a pair belongs to without holding a reference to the pairlist manager, using `market_of_pair(config, pair)` from `freqtrade.plugins.pairlist.MultiMarketPairList`. It classifies a pair purely from the `MultiMarketPairList` configuration: a pair listed in a market's static `pair_whitelist` belongs to that market; otherwise the first market whose `scope` (and `pair_regex`) matches wins; otherwise it returns `None`. The pairlist handler's own `market_of(pair)` returns the market from the last generated whitelist, and falls back to `market_of_pair()` for a pair that isn't currently in the whitelist - notably an open position's pair re-injected by the bot after the pairlist was last refreshed. It also returns `None` when a pair cannot be classified at all.
 
 !!! Warning "Backtesting"
     `MultiMarketPairList` does not support backtesting, since its markets may combine generators with very different backtesting characteristics (e.g. biased vs. unbiased). Use it in dry-run/live only.

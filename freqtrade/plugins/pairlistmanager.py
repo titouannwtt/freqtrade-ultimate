@@ -59,6 +59,10 @@ class PairListManager(LoggingMixin):
         self._pipeline_snapshot: list[dict] = []
         self._check_backtest()
         self._not_expiring_cache: LRUCache = LRUCache(maxsize=1)
+        # Optional label prepended to this manager's log messages (e.g.
+        # "[market:crypto]" for a MultiMarketPairList sub-manager), so logs from
+        # several sub-managers can be told apart.
+        self._log_label: str | None = config.get("_pairlist_label")
 
         refresh_period = config.get("pairlist_refresh_period", 3600)
         LoggingMixin.__init__(self, logger, refresh_period)
@@ -155,11 +159,21 @@ class PairListManager(LoggingMixin):
             configs.append(config)
         return configs
 
-    @cached(FtTTLCache(maxsize=1, ttl=1800))
+    # maxsize > 1 is defense-in-depth: the cache key is `self`, so several
+    # PairListManager instances (e.g. MultiMarketPairList's sub-managers) sharing
+    # this class-level cache must not evict each other's entry. The normal path
+    # to avoid redundant fetchTickers() calls across sub-managers is passing an
+    # already-fetched `tickers` to refresh_pairlist() (see MultiMarketPairList).
+    @cached(FtTTLCache(maxsize=32, ttl=1800))
     def _get_cached_tickers(self) -> Tickers:
         return self._exchange.get_tickers()
 
-    def refresh_pairlist(self, only_first: bool = False, pairs: list[str] | None = None) -> None:
+    def refresh_pairlist(
+        self,
+        only_first: bool = False,
+        pairs: list[str] | None = None,
+        tickers: Tickers | None = None,
+    ) -> None:
         """
         Run pairlist through all configured Pairlist Handlers.
 
@@ -172,11 +186,15 @@ class PairListManager(LoggingMixin):
         :param pairs: Optional list of pairs to intersect with the generated pairlist.
             Only pairs present both in the generated list and this parameter are kept.
             Used in backtesting to filter out pairs with no available data.
+        :param tickers: Optional pre-fetched tickers to reuse instead of fetching (or
+            reading from cache) again. Used by MultiMarketPairList to fetch tickers
+            once per cycle and share them with every sub-manager that needs them,
+            instead of each one calling the exchange (or missing the cache) on its
+            own.
         """
-        # Tickers should be cached to avoid calling the exchange on each call.
-        tickers: dict = {}
-        if self._tickers_needed:
-            tickers = self._get_cached_tickers()
+        if tickers is None:
+            # Tickers should be cached to avoid calling the exchange on each call.
+            tickers = self._get_cached_tickers() if self._tickers_needed else {}
 
         # Generate the pairlist with first Pairlist Handler in the chain
         pairlist = self._pairlist_handlers[0].gen_pairlist(tickers)
@@ -223,7 +241,8 @@ class PairListManager(LoggingMixin):
             )
 
         self._pipeline_snapshot = snapshot
-        self.log_once(f"Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)
+        label = f"[{self._log_label}] " if self._log_label else ""
+        self.log_once(f"{label}Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)
 
         self._whitelist = pairlist
 

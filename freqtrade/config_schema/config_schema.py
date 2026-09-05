@@ -677,6 +677,54 @@ CONF_SCHEMA = {
                         "type": "string",
                         "enum": AVAILABLE_PAIRLISTS,
                     },
+                    "markets": {
+                        "description": (
+                            "MultiMarketPairList only: an ordered list of "
+                            "independent markets, each with its own scope and "
+                            "pairlist chain."
+                        ),
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "pairlists"],
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1},
+                                "scope": {
+                                    "type": "string",
+                                    "pattern": "^(all|main|hip3:[A-Za-z0-9_-]+)$",
+                                },
+                                "pair_regex": {"type": "string"},
+                                "pair_whitelist": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "pair_blacklist": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "inherit_global_whitelist": {"type": "boolean"},
+                                "stale_grace_period": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                },
+                                "pairlists": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "method": {
+                                                "type": "string",
+                                                "enum": AVAILABLE_PAIRLISTS,
+                                            },
+                                        },
+                                        "required": ["method"],
+                                    },
+                                },
+                            },
+                        },
+                    },
                 },
                 "required": ["method"],
             },

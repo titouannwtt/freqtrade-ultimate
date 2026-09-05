@@ -193,7 +193,101 @@ def test_market_of_fallback_sans_multimarket(mocker, testdatadir):
     for pair in strategy.MAT_PAIRS:
         assert strategy.market_of(pair) == "mat"
     assert strategy.market_of("ETH/USDC:USDC") == "crypto"
-    assert strategy.market_of("XYZ-UNKNOWN/USDC:USDC") == "crypto"
+    # Paire au prefixe HIP-3 absente des deux listes : NE DOIT JAMAIS recevoir
+    # les parametres crypto (bug corrige suite a l'audit du 2026-09-04). Deux
+    # candidats HIP-3 connus (stocks/mat) -> ambigu -> premier candidat par
+    # defaut pour ne pas planter une position deja ouverte, mais jamais
+    # "crypto", et confirm_trade_entry refuse toute NOUVELLE entree dessus
+    # (voir test_confirm_trade_entry_refuse_paire_hip3_ambigue).
+    assert strategy.market_of("XYZ-UNKNOWN/USDC:USDC") != "crypto"
+    assert strategy.market_of("XYZ-UNKNOWN/USDC:USDC") == "stocks"
+
+
+def test_market_of_hip3_pair_absente_config_multimarket(mocker, testdatadir):
+    """Meme garde que ci-dessus, mais avec une config MultiMarketPairList :
+    market_of_pair() resout deja les paires HIP-3 sans pair_whitelist statique
+    via le scope (le premier marche 'hip3:xyz' declare), donc jamais
+    "crypto" - _resolve_unclassified_hip3_pair n'est alors utile que si aucun
+    marche ne declare un scope HIP-3 du tout."""
+    conf = get_default_conf(testdatadir)
+    conf["strategy_path"] = str(STRATEGY_DIR)
+    conf["strategy"] = "hippo_original_multi"
+    conf["timeframe"] = "5m"
+    conf.pop("minimal_roi", None)
+    conf["pairlists"] = [
+        {
+            "method": "MultiMarketPairList",
+            "markets": [
+                {
+                    "name": "crypto",
+                    "scope": "main",
+                    "pairlists": [{"method": "MarketCapPairList"}],
+                },
+                {
+                    "name": "stocks",
+                    "scope": "hip3:xyz",
+                    "pair_whitelist": ["XYZ-NVDA/USDC:USDC"],
+                    "pairlists": [{"method": "StaticPairList"}],
+                },
+            ],
+        }
+    ]
+    patch_exchange(mocker)
+    strategy = StrategyResolver.load_strategy(conf)
+
+    # Absente de la pair_whitelist statique de "stocks", mais son scope
+    # (hip3:xyz) matche quand meme -> classee "stocks" par market_of_pair,
+    # jamais "crypto".
+    assert strategy.market_of("XYZ-UNKNOWN/USDC:USDC") == "stocks"
+
+
+def test_confirm_trade_entry_refuse_paire_hip3_ambigue(mocker, testdatadir):
+    """Une NOUVELLE entree sur une paire HIP-3 dont le marche est ambigu
+    (aucune pair_whitelist statique ne la couvre, et plusieurs marches HIP-3
+    sont declares) doit etre refusee par confirm_trade_entry, jamais
+    silencieusement acceptee avec des parametres crypto."""
+    strategy = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    assert (
+        strategy.confirm_trade_entry(
+            pair="XYZ-UNKNOWN/USDC:USDC",
+            order_type="limit",
+            amount=1.0,
+            rate=1.0,
+            time_in_force="GTC",
+            current_time=datetime.now(UTC),
+            entry_tag=None,
+            side="long",
+        )
+        is False
+    )
+    # Une paire correctement classee (crypto, ou HIP-3 couverte par une
+    # pair_whitelist statique) n'est pas concernee par cette garde.
+    assert (
+        strategy.confirm_trade_entry(
+            pair="ETH/USDC:USDC",
+            order_type="limit",
+            amount=1.0,
+            rate=1.0,
+            time_in_force="GTC",
+            current_time=datetime.now(UTC),
+            entry_tag=None,
+            side="long",
+        )
+        is True
+    )
+    assert (
+        strategy.confirm_trade_entry(
+            pair=strategy.STOCKS_PAIRS[0],
+            order_type="limit",
+            amount=1.0,
+            rate=1.0,
+            time_in_force="GTC",
+            current_time=datetime.now(UTC),
+            entry_tag=None,
+            side="long",
+        )
+        is True
+    )
 
 
 # ── (d) callbacks par trade ──────────────────────────────────────────────────
@@ -238,8 +332,24 @@ def test_min_roi_reached_crypto_aligne_sur_hippo_original(mocker, testdatadir):
     now = datetime.now(UTC)
 
     durations = [0, 5, 9, 10, 15, 29, 30, 35, 39, 40, 41, 120]
-    profits = [-0.01, 0.0, 0.004, 0.0049, 0.005, 0.006, 0.009, 0.0179, 0.018,
-               0.019, 0.0099, 0.01, 0.011, 0.0499, 0.05, 0.06]
+    profits = [
+        -0.01,
+        0.0,
+        0.004,
+        0.0049,
+        0.005,
+        0.006,
+        0.009,
+        0.0179,
+        0.018,
+        0.019,
+        0.0099,
+        0.01,
+        0.011,
+        0.0499,
+        0.05,
+        0.06,
+    ]
 
     for dur in durations:
         for profit in profits:
@@ -304,9 +414,7 @@ def test_adjust_trade_position_premier_renfort_meme_mise_selon_levier(mocker, te
         # cost = notionnel = levier x mise -> mise = initial_stake constante
         t = _mock_trade(pair, lev, filled_costs=[initial_stake * lev])
         multi.cust_proposed_initial_stakes[pair] = 0.0  # force le chemin "fallback"
-        result = multi.adjust_trade_position(
-            t, now, 1.0, price_profit * lev, 1.0, 100000.0
-        )
+        result = multi.adjust_trade_position(t, now, 1.0, price_profit * lev, 1.0, 100000.0)
         assert result is not None, (market, lev)
         results[lev] = result
 
@@ -333,3 +441,101 @@ def test_custom_stake_amount_egale_a_la_source(mocker, testdatadir, market, src_
     expected = source.custom_stake_amount(pair, now, 1.0, proposed_stake, 1.0, 100000.0)
     actual = multi.custom_stake_amount(pair, now, 1.0, proposed_stake, 1.0, 100000.0)
     assert actual == pytest.approx(expected)
+
+
+# ── (f) plafond de trades ouverts par marche ────────────────────────────────
+
+
+def _confirm_kwargs(pair, entry_tag="crypto"):
+    return dict(
+        pair=pair,
+        order_type="limit",
+        amount=1.0,
+        rate=1.0,
+        time_in_force="GTC",
+        current_time=datetime.now(UTC),
+        entry_tag=entry_tag,
+        side="long",
+    )
+
+
+def test_confirm_trade_entry_sans_plafond_tout_passe(mocker, testdatadir):
+    multi = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    assert multi.max_open_trades_per_market is None
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-AAPL/USDC:USDC")) is True
+
+
+def test_confirm_trade_entry_plafond_refuse_meme_marche(mocker, testdatadir):
+    multi = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    multi.max_open_trades_per_market = {"stocks": 1}
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    # Le marche "stocks" est deja au plafond (1 trade ouvert sur XYZ-NVDA) :
+    # une nouvelle entree stocks sur une autre paire est refusee.
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-AAPL/USDC:USDC")) is False
+
+
+def test_confirm_trade_entry_plafond_autres_marches_passent(mocker, testdatadir):
+    multi = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    multi.max_open_trades_per_market = {"stocks": 1}
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    # Le plafond ne s'applique qu'au marche "stocks" : mat et crypto passent.
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-GOLD/USDC:USDC")) is True
+    assert multi.confirm_trade_entry(**_confirm_kwargs("ETH/USDC:USDC")) is True
+
+
+def test_confirm_trade_entry_renfort_meme_paire_toujours_autorise(mocker, testdatadir):
+    """Un renfort (DCA) sur une paire deja ouverte n'est pas une nouvelle
+    entree : la garde explicite le laisse passer meme au plafond. En
+    pratique freqtrade n'appelle meme pas ce callback pour un renfort (voir
+    `freqtradebot.py::execute_entry`, `mode == "initial"` uniquement)."""
+    multi = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    multi.max_open_trades_per_market = {"stocks": 1}
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-NVDA/USDC:USDC")) is True
+
+
+def test_confirm_trade_entry_config_prime_sur_attribut_de_classe(mocker, testdatadir):
+    conf = get_default_conf(testdatadir)
+    conf["strategy_path"] = str(STRATEGY_DIR)
+    conf["strategy"] = "hippo_original_multi"
+    conf["timeframe"] = "5m"
+    conf.pop("minimal_roi", None)
+    conf["hippo_multi"] = {"max_open_trades_per_market": {"stocks": 5}}
+    patch_exchange(mocker)
+    multi = StrategyResolver.load_strategy(conf)
+
+    assert multi.max_open_trades_per_market == {"stocks": 5}
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    # Plafond de la config (5) tres au-dessus du seul trade ouvert -> passe,
+    # alors qu'un attribut de classe eventuel a 1 aurait refuse.
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-AAPL/USDC:USDC")) is True
+
+
+def test_confirm_trade_entry_independant_de_max_open_trades_global(mocker, testdatadir):
+    """Le plafond par marche s'applique independamment de `max_open_trades`
+    global : meme si le bot a encore des slots globaux libres, un marche au
+    plafond refuse quand meme la nouvelle entree."""
+    multi = _load_strategy(mocker, testdatadir, "hippo_original_multi")
+    multi.max_open_trades_per_market = {"stocks": 1}
+    assert multi.config.get("max_open_trades", 3) >= 1
+    mocker.patch(
+        "freqtrade.persistence.Trade.get_trades_proxy",
+        return_value=[_mock_trade("XYZ-NVDA/USDC:USDC", 1.0)],
+    )
+    assert multi.confirm_trade_entry(**_confirm_kwargs("XYZ-AAPL/USDC:USDC")) is False
