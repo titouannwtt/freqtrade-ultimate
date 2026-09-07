@@ -62,6 +62,14 @@ class DataProvider:
         self.__nodata_pending: dict[tuple[str, str], set[str]] = {}
         self.__nodata_pending_since: float = 0.0
         self.__nodata_last_flush: float = 0.0
+        # Taux de captation des bougies : voir `_note_candle_capture`. On retient la
+        # derniere bougie vue par paire pour compter, a la bougie pres, celles que le
+        # marche a produites mais que la strategie n'a jamais eues sous les yeux.
+        self.__capture_last_ts: dict[PairWithTimeframe, datetime] = {}
+        self.__capture_stats: dict[str, dict[str, int]] = {}
+        self.__capture_skips: dict[str, dict[str, int]] = {}
+        self.__capture_pending_since: float = 0.0
+        self.__capture_last_flush: float = 0.0
         self.__slice_index: dict[str, int] = {}
         self.__slice_date: datetime | None = None
 
@@ -133,6 +141,7 @@ class DataProvider:
                     tf_seconds = timeframe_to_seconds(timeframe)
                     if age_seconds > tf_seconds * 2:
                         self._note_stale_candles(pair, timeframe, age_seconds / tf_seconds)
+                    self._note_candle_capture(pair, timeframe, candle_type, ts, tf_seconds)
             except Exception:
                 pass
         with self.__cached_pairs_lock:
@@ -487,6 +496,105 @@ class DataProvider:
             )
         self.__stale_pending = {}
         self.__stale_last_flush = now_ts
+
+    # Une bougie sautee n'est PAS une bougie en retard : elle n'existe pas pour la
+    # strategie. Un ecart de plus de ce nombre de bougies entre deux passages n'est
+    # pas une perte de flux mais une discontinuite (demarrage, paire qui entre dans
+    # la whitelist, panne d'exchange, changement d'informative) : on resynchronise
+    # sans le compter, sinon un seul redemarrage noierait la mesure.
+    CAPTURE_MAX_GAP_CANDLES = 12
+    # En dessous de ce taux la ligne passe en warning : c'est l'objectif de
+    # captation tenu pour ce type de strategie (signaux rares, une bougie sautee
+    # = un signal definitivement perdu, il ne se represente pas).
+    CAPTURE_WARN_RATIO = 0.95
+
+    def _note_candle_capture(
+        self,
+        pair: str,
+        timeframe: str,
+        candle_type: CandleType,
+        last_ts: datetime,
+        tf_seconds: int,
+    ) -> None:
+        """Taux de captation : combien de bougies closes ont VRAIMENT ete analysees.
+
+        `Stale candle data` mesure un RETARD, ce qui ne dit pas si le signal a ete
+        vu. Une source de bougies qui rattrape son retard en sautant de la bougie
+        t-2 a la bougie t laisse un retard nul apres coup, alors que la bougie t-1
+        n'a jamais ete la derniere du dataframe : la strategie ne l'a jamais
+        evaluee. Pour une strategie a signaux rares et non repetes, c'est la
+        seule metrique qui compte, et elle n'existait nulle part.
+
+        On compte donc, par timeframe, les bougies PRODUITES par le marche entre
+        deux passages (l'ecart entre la derniere bougie du dataframe precedent et
+        celle du dataframe courant) contre les bougies effectivement VUES (une par
+        passage ou le dataframe a avance). Le rapport des deux est le taux de
+        captation, et le detail par paire dit ou le flux decroche.
+
+        Comme les trois autres rapports de ce module, une seule ligne groupee par
+        timeframe et par heure : la whitelist peut compter des centaines de paires.
+        """
+        import time
+
+        key = (pair, timeframe, candle_type)
+        previous = self.__capture_last_ts.get(key)
+        self.__capture_last_ts[key] = last_ts
+        if previous is None or last_ts <= previous or tf_seconds <= 0:
+            # Premiere observation, ou dataframe inchange depuis le passage
+            # precedent (cas nominal a l'interieur d'une bougie) : rien a compter.
+            return
+        produced = round((last_ts - previous).total_seconds() / tf_seconds)
+        if produced < 1 or produced > self.CAPTURE_MAX_GAP_CANDLES:
+            return
+
+        now_ts = time.monotonic()
+        if not self.__capture_stats:
+            self.__capture_pending_since = now_ts
+        stats = self.__capture_stats.setdefault(timeframe, {"seen": 0, "produced": 0})
+        stats["seen"] += 1
+        stats["produced"] += produced
+        if produced > 1:
+            bucket = self.__capture_skips.setdefault(timeframe, {})
+            bucket[pair] = bucket.get(pair, 0) + produced - 1
+
+        if now_ts - self.__capture_pending_since < self.NODATA_BATCH_WINDOW_S:
+            return
+        if (
+            self.__capture_last_flush
+            and now_ts - self.__capture_last_flush < self.NODATA_REPORT_INTERVAL_S
+        ):
+            return
+
+        window_min = (now_ts - self.__capture_pending_since) / 60
+        for tf, counts in sorted(self.__capture_stats.items()):
+            produced_total = counts["produced"]
+            if produced_total <= 0:
+                continue
+            ratio = counts["seen"] / produced_total
+            skips = self.__capture_skips.get(tf, {})
+            ranked = sorted(skips.items(), key=lambda kv: kv[1], reverse=True)
+            shown = ranked[: self.NODATA_MAX_NAMES]
+            listed = ", ".join(f"{p} ({n})" for p, n in shown)
+            hidden = len(ranked) - len(shown)
+            if hidden > 0:
+                listed += f", and {hidden} more"
+            log = logger.warning if ratio < self.CAPTURE_WARN_RATIO else logger.info
+            log(
+                "Candle capture on %s: %d/%d candles reached the strategy (%.1f%%) "
+                "over %.0f min, %d skipped on %d pair(s)%s",
+                tf,
+                counts["seen"],
+                produced_total,
+                ratio * 100,
+                window_min,
+                produced_total - counts["seen"],
+                len(ranked),
+                f": {listed}" if listed else "",
+            )
+        self.__capture_stats = {}
+        self.__capture_skips = {}
+        self.__capture_last_flush = now_ts
+        self.__capture_pending_since = now_ts
 
     def _note_missing_data(self, pair: str, timeframe: str, candle_type: str) -> None:
         """Record an empty dataframe, and report the batch as ONE line per feed.

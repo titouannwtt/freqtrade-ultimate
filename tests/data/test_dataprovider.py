@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -676,3 +676,140 @@ def test_get_funding_rate_timeframe_no_exchange(default_conf_usdt):
 
     with pytest.raises(OperationalException, match=r"Exchange is not available to DataProvider."):
         dp.get_funding_rate_timeframe()
+
+
+class _FakeMonotonic:
+    """Horloge monotone pilotee : les rapports groupes sont etrangles dans le
+    temps, un test qui ne maitrise pas l'horloge ne teste que le premier appel."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _dp_for_capture(mocker, default_conf) -> tuple[DataProvider, _FakeMonotonic]:
+    default_conf["runmode"] = RunMode.DRY_RUN
+    default_conf["timeframe"] = "5m"
+    exchange = get_patched_exchange(mocker, default_conf)
+    clock = _FakeMonotonic()
+    mocker.patch("time.monotonic", clock)
+    return DataProvider(default_conf, exchange), clock
+
+
+def _feed(dp: DataProvider, pair: str, minute: int, tf: str = "5m") -> None:
+    """Pousse un dataframe dont la derniere bougie est a T0 + `minute` minutes."""
+    date = dt_utc(2024, 1, 1, 0, 0) + timedelta(minutes=minute)
+    dp._set_cached_df(pair, tf, DataFrame({"date": [date]}), CandleType.SPOT)
+
+
+def _capture_lines(caplog) -> list:
+    return [r for r in caplog.records if "Candle capture" in r.getMessage()]
+
+
+def test_dp_candle_capture_counts_skipped_candles(mocker, default_conf, caplog):
+    """Une bougie que le flux saute n'est pas 'en retard', elle est perdue :
+    elle doit compter comme produite mais pas comme vue."""
+    dp, clock = _dp_for_capture(mocker, default_conf)
+
+    _feed(dp, "ETH/USDT", 0)  # premiere observation : rien a compter
+    _feed(dp, "ETH/USDT", 5)  # une bougie produite, une vue
+    clock.t = 120
+    _feed(dp, "ETH/USDT", 20)  # trois bougies produites, une seule vue
+    assert log_has_re(
+        r"Candle capture on 5m: 2/4 candles reached the strategy \(50\.0%\).*"
+        r"2 skipped on 1 pair\(s\): ETH/USDT \(2\)",
+        caplog,
+    )
+
+
+def test_dp_candle_capture_full_rate_is_info(mocker, default_conf, caplog):
+    """Un flux qui ne saute rien reste en INFO : le warning est reserve au
+    decrochage, sinon la ligne se noie dans le bruit."""
+    dp, clock = _dp_for_capture(mocker, default_conf)
+
+    for minute in (0, 5, 10):
+        _feed(dp, "ETH/USDT", minute)
+    clock.t = 120
+    _feed(dp, "ETH/USDT", 15)
+    assert log_has_re(r"Candle capture on 5m: 3/3 candles reached the strategy \(100\.0%\)", caplog)
+    records = _capture_lines(caplog)
+    assert records and all(r.levelname == "INFO" for r in records)
+
+
+def test_dp_candle_capture_warns_below_target(mocker, default_conf, caplog):
+    dp, clock = _dp_for_capture(mocker, default_conf)
+
+    _feed(dp, "ETH/USDT", 0)
+    _feed(dp, "ETH/USDT", 10)
+    clock.t = 120
+    _feed(dp, "ETH/USDT", 15)
+    records = _capture_lines(caplog)
+    assert records and records[0].levelname == "WARNING"
+    assert "2/3 candles reached the strategy (66.7%)" in records[0].getMessage()
+
+
+def test_dp_candle_capture_ignores_discontinuities(mocker, default_conf, caplog):
+    """Un redemarrage, ou une paire qui entre dans la whitelist, creent un ecart
+    enorme qui n'est pas une perte de flux : il ne doit pas noyer la mesure."""
+    dp, clock = _dp_for_capture(mocker, default_conf)
+    step = 5 * (DataProvider.CAPTURE_MAX_GAP_CANDLES + 1)
+
+    _feed(dp, "ETH/USDT", 0)
+    _feed(dp, "ETH/USDT", step)  # discontinuite : ignoree
+    _feed(dp, "ETH/USDT", step + 5)  # la mesure reprend
+    clock.t = 120
+    _feed(dp, "ETH/USDT", step + 10)
+    assert log_has_re(r"Candle capture on 5m: 2/2 candles reached the strategy", caplog)
+
+
+def test_dp_candle_capture_unchanged_dataframe_is_not_counted(mocker, default_conf, caplog):
+    """Plusieurs cycles a l'interieur de la meme bougie ne comptent qu'une fois."""
+    dp, clock = _dp_for_capture(mocker, default_conf)
+
+    _feed(dp, "ETH/USDT", 0)
+    for _ in range(5):
+        _feed(dp, "ETH/USDT", 5)
+    clock.t = 120
+    _feed(dp, "ETH/USDT", 10)
+    assert log_has_re(r"Candle capture on 5m: 2/2 candles reached the strategy", caplog)
+
+
+def test_dp_candle_capture_groups_pairs_and_throttles(mocker, default_conf, caplog):
+    """Une seule ligne par timeframe pour toute la whitelist, puis silence
+    jusqu'a la prochaine fenetre horaire."""
+    dp, clock = _dp_for_capture(mocker, default_conf)
+    pairs = [f"P{i}/USDT" for i in range(20)]
+
+    for pair in pairs:
+        _feed(dp, pair, 0)
+    for pair in pairs:
+        _feed(dp, pair, 10)  # une bougie sautee par paire
+    assert not _capture_lines(caplog)
+
+    clock.t = 120
+    for pair in pairs:
+        _feed(dp, pair, 15)
+    lines = [r.getMessage() for r in _capture_lines(caplog)]
+    assert len(lines) == 1
+    assert "21/41 candles reached the strategy (51.2%)" in lines[0]
+    assert "20 skipped on 20 pair(s)" in lines[0]
+    assert "and 8 more" in lines[0]  # NODATA_MAX_NAMES = 12 noms cites sur 20
+
+    caplog.clear()
+    clock.t = 240
+    for pair in pairs:
+        _feed(dp, pair, 20)
+    assert not _capture_lines(caplog)
+
+
+def test_dp_candle_capture_never_breaks_analyze(mocker, default_conf, caplog):
+    """Le compteur est cosmetique : une anomalie ne doit jamais casser
+    l'enregistrement du dataframe analyse (incident 2026-08-02)."""
+    dp, _ = _dp_for_capture(mocker, default_conf)
+    mocker.patch.object(
+        DataProvider, "_note_candle_capture", MagicMock(side_effect=ValueError("boom"))
+    )
+    _feed(dp, "ETH/USDT", 0)
+    assert len(dp.get_analyzed_dataframe("ETH/USDT", "5m")[0]) == 1
