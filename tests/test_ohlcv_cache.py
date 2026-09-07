@@ -3142,3 +3142,171 @@ class TestChunkFetchRateLimitDetection:
         assert Daemon._is_rate_limit(Exception("hyperliquid 429 Too Many Requests"))
         assert Daemon._is_rate_limit(Exception("RateLimitExceeded: ..."))
         assert not Daemon._is_rate_limit(Exception("500 Internal Server Error"))
+
+
+# ------------------------------------------------ hot timeframes (freshness lane)
+
+
+class TestHotTimeframesClient:
+    """`shared_ohlcv_cache.hot_timeframes` marks the timeframe a live bot trades.
+
+    The flag rides on the live tail request only; a warmup range must not steal
+    the HIGH refresh lane, and a dry bot must never claim it at all.
+    """
+
+    def _client(self, **kw):
+        return OhlcvCacheClient(socket_path="/tmp/nope.sock", exchange_id="hyperliquid", **kw)
+
+    def test_hot_flag_sent_for_declared_timeframe(self):
+        c = self._client(hot_timeframes=["5m"])
+        sent = {}
+
+        async def fake(req):
+            sent.update(req)
+            return {"ok": True, "data": []}
+
+        c._send_and_receive = fake
+        asyncio.run(c.fetch("BTC/USDC:USDC", "5m", CandleType.FUTURES, None, 100))
+        assert sent["hot"] is True
+
+    def test_no_hot_flag_for_other_timeframe(self):
+        c = self._client(hot_timeframes=["5m"])
+        sent = {}
+
+        async def fake(req):
+            sent.update(req)
+            return {"ok": True, "data": []}
+
+        c._send_and_receive = fake
+        asyncio.run(c.fetch("BTC/USDC:USDC", "1h", CandleType.FUTURES, None, 100))
+        assert "hot" not in sent
+
+    def test_no_hot_flag_for_historic_request(self):
+        """A warmup fetch (since_ms set) is not time-critical."""
+        c = self._client(hot_timeframes=["5m"])
+        sent = {}
+
+        async def fake(req):
+            sent.update(req)
+            return {"ok": True, "data": []}
+
+        c._send_and_receive = fake
+        asyncio.run(c.fetch("BTC/USDC:USDC", "5m", CandleType.FUTURES, 1_700_000_000_000, 100))
+        assert "hot" not in sent
+
+    def test_dry_run_never_hot(self):
+        c = self._client(hot_timeframes=["5m"], dry_run=True)
+        assert c.hot_timeframes == frozenset()
+
+    def test_get_or_spawn_reads_config_key(self):
+        from freqtrade.ohlcv_cache import client as client_mod
+
+        with patch.object(client_mod, "_ensure_daemon_running"):
+            client_mod._CLIENT_SINGLETONS.clear()
+            try:
+                c = OhlcvCacheClient.get_or_spawn(
+                    "hyperliquid",
+                    "futures",
+                    {
+                        "dry_run": False,
+                        "shared_ohlcv_cache": {
+                            "socket_path": "/tmp/ftcache-test-hot.sock",
+                            "client_stagger_s": 0,
+                            "hot_timeframes": ["5m"],
+                        },
+                    },
+                )
+                assert c.hot_timeframes == frozenset({"5m"})
+            finally:
+                client_mod._CLIENT_SINGLETONS.clear()
+
+
+class TestHotTimeframesDaemon:
+    """Daemon side: candle-boundary refresh window + HIGH background refresh."""
+
+    TF_MS = 300_000
+
+    def _daemon(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        return Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+
+    def _seed(self, d, *, last_candle_open_ms: int, n: int = 20):
+        series = d.store.get_or_create(
+            "hyperliquid", "futures", "BTC/USDC:USDC", "5m", "futures", self.TF_MS
+        )
+        first = last_candle_open_ms - (n - 1) * self.TF_MS
+        series.merge(
+            [[first + i * self.TF_MS, 1.0, 1.0, 1.0, 1.0, 1.0] for i in range(n)]
+        )
+        return series
+
+    def _req(self, hot: bool):
+        req = {
+            "op": "fetch",
+            "req_id": "r1",
+            "exchange": "hyperliquid",
+            "trading_mode": "futures",
+            "pair": "BTC/USDC:USDC",
+            "timeframe": "5m",
+            "candle_type": "futures",
+            "since_ms": None,
+            "limit": 10,
+        }
+        if hot:
+            req["hot"] = True
+        return req
+
+    def test_fast_path_reopens_on_every_new_candle(self, tmp_path):
+        """A closed candle must always re-open the refresh path.
+
+        The fast path's coverage test demands the candle currently forming, so
+        it cannot keep serving across a boundary even though less than one
+        period has elapsed since the last refresh. This is why the fix is about
+        the refresh's QUEUE PRIORITY, not about the refresh window.
+        """
+        d = self._daemon(tmp_path)
+        now_ms = int(time.time() * 1000)
+        boundary = (now_ms // self.TF_MS) * self.TF_MS
+        # Refreshed 10s before the boundary: newest candle is the previous one.
+        series = self._seed(d, last_candle_open_ms=boundary - self.TF_MS)
+        series.last_live_refresh_wall_ms = boundary - 10_000
+
+        d._schedule_swr_refresh = lambda *a, **k: None
+        resp = asyncio.run(d._handle_fetch(self._req(hot=False)))
+        assert resp["served_from"] != "cache"
+
+    def test_fast_path_holds_within_current_candle(self, tmp_path):
+        """Once the forming candle is cached, no further refresh this period."""
+        d = self._daemon(tmp_path)
+        now_ms = int(time.time() * 1000)
+        boundary = (now_ms // self.TF_MS) * self.TF_MS
+        series = self._seed(d, last_candle_open_ms=boundary)
+        series.last_live_refresh_wall_ms = boundary + 1
+
+        resp = asyncio.run(d._handle_fetch(self._req(hot=True)))
+        assert resp["served_from"] == "cache"
+
+    def test_hot_swr_refresh_runs_at_high_priority(self, tmp_path):
+        """A hot crypto series must not be left in the LOW lane."""
+        from freqtrade.ohlcv_cache.daemon import TokenBucket
+
+        d = self._daemon(tmp_path)
+        now_ms = int(time.time() * 1000)
+        boundary = (now_ms // self.TF_MS) * self.TF_MS
+        # Cache is missing the candle currently forming -> SWR path.
+        series = self._seed(d, last_candle_open_ms=boundary - self.TF_MS)
+        series.last_live_refresh_wall_ms = boundary - self.TF_MS
+
+        seen = {}
+        d._schedule_swr_refresh = lambda *a, **k: seen.update(prio=a[-1])
+
+        resp = asyncio.run(d._handle_fetch(self._req(hot=True)))
+        assert resp["served_from"] == "stale"
+        assert seen["prio"] == TokenBucket.HIGH
+
+        seen.clear()
+        series.last_live_refresh_wall_ms = boundary - self.TF_MS
+        resp = asyncio.run(d._handle_fetch(self._req(hot=False)))
+        assert resp["served_from"] == "stale"
+        assert seen["prio"] == TokenBucket.LOW
