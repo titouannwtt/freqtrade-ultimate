@@ -1390,8 +1390,19 @@ class Daemon:
             now_end_ms = ((int(time.time() * 1000) // tf_ms) + 1) * tf_ms
             end_ms = min(end_ms, now_end_ms)
 
+        # A bot may declare the timeframe it actually trades on as "hot" (see
+        # OhlcvCacheClient.hot_timeframes): its background refresh then runs in
+        # the HIGH lane instead of LOW.
+        is_hot = is_live and bool(req.get("hot"))
+
         # Fast-path for live: if we refreshed within the current tf window
         # AND the cache fully covers the requested range, just serve it.
+        # Note the coverage test below already anchors this on the candle
+        # boundary: `range_end_ms >= end_ms - tf_ms` demands the candle that is
+        # currently forming, which only a refresh made INSIDE the current period
+        # can have brought in. So a new candle always re-opens the gap path, and
+        # the whole delay a live bot sees is how long the resulting refresh
+        # waits in the rate-limit queue — which is what `hot` addresses below.
         now_wall_ms = int(time.time() * 1000)
         if (
             is_live
@@ -1475,9 +1486,14 @@ class Daemon:
                 # the open-position rule below can never lift it out of LOW, where
                 # it loses the rate budget to the fleet's flood). Keep them HIGH.
                 is_builder_dex = exchange == "hyperliquid" and "-" in pair.split("/", 1)[0]
+                # `is_hot`: the requesting live bot trades this timeframe. At LOW
+                # these refreshes lose every arbitration to the fleet's constant
+                # NORMAL-priority warmup traffic (each bot restart re-fetches its
+                # whole history), which is what left crypto 5m series 2-4 candles
+                # behind while HIP-3 series — already HIGH — stayed within one.
                 refresh_prio = (
                     TokenBucket.HIGH
-                    if (is_builder_dex or pair in self._open_position_symbols(exchange))
+                    if (is_builder_dex or is_hot or pair in self._open_position_symbols(exchange))
                     else TokenBucket.LOW
                 )
                 self._schedule_swr_refresh(

@@ -122,6 +122,17 @@ GLOBAL_DEFAULTS: dict = {
     "swr_max_missing_tail_candles": 4,
     # Floor on the stale-serve window so tiny timeframes still get useful slack.
     "swr_min_stale_ms": 60000,
+    # --- Hot timeframes (per-BOT, not read here) ---
+    # `shared_ohlcv_cache.hot_timeframes: ["5m"]` in a LIVE bot's config declares
+    # the timeframe it trades on. It is consumed client-side
+    # (OhlcvCacheClient.hot_timeframes) and travels per request as `hot`, so it is
+    # deliberately absent from GLOBAL_DEFAULTS: it must be settable per bot, and
+    # get_or_spawn() only forwards daemon-global keys to the daemon process.
+    # Effect on the daemon (see _handle_fetch): the background refresh runs at
+    # HIGH instead of LOW, and the refresh window is anchored on the candle
+    # boundary instead of free-running. Costs no extra requests overall — the
+    # drain loop caps total spend at 80% of weight_budget_per_min regardless —
+    # it reallocates that fixed budget towards the series a live bot trades on.
 }
 
 

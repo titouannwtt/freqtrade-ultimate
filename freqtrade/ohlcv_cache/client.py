@@ -75,7 +75,16 @@ class OhlcvCacheClient:
         respawn_cfg: dict | None = None,
         dry_run: bool = False,
         capital: float = 0.0,
+        hot_timeframes: list[str] | None = None,
     ) -> None:
+        # Timeframes this bot declares as "hot": the ones it actually trades on,
+        # where a candle arriving one period late is a missed entry or exit.
+        # Sent to the daemon per request as `hot`, which (a) raises the
+        # background refresh to HIGH so it is not starved behind the fleet's
+        # NORMAL-priority warmup traffic, and (b) anchors the daemon's refresh
+        # window on the candle boundary instead of letting it free-run.
+        # Live bots only — a dry bot never drives a refresh anyway.
+        self.hot_timeframes: frozenset[str] = frozenset(() if dry_run else (hot_timeframes or ()))
         self.socket_path = socket_path
         self.timeout_s = timeout_s
         self.exchange_id = exchange_id
@@ -341,6 +350,10 @@ class OhlcvCacheClient:
             "priority": self._compute_priority(since_ms, priority),
             "capital": self.capital,
         }
+        # Only tag the live tail request (since_ms is None). A historic/warmup
+        # range is not time-critical and must not steal the HIGH lane.
+        if since_ms is None and timeframe in self.hot_timeframes:
+            req["hot"] = True
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             err_type = resp.get("error_type", "")
@@ -705,6 +718,7 @@ class OhlcvCacheClient:
             respawn_cfg=respawn_cfg,
             dry_run=dry_run,
             capital=capital,
+            hot_timeframes=cache_cfg.get("hot_timeframes") or [],
         )
         _CLIENT_SINGLETONS[key] = client
         logger.info("client configured for %s/%s via %s", exchange_id, trading_mode, socket_path)
