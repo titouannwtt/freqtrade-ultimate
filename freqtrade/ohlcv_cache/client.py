@@ -450,14 +450,22 @@ class OhlcvCacheClient:
             raise CacheUnavailable(f"tickers failed: {err_type} {err_msg}")
         return resp.get("data", {})
 
-    async def push_positions(self, positions: list) -> None:
-        """Push fetch_positions() result into the daemon's shared cache."""
+    async def push_positions(self, positions: list, wallet_address: str | None = None) -> None:
+        """Push fetch_positions() result into the daemon's shared cache.
+
+        ``wallet_address`` identifies WHICH account these positions belong to. The
+        daemon keys its cache on (exchange, address): without it the push lands in
+        an anonymous bucket that is never served to an address-aware reader, so a
+        bot on a different account can never be handed ours.
+        """
         req = {
             "op": "positions_put",
             "req_id": uuid.uuid4().hex,
             "exchange": self.exchange_id,
             "data": positions,
         }
+        if wallet_address:
+            req["wallet_address"] = wallet_address
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(

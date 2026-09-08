@@ -752,7 +752,9 @@ class CachedExchangeMixin:
             try:
                 client = self._ftcache_get_client()
                 if client is not None:
-                    self._ftcache_run_on_loop(client.push_positions(positions))
+                    self._ftcache_run_on_loop(
+                        client.push_positions(positions, wallet_address=wallet)
+                    )
             except Exception as e:  # non-blocking: observability only
                 logger.debug("[positions-refresh] push daemon échoué (non bloquant): %s", e)
 

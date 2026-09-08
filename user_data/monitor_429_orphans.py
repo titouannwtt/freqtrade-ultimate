@@ -5,8 +5,12 @@ positions to spot orphans. Read-only. Safe to run repeatedly. Not for commit.
 
 Live-bot discovery is PROCESS-DRIVEN (enumerates running freqtrade 'trade'
 processes and reads their merged config), so live bots whose config filename
-carries a cosmetic '_dry' suffix are still counted correctly."""
-import glob
+carries a cosmetic '_dry' suffix are still counted correctly.
+
+Multi-address: each bot is reconciled against the on-chain net of the address in its
+OWN config (exchange.walletAddress). A bot on a Hyperliquid sub-account therefore no
+longer shows every one of its positions as an ORPHAN?. A bot whose address cannot be
+resolved is skipped, never flagged. Reads are address-only (public /info)."""
 import json, os, re, subprocess, sqlite3, time, tempfile, datetime as dt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,10 +47,20 @@ def _merge_config(path, _seen=None):
     return merged
 
 
-def live_bots():
-    """Enumerate running freqtrade 'trade' processes -> {bot_name: (db_path, dry)}.
+def bot_wallet(conf):
+    """Normalised public address of a bot, or None when undeterminable."""
+    ex = conf.get("exchange", {}) or {}
+    for k in ("walletAddress", "wallet_address"):
+        v = ex.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    return None
 
-    Returns only dry_run=False bots (the ones on the shared live wallet)."""
+
+def live_bots():
+    """Enumerate running freqtrade 'trade' processes -> {bot_name: {db, wallet, hip3}}.
+
+    Returns only dry_run=False bots."""
     out = {}
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
@@ -71,8 +85,16 @@ def live_bots():
         if not url.startswith("sqlite:///"):
             continue
         name = conf.get("bot_name") or os.path.basename(cfg)
-        out[name] = url[len("sqlite:///"):]
+        out[name] = {
+            "db": url[len("sqlite:///"):],
+            "wallet": bot_wallet(conf),
+            "hip3": list(conf.get("exchange", {}).get("hip3_dexes", []) or []),
+        }
     return out
+
+
+def _short(wallet):
+    return f"{wallet[:6]}…{wallet[-4:]}" if wallet and len(wallet) > 12 else str(wallet)
 
 
 def _screen_sessions():
@@ -132,9 +154,13 @@ def scan_429_recent():
 
 
 def db_net_positions(dbmap):
-    """coin -> signed net amount summed across all live bot DBs (short = -)."""
-    net, detail = {}, {}
-    for name, path in dbmap.items():
+    """(wallet, coin) -> signed net across live bot DBs. Returns (net, detail, skipped)."""
+    net, detail, skipped = {}, {}, []
+    for name, b in dbmap.items():
+        path, wallet = b["db"], b["wallet"]
+        if not wallet:
+            skipped.append(name)
+            continue
         if not os.path.exists(path):
             continue
         try:
@@ -146,55 +172,60 @@ def db_net_positions(dbmap):
         for pair, amount, is_short in rows:
             coin = pair.split("/")[0]
             signed = -amount if is_short else amount
-            net[coin] = net.get(coin, 0.0) + signed
-            detail.setdefault(coin, []).append((name, round(signed, 4)))
-    return net, detail
+            key = (wallet, coin)
+            net[key] = net.get(key, 0.0) + signed
+            detail.setdefault(key, []).append((name, round(signed, 4)))
+    return net, detail, sorted(set(skipped))
 
 
-def exchange_net_positions():
-    """coin -> signed net contracts on the shared wallet (one call, backoff)."""
+def wallet_dexes(dbmap):
+    """{wallet: sorted HIP-3 dexes} for the running live bots, per address.
+
+    HIP-3 builder dexes (e.g. "xyz") hold positions invisible to the plain
+    fetch_positions call — a dex must be queried on the address that uses it, or
+    builder-dex trades read as absent and get falsely reported as drift.
+    """
+    out = {}
+    for b in dbmap.values():
+        if not b["wallet"]:
+            continue
+        out.setdefault(b["wallet"], set()).update(b.get("hip3", []))
+    return {w: sorted(d) for w, d in out.items()}
+
+
+def exchange_net_positions(dbmap):
+    """(wallet, coin) -> signed net contracts, one address-only client per address.
+
+    Returns ``(nets, errors)``; a failed address is reported and simply not compared.
+    """
     import ccxt
-    acc = json.load(open("live_configs/_hyperliquid_freqtrade_access.json"))
-    ex = acc.get("exchange", {})
-    wallet = ex.get("walletAddress") or ex.get("wallet_address")
-    sec = ex.get("secret") or ex.get("privateKey")
-    cli = ccxt.hyperliquid({"walletAddress": wallet, "privateKey": sec, "enableRateLimit": True})
-    # HIP-3 builder dexes (e.g. "xyz") hold positions invisible to the plain
-    # fetch_positions call — include every dex configured by a live bot, or
-    # builder-dex trades read as absent and get falsely reported as drift.
-    dexes = set()
-    try:
-        for cfgp in glob.glob("live_configs/*.json"):
-            if os.path.basename(cfgp).startswith("_"):
-                continue
+    nets, errors = {}, {}
+    for wallet, dexes in sorted(wallet_dexes(dbmap).items()):
+        # Address-only: fetch_positions is the public /info endpoint (no key read).
+        cli = ccxt.hyperliquid({"walletAddress": wallet, "enableRateLimit": True})
+        last = None
+        for attempt in range(4):
             try:
-                conf = _merge_config(cfgp)
-            except Exception:
-                continue
-            if conf.get("dry_run") is False:
-                dexes.update(conf.get("exchange", {}).get("hip3_dexes", []) or [])
-    except Exception:
-        pass
-    last = None
-    for attempt in range(4):
-        try:
-            poss = list(cli.fetch_positions())
-            for dex in sorted(dexes):
-                poss.extend(cli.fetch_positions(None, params={"dex": dex}))
-            out = {}
-            for p in poss:
-                sym = p.get("symbol", "")
-                coin = sym.split("/")[0]
-                contracts = p.get("contracts") or 0
-                side = p.get("side")
-                signed = -contracts if side == "short" else contracts
-                if contracts:
-                    out[coin] = out.get(coin, 0.0) + signed
-            return out, None
-        except Exception as e:
-            last = repr(e)
-            time.sleep(5 * (attempt + 1))
-    return None, last
+                poss = list(cli.fetch_positions())
+                for dex in dexes:
+                    poss.extend(cli.fetch_positions(None, params={"dex": dex}))
+                for p in poss:
+                    sym = p.get("symbol", "")
+                    coin = sym.split("/")[0]
+                    contracts = p.get("contracts") or 0
+                    side = p.get("side")
+                    signed = -contracts if side == "short" else contracts
+                    if contracts:
+                        key = (wallet, coin)
+                        nets[key] = nets.get(key, 0.0) + signed
+                last = None
+                break
+            except Exception as e:
+                last = repr(e)
+                time.sleep(5 * (attempt + 1))
+        if last:
+            errors[wallet] = last
+    return nets, errors
 
 
 def main():
@@ -212,31 +243,36 @@ def main():
             print(f"  {s:44} {n:4}  (scrollback total {total.get(s, 0)})")
 
     dbmap = live_bots()
-    dbnet, detail = db_net_positions(dbmap)
-    exnet, err = exchange_net_positions()
-    print(f"\n[live bots discovered: {len(dbmap)}]")
+    dbnet, detail, skipped = db_net_positions(dbmap)
+    exnet, errors = exchange_net_positions(dbmap)
+    addrs = sorted(wallet_dexes(dbmap))
+    print(f"\n[live bots discovered: {len(dbmap)}  addresses: {len(addrs)}]")
+    for w in addrs:
+        holders = sorted(n for n, b in dbmap.items() if b["wallet"] == w)
+        print(f"  {_short(w)}  bots={len(holders)}")
+    if skipped:
+        print("  SKIPPED (no resolvable exchange.walletAddress): " + ", ".join(skipped))
 
-    print("\n[orphan reconciliation: DB net vs exchange net]")
-    if err:
-        print("  exchange fetch FAILED:", err)
-        print("  (DB open coins:", sorted(k for k, v in dbnet.items() if abs(v) > 1e-9), ")")
-        return
-    coins = sorted(set(dbnet) | set(exnet))
+    print("\n[orphan reconciliation: DB net vs exchange net, per address]")
+    for w, err in errors.items():
+        print(f"  exchange fetch FAILED for {_short(w)}: {err} — address not compared")
+    readable = {w for w in addrs if w not in errors}
+    keys = sorted(k for k in (set(dbnet) | set(exnet)) if k[0] in readable)
     flagged = 0
-    for coin in coins:
-        d = dbnet.get(coin, 0.0)
-        e = exnet.get(coin, 0.0)
+    for wallet, coin in keys:
+        d = dbnet.get((wallet, coin), 0.0)
+        e = exnet.get((wallet, coin), 0.0)
         tol = max(abs(d), abs(e)) * 0.02 + 1e-6
         if abs(d - e) > tol:
             flagged += 1
-            who = detail.get(coin, [])
+            who = detail.get((wallet, coin), [])
             kind = "ORPHAN?" if not who else "netting"
-            print(f"  MISMATCH {coin:8} db_net={d:+.4f} exch_net={e:+.4f} "
+            print(f"  MISMATCH {_short(wallet)} {coin:8} db_net={d:+.4f} exch_net={e:+.4f} "
                   f"[{kind}] bots={who}")
     if not flagged:
-        print(f"  clean ({len(coins)} coins reconciled)")
+        print(f"  clean ({len(keys)} (address,coin) pairs reconciled)")
     else:
-        print(f"  {flagged} coin(s) flagged -> ORPHAN? = on exchange, no live bot")
+        print(f"  {flagged} pair(s) flagged -> ORPHAN? = on exchange, no live bot")
 
 
 if __name__ == "__main__":

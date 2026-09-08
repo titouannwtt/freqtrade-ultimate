@@ -24,6 +24,12 @@ position. Anything that does NOT meet that exact criterion (real minority
 positions, multi-trade or ambiguous discrepancies) is only REPORTED, never
 auto-touched.
 
+MULTI-ADDRESS
+The fleet is not one address. Every bot is reconciled against the on-chain net of
+the address in ITS OWN merged config (exchange.walletAddress), grouped by
+(wallet, coin). A bot whose address cannot be resolved is skipped, never compared.
+The persisted phantom state is keyed (wallet, coin, bot, trade_id).
+
   preview (default): python user_data/netting_reconciler.py
   apply           : python user_data/netting_reconciler.py --apply
 
@@ -40,13 +46,19 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
-ACCESS = "live_configs/_hyperliquid_freqtrade_access.json"
+# NO hardcoded access file. Each bot's on-chain counterpart is resolved from ITS OWN
+# merged config (exchange.walletAddress), because the fleet is no longer guaranteed to
+# sit on one address: a bot moved to a Hyperliquid sub-account has a net of its own, and
+# comparing it to the master wallet's net makes every one of its positions read as an
+# absent phantom — which is how this script would delete its live trades. Only the public
+# address is read; the private key is never touched (reads use the public /info endpoint).
+WALLET_KEYS = ("walletAddress", "wallet_address")
 
 # Relative tolerance when comparing collective DB sum to the on-chain net.
 REL_TOL = 0.02
 ABS_TOL = 1e-6
 
-# Persist which phantoms were seen last run. A phantom is only auto-deleted when
+# Persist which phantoms were seen last run, keyed (wallet, coin, bot, trade_id). A phantom is only auto-deleted when
 # it was ALSO flagged on the previous run, so a transient exchange-API hiccup
 # (a real position momentarily missing from fetch_positions -> looks "absent")
 # can never trigger a wrongful deletion.
@@ -93,8 +105,23 @@ def _merge_config(path, seen=None):
     return merged
 
 
+def bot_wallet(conf):
+    """Public address this bot trades on, normalised, or None if undeterminable.
+
+    None is NOT "the master wallet": a bot whose address cannot be resolved is
+    excluded from reconciliation entirely (see main()). Guessing here is exactly the
+    failure that deleted live trades on 2026-08-02.
+    """
+    ex = conf.get("exchange", {}) or {}
+    for k in WALLET_KEYS:
+        v = ex.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    return None
+
+
 def live_bots():
-    """Process-driven discovery of live (dry_run=False) bots on the shared wallet."""
+    """Process-driven discovery of live (dry_run=False) bots, with their address."""
     out = {}
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
@@ -125,6 +152,8 @@ def live_bots():
             # MUST be fetched per-dex too, or every builder-dex trade reads as
             # "absent on-chain" and gets wrongly deleted as a phantom.
             "hip3": list(conf.get("exchange", {}).get("hip3_dexes", []) or []),
+            # Public address only. The private key is never read or stored here.
+            "wallet": bot_wallet(conf),
         }
     return out
 
@@ -156,23 +185,23 @@ def open_slices(db):
     return out
 
 
-def exchange_net(hip3_dexes=()):
-    """Signed on-chain net per coin: MAIN dex + every HIP-3 builder dex in use.
+def exchange_net(wallet, hip3_dexes=()):
+    """Signed on-chain net per coin for ONE address: MAIN dex + its HIP-3 dexes.
 
     HIP-3 positions live on separate dexes and are ONLY returned when
     fetch_positions is called with params={"dex": <name>}. Being blind to them
     made every booked builder-dex trade (e.g. XYZ-KR200) look like a phantom,
     so this script deleted them from the bots' DBs 30-60min after each fill and
     stranded the real position on-chain (70 orphaned fills in 2 days).
-    If ANY fetch (main or dex) fails, we return an error and take NO action.
+    If ANY fetch (main or dex) fails, we return an error and take NO action *for
+    that address* — the other addresses are still reconciled independently.
+
+    The client is address-only: fetch_positions on Hyperliquid is the public /info
+    endpoint, so no private key is needed and none is read.
     """
     import ccxt
 
-    acc = json.load(open(ACCESS))
-    ex = acc.get("exchange", {})
-    wallet = ex.get("walletAddress") or ex.get("wallet_address")
-    sec = ex.get("secret") or ex.get("privateKey")
-    cli = ccxt.hyperliquid({"walletAddress": wallet, "privateKey": sec, "enableRateLimit": True})
+    cli = ccxt.hyperliquid({"walletAddress": wallet, "enableRateLimit": True})
     last = None
     for attempt in range(4):
         try:
@@ -225,47 +254,71 @@ def _match(a, b):
     return abs(a - b) <= max(abs(a), abs(b)) * REL_TOL + ABS_TOL
 
 
-def main():
-    apply = "--apply" in sys.argv
-    print("=" * 68)
-    print("NETTING RECONCILER", time.strftime("%Y-%m-%d %H:%M:%S"),
-          "APPLY" if apply else "PREVIEW")
-    print("=" * 68)
+def collect_slices(bots):
+    """Group every live bot's open trades by (wallet, coin).
 
-    bots = live_bots()
-    per_coin = {}  # coin -> [(bot_name, tid, signed, is_short, pair, age_s)]
+    Returns ``(per_key, skipped)``. ``skipped`` lists the bots whose address could
+    not be resolved: their trades are NOT reconciled against anything. Silence beats
+    a wrong deletion.
+    """
+    per_key = {}
+    skipped = []
     for name, b in bots.items():
+        wallet = b.get("wallet")
+        if not wallet:
+            skipped.append(name)
+            continue
         for tid, coin, signed, is_short, pair, age_s in open_slices(b["db"]):
-            per_coin.setdefault(coin, []).append((name, tid, signed, is_short, pair, age_s))
-    dexes = set()
+            per_key.setdefault((wallet, coin), []).append(
+                (name, tid, signed, is_short, pair, age_s)
+            )
+    return per_key, skipped
+
+
+def wallet_dexes(bots):
+    """{wallet: sorted HIP-3 dexes used by the bots on THAT wallet}."""
+    out = {}
     for b in bots.values():
-        dexes.update(b.get("hip3", []))
-    print(f"live bots: {len(bots)}   coins with open trades: {len(per_coin)}"
-          f"   hip3 dexes: {sorted(dexes) or 'none'}")
+        w = b.get("wallet")
+        if not w:
+            continue
+        out.setdefault(w, set()).update(b.get("hip3", []))
+    return {w: sorted(d) for w, d in out.items()}
 
-    exnet, err = exchange_net(dexes)
-    if err:
-        print(f"\nEXCHANGE FETCH FAILED ({err}) — read-only, no action taken")
-        return
 
-    try:
-        prev_seen = set(tuple(x) for x in json.load(open(STATE_FILE)))
-    except Exception:
-        prev_seen = set()
+def fetch_nets(bots, fetcher=exchange_net):
+    """{wallet: coin->net} for every distinct address, plus {wallet: error}.
 
-    auto = []       # provably-safe phantom deletions
-    minority = []   # real netted minority positions (manual decision)
-    ambiguous = []  # discrepancy not explained by a single trade
+    One fetch per distinct address. A failure isolates that address only.
+    """
+    nets, errors = {}, {}
+    for wallet, dexes in sorted(wallet_dexes(bots).items()):
+        net, err = fetcher(wallet, dexes)
+        if err:
+            errors[wallet] = err
+        else:
+            nets[wallet] = net
+    return nets, errors
 
-    for coin, slices in sorted(per_coin.items()):
+
+def analyze(per_key, nets):
+    """Classify every (wallet, coin) against the net of THAT wallet.
+
+    A wallet absent from ``nets`` (fetch failed) is skipped entirely: no phantom, no
+    minority, no action.
+    """
+    auto, minority, ambiguous = [], [], []
+    for (wallet, coin), slices in sorted(per_key.items()):
+        if wallet not in nets:
+            continue  # address unknown / fetch failed -> never act
         db_sum = sum(s[2] for s in slices)
-        onchain = exnet.get(coin, 0.0)
+        onchain = nets[wallet].get(coin, 0.0)
         if _match(db_sum, onchain):
             # Collective DBs agree with reality. A minority-side slice here is a
             # REAL netted position (removing it would create an orphan).
             for name, tid, signed, is_short, pair, _age in slices:
                 if onchain != 0 and (signed > 0) != (onchain > 0) and abs(signed) > ABS_TOL:
-                    minority.append((coin, name, tid, signed, onchain, pair))
+                    minority.append((wallet, coin, name, tid, signed, onchain, pair))
             continue
         # Discrepancy: look for exactly one trade whose removal makes DB == on-chain
         # AND whose own side is absent from the on-chain net -> provable phantom.
@@ -281,17 +334,57 @@ def main():
                 candidates.append((name, tid, signed, is_short, pair))
         if len(candidates) == 1:
             name, tid, signed, is_short, pair = candidates[0]
-            auto.append((coin, name, tid, signed, onchain, pair))
+            auto.append((wallet, coin, name, tid, signed, onchain, pair))
         else:
-            ambiguous.append((coin, db_sum, onchain, slices))
+            ambiguous.append((wallet, coin, db_sum, onchain, slices))
+    return auto, minority, ambiguous
 
-    cur_seen = [[coin, name, tid] for coin, name, tid, *_ in auto]
+
+def _short(wallet):
+    return f"{wallet[:6]}…{wallet[-4:]}" if wallet and len(wallet) > 12 else str(wallet)
+
+
+def main():
+    apply = "--apply" in sys.argv
+    print("=" * 68)
+    print("NETTING RECONCILER", time.strftime("%Y-%m-%d %H:%M:%S"),
+          "APPLY" if apply else "PREVIEW")
+    print("=" * 68)
+
+    bots = live_bots()
+    per_key, skipped = collect_slices(bots)
+    dexes = wallet_dexes(bots)
+    wallets = sorted(dexes)
+    print(f"live bots: {len(bots)}   addresses: {len(wallets)}   "
+          f"(wallet,coin) pairs with open trades: {len(per_key)}")
+    for w in wallets:
+        holders = sorted(n for n, b in bots.items() if b.get("wallet") == w)
+        print(f"  {_short(w)}  bots={len(holders)}  hip3={dexes[w] or 'none'}")
+    if skipped:
+        print(f"  SKIPPED (no resolvable exchange.walletAddress, never reconciled): "
+              f"{', '.join(sorted(skipped))}")
+
+    nets, errors = fetch_nets(bots)
+    for w, err in errors.items():
+        print(f"\nEXCHANGE FETCH FAILED for {_short(w)} ({err}) — no action for this address")
+    if not nets:
+        print("\nNo address could be read — read-only, no action taken")
+        return
+
+    try:
+        prev_seen = set(tuple(x) for x in json.load(open(STATE_FILE)))
+    except Exception:
+        prev_seen = set()
+
+    auto, minority, ambiguous = analyze(per_key, nets)
+
+    cur_seen = [[wallet, coin, name, tid] for wallet, coin, name, tid, *_ in auto]
     print(f"\n[AUTO-DELETABLE PHANTOMS: {len(auto)}]  "
-          "(single trade, absent on-chain, removal makes DB match reality)")
-    for coin, name, tid, signed, onchain, pair in auto:
-        confirmed = (coin, name, tid) in prev_seen
+          "(single trade, absent on-chain for ITS address, removal makes DB match)")
+    for wallet, coin, name, tid, signed, onchain, pair in auto:
+        confirmed = (wallet, coin, name, tid) in prev_seen
         tag = "confirmed 2x" if confirmed else "seen 1x (waits for next run)"
-        print(f"  {coin:8} {name:38} #{tid} slice={signed:+.4f} "
+        print(f"  {_short(wallet)} {coin:8} {name:38} #{tid} slice={signed:+.4f} "
               f"on-chain={onchain:+.4f}  {pair}  [{tag}]")
         if apply and confirmed:
             ok, msg = delete_trade(bots[name], tid)
@@ -303,12 +396,13 @@ def main():
         pass
 
     print(f"\n[REAL MINORITY POSITIONS: {len(minority)}]  (netted, NOT deleted — manual call)")
-    for coin, name, tid, signed, onchain, pair in minority:
-        print(f"  {coin:8} {name:38} #{tid} slice={signed:+.4f} on-chain={onchain:+.4f}  {pair}")
+    for wallet, coin, name, tid, signed, onchain, pair in minority:
+        print(f"  {_short(wallet)} {coin:8} {name:38} #{tid} slice={signed:+.4f} "
+              f"on-chain={onchain:+.4f}  {pair}")
 
     print(f"\n[AMBIGUOUS DISCREPANCIES: {len(ambiguous)}]  (multi-trade — review manually)")
-    for coin, db_sum, onchain, slices in ambiguous:
-        print(f"  {coin:8} db_sum={db_sum:+.4f} on-chain={onchain:+.4f}")
+    for wallet, coin, db_sum, onchain, slices in ambiguous:
+        print(f"  {_short(wallet)} {coin:8} db_sum={db_sum:+.4f} on-chain={onchain:+.4f}")
         for name, tid, signed, is_short, pair, _age in slices:
             print(f"      {name:38} #{tid} {signed:+.4f}")
 

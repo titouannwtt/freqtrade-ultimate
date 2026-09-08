@@ -103,6 +103,23 @@ def _merge_config(path: str, seen: set | None = None) -> dict:
     return merged
 
 
+def _vault_address(conf: dict) -> str | None:
+    """``exchange.ccxt_config.options.vaultAddress`` (alias ``subAccountAddress``).
+
+    ccxt treats both as the same field: it is hashed into the signed action and
+    designates WHICH account a signed order acts on. Reads use walletAddress; only
+    writes need this.
+    """
+    ex = conf.get("exchange") or {}
+    for block in ("ccxt_config", "ccxt_async_config"):
+        opts = (ex.get(block) or {}).get("options") or {}
+        for k in ("vaultAddress", "subAccountAddress"):
+            v = opts.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
 def discover_bots() -> list[dict]:
     """All running freqtrade 'trade' processes on this host, with merged config."""
     out = []
@@ -142,9 +159,15 @@ def discover_bots() -> list[dict]:
                 "api_pw": api.get("password"),
                 "available_capital": conf.get("available_capital"),
                 "capital_withdrawal": conf.get("capital_withdrawal", 0) or 0,
-                "wallet": (conf.get("exchange") or {}).get("walletAddress"),
+                "wallet": (conf.get("exchange") or {}).get("walletAddress")
+                or (conf.get("exchange") or {}).get("wallet_address"),
                 "private_key": (conf.get("exchange") or {}).get("privateKey")
                 or (conf.get("exchange") or {}).get("secret"),
+                # Hyperliquid sub-account: the SIGNER is the master's agent key, the
+                # TARGET is options.vaultAddress. Sign without it and the order lands
+                # on the master account — the worst possible outcome, silently.
+                "vault_address": _vault_address(conf),
+                "hip3_dexes": list((conf.get("exchange") or {}).get("hip3_dexes") or []),
                 "process_start": proc_start,
             }
         )
@@ -320,21 +343,75 @@ def fleetview_overview(config=Depends(get_config)):
 # ---------------------------------------------------------------------------
 
 
-def _live_wallet_creds(bots: list[dict]) -> tuple[str | None, str | None]:
+def _norm_addr(addr: str | None) -> str | None:
+    a = (addr or "").strip().lower()
+    return a or None
+
+
+def _live_wallet_creds(
+    bots: list[dict], wallet: str | None = None
+) -> tuple[str | None, str | None, str | None]:
+    """Signing credentials for ONE account: ``(wallet, private_key, vault_address)``.
+
+    Never "the first live bot found": once a bot sits on a Hyperliquid sub-account,
+    the first bot's key signs for a DIFFERENT account than the coin being resolved,
+    and every write (close_minority, close_unowned) would land on the wrong account.
+    When ``wallet`` is given, only a bot on that exact address qualifies. When it is
+    not, credentials are returned only if the whole live fleet shares one address.
+    """
+    live = [b for b in bots if not b["dry_run"] and b["wallet"] and b["private_key"]]
+    if wallet:
+        target = _norm_addr(wallet)
+        for b in live:
+            if _norm_addr(b["wallet"]) == target:
+                return b["wallet"], b["private_key"], b.get("vault_address")
+        return None, None, None
+    addrs = {_norm_addr(b["wallet"]) for b in live}
+    if len(addrs) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Fleet spans several Hyperliquid addresses — specify the wallet "
+                "for this action (signing with another account's key would place "
+                "the order on the wrong account)"
+            ),
+        )
+    for b in live:
+        return b["wallet"], b["private_key"], b.get("vault_address")
+    return None, None, None
+
+
+def _live_wallets(bots: list[dict]) -> list[str]:
+    """Every distinct address traded by the live bots, in a stable order."""
+    seen: dict[str, str] = {}
     for b in bots:
-        if not b["dry_run"] and b["wallet"] and b["private_key"]:
-            return b["wallet"], b["private_key"]
-    return None, None
+        if b["dry_run"] or not b["wallet"]:
+            continue
+        seen.setdefault(_norm_addr(b["wallet"]), b["wallet"])
+    return [seen[k] for k in sorted(seen)]
 
 
-def _fetch_positions_raw(wallet: str, key: str) -> list[dict]:
+def _fetch_positions_raw(
+    wallet: str, key: str | None = None, hip3_dexes: tuple | list = ()
+) -> list[dict]:
+    """Positions of ONE address: main dex + its HIP-3 builder dexes.
+
+    Address-only by default: ``fetch_positions`` on Hyperliquid is the public
+    /info endpoint, so no private key is required to read another account.
+    """
     import ccxt
 
-    cli = ccxt.hyperliquid({"walletAddress": wallet, "privateKey": key, "enableRateLimit": True})
+    cfg = {"walletAddress": wallet, "enableRateLimit": True}
+    if key:
+        cfg["privateKey"] = key
+    cli = ccxt.hyperliquid(cfg)
     last: Exception | None = None
     for attempt in range(3):
         try:
-            return cli.fetch_positions()
+            out = list(cli.fetch_positions())
+            for dex in sorted(set(hip3_dexes)):
+                out.extend(cli.fetch_positions(None, params={"dex": dex}))
+            return out
         except Exception as e:  # incl. RateLimitExceeded
             last = e
             time.sleep(5 * (attempt + 1))
@@ -417,87 +494,140 @@ def _ambiguous_hints(slices: list[dict], db_sum: float, net: float, mark: float)
     return hints
 
 
+def _short_addr(wallet: str) -> str:
+    return wallet[:6] + "..." + wallet[-4:] if len(wallet) > 12 else wallet
+
+
 def _build_reconciliation() -> dict:
+    """Reconcile each address SEPARATELY.
+
+    The fleet may span several Hyperliquid accounts (a bot on a sub-account). Summing
+    every bot's DB against a single wallet's on-chain net would make every position of
+    the other account read as a provable phantom — and this view feeds a one-click
+    delete. So bots are grouped by their own ``exchange.walletAddress``, each group is
+    compared to the net of ITS address, and a bot with no resolvable address is left
+    out of the comparison entirely and reported under ``unresolved_bots``.
+    """
     bots = discover_bots()
     live = [b for b in bots if not b["dry_run"] and b["db_path"]]
-    wallet, key = _live_wallet_creds(bots)
-    if not wallet:
-        raise HTTPException(status_code=409, detail="No live bot with wallet credentials found")
+    wallets = _live_wallets(bots)
+    if not wallets:
+        raise HTTPException(status_code=409, detail="No live bot with a wallet address found")
 
-    per_coin: dict[str, list[dict]] = {}
+    by_wallet: dict[str, list[dict]] = {}
+    unresolved: list[str] = []
     for b in live:
-        m = _bot_db_metrics(b["db_path"])
-        for t in m["open_trades"]:
-            coin = t["pair"].split("/")[0]
-            per_coin.setdefault(coin, []).append(
+        w = _norm_addr(b["wallet"])
+        if not w:
+            unresolved.append(b["bot_name"])
+            continue
+        by_wallet.setdefault(w, []).append(b)
+
+    coins: list[dict] = []
+    for wallet in wallets:
+        norm = _norm_addr(wallet)
+        group = by_wallet.get(norm, [])
+        per_coin: dict[str, list[dict]] = {}
+        for b in group:
+            m = _bot_db_metrics(b["db_path"])
+            for t in m["open_trades"]:
+                coin = t["pair"].split("/")[0]
+                per_coin.setdefault(coin, []).append(
+                    {
+                        "bot_name": b["bot_name"],
+                        "port": b["port"],
+                        "trade_id": t["trade_id"],
+                        "pair": t["pair"],
+                        "signed_amount": -t["amount"] if t["is_short"] else t["amount"],
+                        "open_rate": t["open_rate"],
+                        "stake_amount": t["stake_amount"],
+                        "wallet": wallet,
+                    }
+                )
+
+        dexes = sorted({d for b in group for d in (b.get("hip3_dexes") or [])})
+        positions = _fetch_positions_raw(wallet, hip3_dexes=dexes)
+        onchain: dict[str, dict] = {}
+        for p in positions:
+            coin = (p.get("symbol") or "").split("/")[0]
+            contracts = p.get("contracts") or 0
+            if not coin or not contracts:
+                continue
+            signed = -contracts if p.get("side") == "short" else contracts
+            cur = onchain.setdefault(
+                coin,
+                {"net": 0.0, "mark_price": None, "leverage": None, "unrealized_pnl": 0.0},
+            )
+            cur["net"] += signed
+            cur["mark_price"] = p.get("markPrice") or p.get("entryPrice")
+            cur["leverage"] = p.get("leverage")
+            cur["unrealized_pnl"] += p.get("unrealizedPnl") or 0.0
+
+        for coin in sorted(set(per_coin) | set(onchain)):
+            slices = per_coin.get(coin, [])
+            db_sum = sum(s["signed_amount"] for s in slices)
+            oc = onchain.get(
+                coin, {"net": 0.0, "mark_price": None, "leverage": None, "unrealized_pnl": 0.0}
+            )
+            net = oc["net"]
+            status, phantom_candidate, minority_slices = _classify_coin(slices, db_sum, net)
+            diff = db_sum - net
+            mark = oc["mark_price"] or 0.0
+            hints: list[dict] = []
+            if status == "ambiguous":
+                hints = _ambiguous_hints(slices, db_sum, net, mark)
+            coins.append(
                 {
-                    "bot_name": b["bot_name"],
-                    "port": b["port"],
-                    "trade_id": t["trade_id"],
-                    "pair": t["pair"],
-                    "signed_amount": -t["amount"] if t["is_short"] else t["amount"],
-                    "open_rate": t["open_rate"],
-                    "stake_amount": t["stake_amount"],
+                    "coin": coin,
+                    "wallet": wallet,
+                    "wallet_short": _short_addr(wallet),
+                    "db_sum": round(db_sum, 6),
+                    "on_chain": round(net, 6),
+                    "diff": round(diff, 6),
+                    "diff_notional": round(abs(diff) * mark, 2) if mark else None,
+                    "mark_price": oc["mark_price"],
+                    "on_chain_leverage": oc["leverage"],
+                    "unrealized_pnl": round(oc["unrealized_pnl"], 4),
+                    "status": status,
+                    "slices": slices,
+                    "phantom_candidate": phantom_candidate,
+                    "minority_slices": minority_slices,
+                    "hints": hints,
                 }
             )
-
-    positions = _fetch_positions_raw(wallet, key)
-    onchain: dict[str, dict] = {}
-    for p in positions:
-        coin = (p.get("symbol") or "").split("/")[0]
-        contracts = p.get("contracts") or 0
-        if not coin or not contracts:
-            continue
-        signed = -contracts if p.get("side") == "short" else contracts
-        cur = onchain.setdefault(
-            coin,
-            {"net": 0.0, "mark_price": None, "leverage": None, "unrealized_pnl": 0.0},
-        )
-        cur["net"] += signed
-        cur["mark_price"] = p.get("markPrice") or p.get("entryPrice")
-        cur["leverage"] = p.get("leverage")
-        cur["unrealized_pnl"] += p.get("unrealizedPnl") or 0.0
-
-    coins = []
-    for coin in sorted(set(per_coin) | set(onchain)):
-        slices = per_coin.get(coin, [])
-        db_sum = sum(s["signed_amount"] for s in slices)
-        oc = onchain.get(
-            coin, {"net": 0.0, "mark_price": None, "leverage": None, "unrealized_pnl": 0.0}
-        )
-        net = oc["net"]
-        status, phantom_candidate, minority_slices = _classify_coin(slices, db_sum, net)
-        diff = db_sum - net
-        mark = oc["mark_price"] or 0.0
-        hints: list[dict] = []
-        if status == "ambiguous":
-            hints = _ambiguous_hints(slices, db_sum, net, mark)
-        coins.append(
-            {
-                "coin": coin,
-                "db_sum": round(db_sum, 6),
-                "on_chain": round(net, 6),
-                "diff": round(diff, 6),
-                "diff_notional": round(abs(diff) * mark, 2) if mark else None,
-                "mark_price": oc["mark_price"],
-                "on_chain_leverage": oc["leverage"],
-                "unrealized_pnl": round(oc["unrealized_pnl"], 4),
-                "status": status,
-                "slices": slices,
-                "phantom_candidate": phantom_candidate,
-                "minority_slices": minority_slices,
-                "hints": hints,
-            }
-        )
 
     n_issue = sum(1 for c in coins if c["status"] != "ok")
     return {
         "generated_at": time.time(),
-        "wallet": wallet[:6] + "..." + wallet[-4:],
+        "wallet": _short_addr(wallets[0]),
+        "wallets": [_short_addr(w) for w in wallets],
+        "multi_address": len(wallets) > 1,
+        "unresolved_bots": sorted(unresolved),
         "live_bots": len(live),
         "coins": coins,
         "issues": n_issue,
     }
+
+
+def _select_coin_entry(state: dict, coin: str, wallet: str | None) -> dict:
+    """The single reconciliation entry a write action may act on.
+
+    With several addresses the same coin appears once per address; picking the first
+    match would act on the wrong account. Ambiguity is refused, not guessed.
+    """
+    matches = [c for c in state["coins"] if c["coin"] == coin]
+    if wallet:
+        target = _norm_addr(wallet)
+        matches = [c for c in matches if _norm_addr(c.get("wallet")) == target]
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"Coin {coin} not found")
+    if len(matches) > 1:
+        addrs = ", ".join(sorted({c.get("wallet_short") or "?" for c in matches}))
+        raise HTTPException(
+            status_code=409,
+            detail=f"Coin {coin} exists on several addresses ({addrs}) — specify wallet",
+        )
+    return matches[0]
 
 
 @router.get("/fleetview/reconciliation", tags=["FleetView"])
@@ -523,6 +653,9 @@ class ResolvePayload(BaseModel):
     coin: str
     bot_name: str | None = None
     trade_id: int | None = None
+    # Required only when the fleet spans several Hyperliquid addresses and the coin
+    # exists on more than one of them.
+    wallet: str | None = None
     confirm: bool = False
 
 
@@ -536,6 +669,7 @@ class RealignOp(BaseModel):
 class RealignPayload(BaseModel):
     coin: str
     operations: list[RealignOp]
+    wallet: str | None = None
     confirm: bool = False
 
 
@@ -577,12 +711,48 @@ def _bot_api_adjust_amount(bot: dict, trade_id: int, amount: float) -> str:
         return f"HTTP {e.code} (verify on next refresh)"
 
 
+def _require_creds(wallet: str | None, key: str | None, entry: dict) -> None:
+    """Refuse to sign when we do not hold the key of the coin's OWN account.
+
+    Signing with another account's key would place the order on that other account.
+    """
+    if not wallet or not key:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No live bot holds signing credentials for "
+                f"{entry.get('wallet_short') or 'this address'} — refusing to sign "
+                "with another account's key"
+            ),
+        )
+
+
 def _place_market_order(
-    wallet: str, key: str, symbol: str, side: str, amount: float, reduce_only: bool
+    wallet: str,
+    key: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    reduce_only: bool,
+    vault_address: str | None = None,
 ) -> dict:
     import ccxt
 
-    cli = ccxt.hyperliquid({"walletAddress": wallet, "privateKey": key, "enableRateLimit": True})
+    # ``vaultAddress`` (alias subAccountAddress) is hashed into the signed action and
+    # designates the TARGET account. Omit it for a sub-account bot and the order is
+    # executed on the MASTER account instead — verified experimentally, and the worst
+    # possible outcome. It is passed exactly as the bot's own config carries it.
+    options: dict[str, Any] = {}
+    if vault_address:
+        options["vaultAddress"] = vault_address
+    cfg: dict[str, Any] = {
+        "walletAddress": wallet,
+        "privateKey": key,
+        "enableRateLimit": True,
+    }
+    if options:
+        cfg["options"] = options
+    cli = ccxt.hyperliquid(cfg)
     cli.load_markets()
     ticker = cli.fetch_ticker(symbol)
     ref = ticker.get("bid") if side == "sell" else ticker.get("ask")
@@ -611,13 +781,16 @@ def fleetview_resolve(payload: ResolvePayload):
         raise HTTPException(status_code=409, detail="confirm=true required")
     # Never act on cached state: rebuild right before acting.
     state = _build_reconciliation()
-    entry = next((c for c in state["coins"] if c["coin"] == payload.coin), None)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"Coin {payload.coin} not found")
+    entry = _select_coin_entry(state, payload.coin, payload.wallet)
 
     bots = {b["bot_name"]: b for b in discover_bots()}
-    wallet, key = _live_wallet_creds(list(bots.values()))
-    result: dict[str, Any] = {"action": payload.action, "coin": payload.coin}
+    # Credentials of the account THIS coin lives on, never "the first live bot".
+    wallet, key, vault = _live_wallet_creds(list(bots.values()), entry.get("wallet"))
+    result: dict[str, Any] = {
+        "action": payload.action,
+        "coin": payload.coin,
+        "wallet": entry.get("wallet_short"),
+    }
 
     if payload.action == "delete_phantom":
         pc = entry["phantom_candidate"]
@@ -649,8 +822,15 @@ def fleetview_resolve(payload: ResolvePayload):
             )
         # Inverse order WITHOUT reduce-only: realigns wallet with sibling ledgers.
         side = "sell" if target["signed_amount"] > 0 else "buy"
+        _require_creds(wallet, key, entry)
         result["order"] = _place_market_order(
-            wallet, key, target["pair"], side, abs(target["signed_amount"]), reduce_only=False
+            wallet,
+            key,
+            target["pair"],
+            side,
+            abs(target["signed_amount"]),
+            reduce_only=False,
+            vault_address=vault,
         )
         bot = bots.get(payload.bot_name)
         if bot and bot["port"]:
@@ -665,7 +845,10 @@ def fleetview_resolve(payload: ResolvePayload):
         side = "sell" if net > 0 else "buy"
         # Reduce-only: can only shrink the real net position, never flip it.
         symbol = f"{payload.coin}/USDC:USDC"
-        result["order"] = _place_market_order(wallet, key, symbol, side, abs(net), reduce_only=True)
+        _require_creds(wallet, key, entry)
+        result["order"] = _place_market_order(
+            wallet, key, symbol, side, abs(net), reduce_only=True, vault_address=vault
+        )
 
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action {payload.action}")
@@ -777,9 +960,7 @@ def fleetview_realign(payload: RealignPayload):
     """
     # Never act on cached state: rebuild right before validating/acting.
     state = _build_reconciliation()
-    entry = next((c for c in state["coins"] if c["coin"] == payload.coin), None)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"Coin {payload.coin} not found")
+    entry = _select_coin_entry(state, payload.coin, payload.wallet)
     if entry["status"] == "ok":
         raise HTTPException(status_code=409, detail="Coin already reconciled")
 
