@@ -11,7 +11,6 @@ that's been going up steadily.
 """
 
 import logging
-from datetime import timedelta
 
 import numpy as np
 from pandas import DataFrame
@@ -20,7 +19,7 @@ from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
-from freqtrade.util import FtTTLCache, dt_now, dt_ts
+from freqtrade.util import FtTTLCache
 
 
 logger = logging.getLogger(__name__)
@@ -141,8 +140,9 @@ class TrendRegularityFilter(IPairList):
             if p not in self._pair_cache
         ]
 
-        since_ms = dt_ts(dt_now() - timedelta(minutes=self._lookback_period * self._tf_in_min))
-        candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms=since_ms)
+        candles = self._exchange.refresh_ohlcv_with_cache(
+            needed_pairs, lookback_period=self._lookback_period
+        )
 
         freshly_needed = {p for p, _, _ in needed_pairs}
         newly_computed: dict[str, dict] = {}
