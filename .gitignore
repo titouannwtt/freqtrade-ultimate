@@ -300,3 +300,6 @@ user_data/research_gold/
 user_data/data_btclongs/
 
 user_data/research_altlongs/
+
+# Archives de bots retires (configs + bases), jamais versionnees
+_retired/
