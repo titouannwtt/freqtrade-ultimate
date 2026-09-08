@@ -1884,6 +1884,18 @@ class CachedExchangeMixin:
     def reload_markets(self, force: bool = False, *, load_leverage_tiers: bool = True) -> None:
         from freqtrade.util.datetime_helpers import dt_ts
 
+        # Honour the same refresh interval as upstream BEFORE talking to the daemon.
+        # Without this the override queried the daemon on every bot cycle: markets only
+        # change hourly, and a shed response costs the full client timeout (240s), which
+        # alone accounted for `markets=240.0s` on every cycle of a 90-pair bot.
+        if (
+            not force
+            and self._last_markets_refresh > 0
+            and (self._last_markets_refresh + self.markets_refresh_interval > dt_ts())
+            and getattr(self, "_markets", None)
+        ):
+            return None
+
         client = self._ftcache_get_client()
         if client is not None:
             try:
@@ -1921,6 +1933,9 @@ class CachedExchangeMixin:
                         return
             except (CacheRateLimited, CacheTimedOut):
                 if hasattr(self, "_markets") and self._markets:  # type: ignore[attr-defined]
+                    # Stamp the refresh so a shed daemon does not make every subsequent
+                    # cycle pay the timeout again. Existing markets stay valid.
+                    self._last_markets_refresh = dt_ts()
                     logger.info("reload_markets shed — using existing markets")
                     return
             except CacheUnavailable:

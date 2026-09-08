@@ -292,6 +292,11 @@ def _make_mixin_exchange(dry_run=False, ftcache_enabled=True):
     mixin._ftcache_last_backoff_ts = 0.0
     mixin._ftcache_last_wait_log_ts = 0.0
     mixin._ftcache_local_limiter = None
+    # Markets state: upstream initialises these as plain ints/dicts. Leaving them as
+    # MagicMocks makes the reload_markets refresh-interval guard compare mocks.
+    mixin._last_markets_refresh = 0
+    mixin.markets_refresh_interval = 60 * 60 * 1000
+    mixin._markets = {}
 
     return mixin, client, mock
 
@@ -3310,3 +3315,90 @@ class TestHotTimeframesDaemon:
         resp = asyncio.run(d._handle_fetch(self._req(hot=False)))
         assert resp["served_from"] == "stale"
         assert seen["prio"] == TokenBucket.LOW
+
+
+class TestReloadMarketsRefreshInterval:
+    """The markets override must not query the daemon on every bot cycle.
+
+    Markets change hourly at most. Before this guard the override called the daemon
+    each cycle, and a shed response cost the full client timeout (240s), which showed
+    up as `markets=240.0s` on every single cycle of a live 90-pair bot.
+    """
+
+    def _mixin_with_markets(self):
+        mixin, client, _ = _make_mixin_exchange()
+        mixin.id = "hyperliquid"
+        mixin._markets = {"BTC/USDC:USDC": {}}
+        mixin.markets_refresh_interval = 60 * 60 * 1000
+        mixin._ftcache_run_on_loop = MagicMock()
+        mixin._ftcache_acquire_sync = MagicMock()
+        return mixin, client
+
+    def test_fresh_markets_skip_the_daemon_entirely(self):
+        from freqtrade.util.datetime_helpers import dt_ts
+
+        mixin, _ = self._mixin_with_markets()
+        mixin._last_markets_refresh = dt_ts()  # refreshed just now
+
+        assert CachedExchangeMixin.reload_markets(mixin) is None
+        mixin._ftcache_run_on_loop.assert_not_called()
+        mixin._ftcache_acquire_sync.assert_not_called()
+
+    def test_force_bypasses_the_interval(self):
+        from freqtrade.util.datetime_helpers import dt_ts
+
+        mixin, _ = self._mixin_with_markets()
+        mixin._last_markets_refresh = dt_ts()
+        mixin._ftcache_run_on_loop.return_value = (False, (False, {}))
+
+        try:
+            CachedExchangeMixin.reload_markets(mixin, force=True)
+        except (AttributeError, TypeError):
+            pass
+        mixin._ftcache_run_on_loop.assert_called_once()
+
+    def test_stale_markets_do_query_the_daemon(self):
+        mixin, _ = self._mixin_with_markets()
+        mixin._last_markets_refresh = 1  # epoch-old, well past the interval
+        mixin._ftcache_run_on_loop.return_value = (False, (False, {}))
+
+        try:
+            CachedExchangeMixin.reload_markets(mixin)
+        except (AttributeError, TypeError):
+            pass
+        mixin._ftcache_run_on_loop.assert_called_once()
+
+    def test_shed_stamps_refresh_so_next_cycle_is_free(self):
+        mixin, _ = self._mixin_with_markets()
+        mixin._last_markets_refresh = 1
+
+        def _shed(_coro):
+            raise CacheRateLimited("daemon shed")
+
+        mixin._ftcache_run_on_loop = MagicMock(side_effect=_shed)
+
+        assert CachedExchangeMixin.reload_markets(mixin) is None
+        assert mixin._last_markets_refresh > 1, "shed must stamp the refresh timestamp"
+
+        # Second cycle: the guard now short-circuits, no daemon round-trip at all.
+        mixin._ftcache_run_on_loop.reset_mock()
+        assert CachedExchangeMixin.reload_markets(mixin) is None
+        mixin._ftcache_run_on_loop.assert_not_called()
+
+    def test_shed_without_existing_markets_still_falls_through(self):
+        mixin, _ = self._mixin_with_markets()
+        mixin._last_markets_refresh = 1
+        mixin._markets = {}  # nothing usable in hand
+
+        def _shed(_coro):
+            raise CacheTimedOut("daemon slow")
+
+        mixin._ftcache_run_on_loop = MagicMock(side_effect=_shed)
+
+        try:
+            CachedExchangeMixin.reload_markets(mixin)
+        except (AttributeError, TypeError):
+            pass
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=20.0
+        )
