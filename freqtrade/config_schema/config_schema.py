@@ -305,6 +305,18 @@ CONF_SCHEMA = {
                     "enum": ["warn", "block"],
                     "default": "warn",
                 },
+                "never_block_entries": {
+                    "description": (
+                        "Keep coordination running (discovery, per-pair lock, intent "
+                        "markers, cross-check) but never let it refuse an entry: a refusal "
+                        "is downgraded to an allow at the leverage the coin already sits "
+                        "at, and reported/logged so it stays measurable. For a bot whose "
+                        "signals are rare enough that a missed entry costs more than a "
+                        "trade blurred by the shared wallet."
+                    ),
+                    "type": "boolean",
+                    "default": False,
+                },
                 "registry": {
                     "description": (
                         "Directory of bot configs to auto-discover the fleet (defaults to the "
