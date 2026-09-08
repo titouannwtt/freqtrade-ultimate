@@ -26,7 +26,6 @@ import logging
 from freqtrade.exchange.binance import Binance, Binanceus, Binanceusdm
 from freqtrade.exchange.bingx import Bingx
 from freqtrade.exchange.bitget import Bitget
-from freqtrade.exchange.bitmart import Bitmart
 from freqtrade.exchange.bitvavo import Bitvavo
 from freqtrade.exchange.bybit import Bybit
 from freqtrade.exchange.coinex import Coinex
@@ -75,7 +74,6 @@ CachedBinanceus = _make_cached(Binanceus)
 CachedBinanceusdm = _make_cached(Binanceusdm)
 CachedBingx = _make_cached(Bingx)
 CachedBitget = _make_cached(Bitget)
-CachedBitmart = _make_cached(Bitmart)
 CachedBitvavo = _make_cached(Bitvavo)
 CachedBybit = _make_cached(Bybit)
 CachedCoinex = _make_cached(Coinex)

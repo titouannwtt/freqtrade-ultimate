@@ -1648,10 +1648,10 @@ def test_OffsetFilter_error(mocker, whitelist_conf) -> None:
         PairListManager(MagicMock, whitelist_conf)
 
 
-def test_rangestabilityfilter_checks(mocker, default_conf, markets, tickers):
+def test_rangestabilityfilter_checks(mocker, default_conf, markets, tickers, caplog):
     default_conf["pairlists"] = [
         {"method": "VolumePairList", "number_assets": 10},
-        {"method": "RangeStabilityFilter", "lookback_days": 99999},
+        {"method": "RangeStabilityFilter"},
     ]
 
     mocker.patch.multiple(
@@ -1661,9 +1661,34 @@ def test_rangestabilityfilter_checks(mocker, default_conf, markets, tickers):
         get_tickers=tickers,
     )
 
+    # Missing lookback configuration is deprecated
+    get_patched_freqtradebot(mocker, default_conf)
+    assert log_has_re(
+        r"DEPRECATED: Using RangeStabilityFilter without lookback_days or lookback_period.*",
+        caplog,
+    )
+
+    # The fallback does not apply once a lookback_timeframe is given
+    default_conf["pairlists"] = [
+        {"method": "VolumePairList", "number_assets": 10},
+        {"method": "RangeStabilityFilter", "lookback_timeframe": "1h"},
+    ]
+
     with pytest.raises(
         OperationalException,
-        match=r"RangeStabilityFilter requires lookback_days to not exceed "
+        match=r"RangeStabilityFilter requires lookback_period to be set when using "
+        r"lookback_timeframe",
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
+
+    default_conf["pairlists"] = [
+        {"method": "VolumePairList", "number_assets": 10},
+        {"method": "RangeStabilityFilter", "lookback_days": 99999},
+    ]
+
+    with pytest.raises(
+        OperationalException,
+        match=r"RangeStabilityFilter requires lookback_period to not exceed "
         r"exchange max request size \([0-9]+\)",
     ):
         get_patched_freqtradebot(mocker, default_conf)
@@ -1675,6 +1700,41 @@ def test_rangestabilityfilter_checks(mocker, default_conf, markets, tickers):
 
     with pytest.raises(
         OperationalException, match="RangeStabilityFilter requires lookback_days to be >= 1"
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
+
+    default_conf["pairlists"] = [
+        {"method": "VolumePairList", "number_assets": 10},
+        {"method": "RangeStabilityFilter", "lookback_timeframe": "1h", "lookback_period": 99999},
+    ]
+
+    with pytest.raises(
+        OperationalException,
+        match=r"RangeStabilityFilter requires lookback_period to not exceed "
+        r"exchange max request size \([0-9]+\)",
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
+
+    default_conf["pairlists"] = [
+        {"method": "VolumePairList", "number_assets": 10},
+        {"method": "RangeStabilityFilter", "lookback_days": 10, "lookback_period": 10},
+    ]
+
+    with pytest.raises(
+        OperationalException,
+        match=r"Ambiguous configuration: lookback_days and lookback_period both set in pairlist",
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
+
+    default_conf["pairlists"] = [
+        {"method": "VolumePairList", "number_assets": 10},
+        {"method": "RangeStabilityFilter", "lookback_days": 10, "lookback_timeframe": "1h"},
+    ]
+
+    with pytest.raises(
+        OperationalException,
+        match=r"Ambiguous configuration: lookback_days implies a lookback_timeframe of 1d, "
+        r"but lookback_timeframe is set to 1h\..*",
     ):
         get_patched_freqtradebot(mocker, default_conf)
 
@@ -1853,7 +1913,7 @@ def test_spreadfilter_invalid_data(mocker, default_conf, markets, tickers, caplo
         (
             {"method": "RangeStabilityFilter", "lookback_days": 10, "min_rate_of_change": 0.01},
             "[{'RangeStabilityFilter': 'RangeStabilityFilter - Filtering pairs with rate "
-            "of change below 0.01 over the last days.'}]",
+            "of change below 0.01 over the last 10 x 1d candles.'}]",
             None,
         ),
         (
@@ -1864,7 +1924,7 @@ def test_spreadfilter_invalid_data(mocker, default_conf, markets, tickers, caplo
                 "max_rate_of_change": 0.99,
             },
             "[{'RangeStabilityFilter': 'RangeStabilityFilter - Filtering pairs with rate "
-            "of change below 0.01 and above 0.99 over the last days.'}]",
+            "of change below 0.01 and above 0.99 over the last 10 x 1d candles.'}]",
             None,
         ),
         (

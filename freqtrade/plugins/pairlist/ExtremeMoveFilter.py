@@ -15,7 +15,6 @@ regression R²), this filter catches short, violent moves regardless of how
 """
 
 import logging
-from datetime import timedelta
 
 from pandas import DataFrame
 
@@ -23,7 +22,7 @@ from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
-from freqtrade.util import FtTTLCache, dt_now, dt_ts
+from freqtrade.util import FtTTLCache
 
 
 logger = logging.getLogger(__name__)
@@ -150,8 +149,9 @@ class ExtremeMoveFilter(IPairList):
             (p, "1d", self._def_candletype) for p in pairlist if p not in self._pair_cache
         ]
 
-        since_ms = dt_ts(dt_now() - timedelta(days=self._lookback_days + 1))
-        candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms=since_ms)
+        candles = self._exchange.refresh_ohlcv_with_cache(
+            needed_pairs, lookback_period=self._lookback_days
+        )
 
         freshly_needed = {p for p, _, _ in needed_pairs}
         newly_computed: dict[str, dict] = {}
