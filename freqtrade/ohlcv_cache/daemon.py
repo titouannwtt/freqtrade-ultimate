@@ -741,8 +741,13 @@ class _PositionsCacheEntry:
     pushed_at: float  # time.monotonic()
 
 
-def positions_cache_key(exchange: str, wallet: str | None) -> tuple[str, str | None]:
-    """Cache identity of a positions view: an exchange AND an account address.
+def account_cache_key(exchange: str, wallet: str | None) -> tuple[str, str | None]:
+    """Cache identity of any ACCOUNT-scoped view: an exchange AND an account address.
+
+    Used by every daemon cache whose content depends on *whose* account is being
+    read — positions and balances today. Market data (candles, markets, tickers,
+    funding rates, leverage tiers) is identical for every account and is keyed on
+    the exchange alone.
 
     Hyperliquid addresses are case-insensitive hex, so they are lowercased: a bot
     sending a checksummed address and one sending it lowercase are the same
@@ -752,6 +757,10 @@ def positions_cache_key(exchange: str, wallet: str | None) -> tuple[str, str | N
     """
     w = (wallet or "").strip().lower()
     return (exchange, w or None)
+
+
+# Historical name, kept because the fleet tooling and tests import it directly.
+positions_cache_key = account_cache_key
 
 
 @dataclass
@@ -1093,9 +1102,14 @@ class Daemon:
         # that spoke.
         self._positions_fetch_targets: dict[tuple[str, str], str] = {}
         self._positions_fetch_clients: dict[tuple[str, str], Any] = {}  # ccxt (address-only)
-        self._balances_cache: dict[str, _BalancesCacheEntry] = {}
+        # Keyed by (exchange, wallet_address) for the same reason as positions: a
+        # balance is an ACCOUNT reading, not a market reading. Keyed on the exchange
+        # alone, a bot moved to a Hyperliquid sub-account was served the master
+        # wallet's equity (and its foreign currencies), so every sizing decision it
+        # made was computed against money it does not control.
+        self._balances_cache: dict[tuple[str, str | None], _BalancesCacheEntry] = {}
         self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))
-        self._balances_inflight: dict[str, asyncio.Event] = {}
+        self._balances_inflight: dict[tuple[str, str | None], asyncio.Event] = {}
         self._markets_cache: dict[str, _MarketsCacheEntry] = {}
         self._markets_ttl_s = float(global_cfg.get("markets_cache_ttl_s", 3600.0))
         self._markets_inflight: dict[str, asyncio.Event] = {}
@@ -2054,21 +2068,32 @@ class Daemon:
     # --------- centralized rate limiter: shared balances cache
 
     async def _handle_balances_put(self, req: dict) -> dict:
+        """Bot pushes its get_balances() result into the shared cache.
+
+        ``wallet_address`` says WHOSE money this is. Without it the push lands in
+        the anonymous bucket, which is never served to an address-aware reader.
+        """
         exchange = req.get("exchange", "hyperliquid")
         data = req.get("data", {})
-        self._balances_cache[exchange] = _BalancesCacheEntry(
+        cache_key = account_cache_key(exchange, req.get("wallet_address"))
+        self._balances_cache[cache_key] = _BalancesCacheEntry(
             data=data,
             pushed_at=time.monotonic(),
         )
-        inflight = self._balances_inflight.pop(exchange, None)
+        inflight = self._balances_inflight.pop(cache_key, None)
         if inflight is not None:
             inflight.set()
         return {"req_id": req.get("req_id", ""), "ok": True}
 
     async def _handle_balances_get(self, req: dict) -> dict:
-        """Bot reads cached balances, coalescing concurrent fetches."""
+        """Bot reads cached balances, coalescing concurrent fetches.
+
+        Scoped to (exchange, wallet_address): a bot on a sub-account must never be
+        handed the master wallet's equity, and must never teach it to the fleet.
+        """
         exchange = req.get("exchange", "hyperliquid")
-        entry = self._balances_cache.get(exchange)
+        cache_key = account_cache_key(exchange, req.get("wallet_address"))
+        entry = self._balances_cache.get(cache_key)
         if entry and (time.monotonic() - entry.pushed_at) < self._balances_ttl_s:
             return {
                 "req_id": req.get("req_id", ""),
@@ -2077,11 +2102,11 @@ class Daemon:
                 "data": entry.data,
             }
 
-        inflight = self._balances_inflight.get(exchange)
+        inflight = self._balances_inflight.get(cache_key)
         if inflight is not None:
             try:
                 await asyncio.wait_for(inflight.wait(), timeout=15.0)
-                entry = self._balances_cache.get(exchange)
+                entry = self._balances_cache.get(cache_key)
                 if entry:
                     return {
                         "req_id": req.get("req_id", ""),
@@ -2090,9 +2115,9 @@ class Daemon:
                         "data": entry.data,
                     }
             except TimeoutError:
-                self._balances_inflight.pop(exchange, None)
+                self._balances_inflight.pop(cache_key, None)
 
-        self._balances_inflight[exchange] = asyncio.Event()
+        self._balances_inflight[cache_key] = asyncio.Event()
 
         budget = self._get_budget(exchange)
         cost = self._get_weight(exchange, "balances")
