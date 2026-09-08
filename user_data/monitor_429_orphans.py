@@ -88,7 +88,12 @@ def scan_429_recent():
     """Per live screen, count 429 lines whose timestamp is within RECENT_MIN.
     Lines without a parseable timestamp are ignored (avoids counting stale
     scrollback that survives restarts)."""
-    cutoff = dt.datetime.now() - dt.timedelta(minutes=RECENT_MIN)
+    # Bot log timestamps are UTC (freqtrade/loggers pins Formatter.converter to
+    # gmtime), while this script may run from cron under the server's local
+    # timezone -- Europe/Paris since 2026-09-08. Comparing a local "now" against a
+    # UTC log stamp would put the cutoff 2h ahead of every line and silently report
+    # zero recent 429s forever. Build the cutoff in UTC, naive, to match the stamps.
+    cutoff = dt.datetime.now(dt.UTC).replace(tzinfo=None) - dt.timedelta(minutes=RECENT_MIN)
     hits, total = {}, {}
     for s in _screen_sessions():
         if s.startswith("HL-dry"):
@@ -194,7 +199,7 @@ def exchange_net_positions():
 
 def main():
     print("=" * 64)
-    print("FLEET MONITOR", time.strftime("%Y-%m-%d %H:%M:%S"),
+    print("FLEET MONITOR", time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()) + " UTC",
           f"(429 window: {RECENT_MIN}min)")
     print("=" * 64)
 
