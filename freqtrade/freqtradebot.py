@@ -1698,12 +1698,18 @@ class FreqtradeBot(LoggingMixin):
                 return False
         return True
 
-    def _positions_circuit_open(self, context: str) -> bool:
+    def _positions_circuit_open(self, context: str, *, entry_pair: str | None = None) -> bool:
         """Circuit breaker: True when the position cache is too stale to safely
         take a risky action (a new entry, a fabricated external close). It is a
         no-op — returns False — unless the mixin-side positions refresher is
         active and its cache has aged past the hard-stale threshold (e.g. during a
         429 storm). Exits are never gated by this: we must always be able to close.
+
+        ``entry_pair`` opts an ENTRY into the wait-then-fallback recovery described
+        in ``_positions_entry_recovery``; it is only ever set by ``create_trade``.
+        Without it — the fabricated external close, and every bot that leaves
+        ``shared_ohlcv_cache.positions_wait_on_entry_s`` at its default 0 — the
+        behaviour is bit-for-bit the original: refuse, nudge, retry next cycle.
         """
         check = getattr(self.exchange, "positions_are_trustworthy", None)
         if check is None:
@@ -1721,6 +1727,10 @@ class FreqtradeBot(LoggingMixin):
         ok, age = result
         if ok:
             return False
+        if entry_pair is not None:
+            wait_s = self._positions_entry_wait_s()
+            if wait_s > 0.0:
+                return self._positions_entry_recovery(entry_pair, age, wait_s)
         now = time_module.monotonic()
         if now - getattr(self, "_pos_cb_last_warn", 0.0) > 60.0:
             logger.warning("Positions too stale (age=%.0fs) — %s blocked until fresh", age, context)
@@ -1729,6 +1739,202 @@ class FreqtradeBot(LoggingMixin):
         if req is not None:
             req()
         return True
+
+    # A stale view is a fleet-wide condition, not a per-pair one: wait for it at most
+    # once every this many seconds, whatever the size of the whitelist. Below the 45s
+    # refresher cadence, above any single pass over the pairs.
+    _POS_WAIT_COOLDOWN_S: float = 30.0
+
+    def _positions_entry_wait_s(self) -> float:
+        """How long an entry may wait for fresh positions, per config.
+
+        0 (the default, and the value every other bot in the fleet keeps) means the
+        original behaviour. Clamped to 10s: the trading loop must stay responsive,
+        and a longer wait would not help anyway — the refresher's own cadence is
+        45s, so anything the wait can win, it wins in the first few seconds.
+        """
+        try:
+            raw = (self.config.get("shared_ohlcv_cache") or {}).get("positions_wait_on_entry_s", 0)
+            return max(0.0, min(float(raw), 10.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _positions_entry_recovery(self, pair: str, age: float, wait_s: float) -> bool:
+        """Stale positions on an ENTRY: wait briefly, then decide. True = still blocked.
+
+        Refusing the entry is not "retry next cycle" for a strategy on a 5m timeframe
+        with ``process_only_new_candles``: the signal lives on one candle, and a 90s
+        block covers it whole. Measured on hippo_original_multi, seven entries were
+        dropped this way in three days on cache ages of 90-270s.
+
+        So: ask for a refresh and *wait* for it (bounded). If the view comes back
+        trustworthy, the entry proceeds on real data — nothing is weakened. If it does
+        not, fall back to the only safe permission: enter only when nothing we know of
+        holds this coin (our own DB, the last wallet snapshot at any age, and sibling
+        bots on the shared wallet). Anything else — including "we could not look" —
+        keeps the refusal, because the risk this breaker exists to stop is stacking a
+        blind order onto a position we cannot see.
+        """
+        fresh = False
+        waited = 0.0
+        started = time_module.monotonic()
+        # At most one wait per pass over the whitelist. `enter_positions` walks every
+        # pair, so without this a fleet-wide stale view would multiply the wait by a
+        # hundred-pair whitelist and park the loop for minutes. And it would buy
+        # nothing: the view cannot have turned fresh for the next pair milliseconds
+        # later — if it had, the trustworthiness check above would have said so.
+        if started - getattr(self, "_pos_wait_last_attempt", 0.0) >= self._POS_WAIT_COOLDOWN_S:
+            self._pos_wait_last_attempt = started
+            waiter = getattr(self.exchange, "wait_for_trustworthy_positions", None)
+            if waiter is not None:
+                try:
+                    res = waiter(wait_s)
+                except Exception:
+                    res = None
+                if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], bool):
+                    fresh, age = res
+            else:
+                self._request_positions_refresh()
+            waited = time_module.monotonic() - started
+        if fresh:
+            logger.info(
+                "Positions were stale — waited %.1fs and got a fresh view (age=%.0fs); "
+                "entry %s proceeds on real data.",
+                waited,
+                age,
+                pair,
+            )
+            return False
+        known, why = self._known_position_on_coin(pair)
+        if known:
+            self._log_stale_entry_decision(
+                False,
+                f"Positions still stale (age={age:.0f}s) after {waited:.1f}s — "
+                f"entry {pair} REFUSED: {why}.",
+            )
+            return True
+        self._log_stale_entry_decision(
+            True,
+            f"Positions still stale (age={age:.0f}s) after {waited:.1f}s — "
+            f"entry {pair} ALLOWED blind: nothing known holds this coin (own book, last "
+            "wallet snapshot, sibling bots). Its stake is capped to the capital envelope.",
+        )
+        self._blind_entry_pairs.add(pair)
+        return False
+
+    def _log_stale_entry_decision(self, allowed: bool, message: str) -> None:
+        """One WARNING per outcome per minute, the rest counted and sent to debug.
+
+        The decision is taken once per whitelisted pair, so a stale view lasting a few
+        cycles would otherwise write several hundred near-identical warnings — the same
+        flood the breaker's own warning was throttled to fix. Both outcomes keep their
+        own budget, so an ALLOWED never hides a REFUSED.
+        """
+        now = time_module.monotonic()
+        state = getattr(self, "_pos_fallback_log", None)
+        if state is None:
+            state = self._pos_fallback_log = {}
+        last, suppressed = state.get(allowed, (0.0, 0))
+        if now - last < 60.0:
+            state[allowed] = (last, suppressed + 1)
+            logger.debug(message)
+            return
+        state[allowed] = (now, 0)
+        if suppressed:
+            message += f" ({suppressed} further identical decisions in the last minute)"
+        logger.warning(message)
+
+    @property
+    def _blind_entry_pairs(self) -> set[str]:
+        """Pairs whose entry was let through this cycle without a trustworthy
+        positions view. Consumed (and cleared) by ``create_trade``."""
+        pairs = getattr(self, "_blind_entry_pairs_store", None)
+        if pairs is None:
+            pairs = set()
+            self._blind_entry_pairs_store = pairs
+        return pairs
+
+    def _known_position_on_coin(self, pair: str) -> tuple[bool, str]:
+        """Everything we know, without touching the exchange, about a position on
+        ``pair``. Returns ``(known, reason)``.
+
+        Deliberately answers True — "assume a position" — whenever a source cannot
+        be read or has never been populated: the caller uses this to decide whether
+        it is safe to trade blind, and "we could not look" must never read as "flat".
+        """
+        try:
+            if Trade.get_trades_proxy(pair=pair, is_open=True):
+                return True, "an open trade on this pair in our own book"
+        except Exception:
+            return True, "our own book could not be read"
+        reader = getattr(self.exchange, "last_known_positions", None)
+        if reader is None:
+            return True, "no positions snapshot is available"
+        try:
+            positions, snap_age = reader()
+        except Exception:
+            return True, "the positions snapshot could not be read"
+        if positions is None:
+            return True, "no positions snapshot has ever been taken"
+        for p in positions:
+            if p.get("symbol") != pair:
+                continue
+            try:
+                contracts = abs(float(p.get("contracts") or 0.0))
+            except (TypeError, ValueError):
+                return True, "an unreadable entry for this pair in the wallet snapshot"
+            if contracts > 0:
+                return True, (
+                    f"{contracts} contracts on this pair in the {snap_age:.0f}s-old wallet snapshot"
+                )
+        coordinator = getattr(self, "_coordinator", None)
+        if coordinator is not None:
+            try:
+                siblings = coordinator.sibling_snapshot(pair)
+            except Exception:
+                return True, "the sibling fleet could not be read"
+            if siblings:
+                held = ", ".join(f"{s.get('bot')}:{s.get('side')}" for s in siblings)
+                return True, f"a sibling bot holds this coin ({held})"
+        return False, ""
+
+    def _cap_stake_to_envelope(self, pair: str, stake_amount: float) -> float:
+        """Ceiling for an entry opened without a trustworthy positions view.
+
+        ``_position_within_capital_envelope`` bounds DCA reinforcements from the DB
+        (``trade.stake_amount``) and the configured ``available_capital``; it reads no
+        position data at all, so stale positions cannot loosen it — verified, and the
+        reason it is not touched here. What it cannot see is a FIRST entry that nets
+        into a position it does not know about: Hyperliquid nets per coin at wallet
+        level, so an entry opened blind can land on top of an unseen position and
+        produce one real position past ``max_position_stake_ratio`` of this bot's
+        allocation while every DB-derived figure stays inside it. A blind entry
+        therefore carries that same ceiling up front, before it is ever sent.
+        """
+        ratio = self.config.get("max_position_stake_ratio", 1.0)
+        if not ratio or ratio <= 0:
+            return stake_amount
+        allocated = self.config.get("available_capital")
+        if not allocated:
+            try:
+                allocated = self.wallets.get_total_stake_amount()
+            except Exception:
+                return stake_amount
+        if not allocated or allocated <= 0:
+            return stake_amount
+        ceiling = allocated * ratio
+        if stake_amount <= ceiling:
+            return stake_amount
+        logger.warning(
+            "%s: blind entry stake %.2f capped to %.2f (%.0f%% of the bot's %.2f "
+            "allocation) — it is being opened on a stale positions view.",
+            pair,
+            stake_amount,
+            ceiling,
+            ratio * 100,
+            allocated,
+        )
+        return ceiling
 
     def _request_positions_refresh(self) -> None:
         """Event-driven freshness: nudge the mixin-side refresher to fetch now
@@ -1750,8 +1956,12 @@ class FreqtradeBot(LoggingMixin):
         logger.debug(f"create_trade for pair {pair}")
         # Circuit breaker: never open a NEW position on stale position data — on a
         # shared/netted wallet that risks double-entering or wrong netting.
-        if self._positions_circuit_open(f"entry {pair}"):
+        if self._positions_circuit_open(f"entry {pair}", entry_pair=pair):
             return False
+        # Consume the marker straight away (even if no signal follows) so it can never
+        # leak into a later cycle where positions are fresh again.
+        blind_entry = pair in self._blind_entry_pairs
+        self._blind_entry_pairs.discard(pair)
 
         analyzed_df, _ = self.dataprovider.get_analyzed_dataframe(pair, self.strategy.timeframe)
         nowtime = analyzed_df.iloc[-1]["date"] if len(analyzed_df) > 0 else None
@@ -1781,6 +1991,8 @@ class FreqtradeBot(LoggingMixin):
                     self.log_once(f"Pair {pair} is currently locked.", logger.info)
                 return False
             stake_amount = self.wallets.get_trade_stake_amount(pair, self.config["max_open_trades"])
+            if blind_entry:
+                stake_amount = self._cap_stake_to_envelope(pair, stake_amount)
 
             bid_check_dom = self.config.get("entry_pricing", {}).get("check_depth_of_market", {})
             if (bid_check_dom.get("enabled", False)) and (
@@ -1859,9 +2071,12 @@ class FreqtradeBot(LoggingMixin):
             return True
         # The guard runs every cycle while the DCA trigger stays true, so the same line was
         # logged 7848 times in 36h by one bot. Once per trade per hour is enough to notice.
-        key = (trade.id or 0, int(datetime.now(UTC).timestamp() // 3600))
-        if key not in self._envelope_warned:
-            self._envelope_warned.add(key)
+        key = (getattr(trade, "id", 0) or 0, int(datetime.now(UTC).timestamp() // 3600))
+        warned = getattr(self, "_envelope_warned", None)
+        if warned is None:
+            warned = self._envelope_warned = set()
+        if key not in warned:
+            warned.add(key)
             logger.warning(
                 "%s: safety order of %.2f refused — it would take this single position to "
                 "%.2f of margin, past %.0f%% of the bot's %.2f allocation. "

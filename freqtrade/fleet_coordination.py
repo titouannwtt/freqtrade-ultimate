@@ -334,6 +334,10 @@ class SiblingPositionReader:
 class PositionCoordinator:
     """Decision engine + anti-race locking for fleet position coordination."""
 
+    # Class-level default so any partially built coordinator (and any caller that
+    # predates the flag) behaves like the fleet does: refusals refuse.
+    never_block_entries: bool = False
+
     def __init__(self, config: dict[str, Any]) -> None:
         coord = config.get("position_coordination", {}) or {}
         self.mode = coord.get("mode", MODE_COMPAT)

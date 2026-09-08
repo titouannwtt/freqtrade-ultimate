@@ -203,6 +203,11 @@ class CachedExchangeMixin:
     _pos_soft_stale: float = 45.0
     _pos_hard_stale: float = 90.0
     _pos_report_to_daemon: bool = True
+    # Hard ceiling on any synchronous wait for fresh positions (see
+    # wait_for_trustworthy_positions). The trading loop must never be parked longer
+    # than this, whatever a config asks for.
+    _POS_WAIT_MAX_S: float = 10.0
+    _POS_WAIT_POLL_S: float = 0.25
     _pos_stop: Any = None  # threading.Event (created at start)
     _pos_force_event: Any = None  # threading.Event (created at start)
     _pos_lock: Any = None  # threading.Lock (created at start)
@@ -820,6 +825,74 @@ class CachedExchangeMixin:
                 self._pos_hard_stale,
             )
             self.request_positions_refresh()
+
+    def last_known_positions(self) -> tuple[list | None, float]:
+        """The newest positions snapshot whatever its age, plus that age in seconds.
+
+        Never touches the network. It exists for callers that must reason about
+        what we last *saw* when a fresh read is unavailable ("do we know of a
+        position on this coin?"). ``(None, inf)`` means nothing has ever been
+        fetched — which is "unknown", not "flat", and callers must treat it so.
+        """
+        cached = self._ftcache_last_positions
+        ts = self._ftcache_last_positions_ts
+        if cached is None or not ts:
+            return None, float("inf")
+        return cached, time.monotonic() - ts
+
+    def _positions_sync_daemon_read(self) -> bool:
+        """Best-effort *synchronous* read of the daemon's central positions cache.
+
+        Runs on the caller's thread with its own short-lived client and its own
+        event loop (like ``_positions_daemon_read``), so it shares no ccxt/asyncio
+        state with the refresher thread. Costs no exchange call: during a 429 storm
+        the daemon frequently holds a copy younger than ours, because the fleet's
+        fetches are coalesced there. Never raises.
+        """
+        try:
+            fetched_at = time.monotonic()
+            res = self._positions_daemon_read(getattr(self._api, "walletAddress", None))
+            if not res:
+                return False
+            hit, positions = res
+            if hit and isinstance(positions, list):
+                self._ftcache_save_positions(positions, fetched_at=fetched_at)
+                self._ftcache_bump("positions_sync_daemon_read")
+                return True
+        except Exception as e:
+            logger.debug("[positions-refresh] lecture synchrone daemon echouee: %s", e)
+        return False
+
+    def wait_for_trustworthy_positions(self, timeout_s: float) -> tuple[bool, float]:
+        """Try, synchronously and for at most ``timeout_s`` seconds, to get back to
+        a trustworthy positions view. Returns ``(ok, age_s)``.
+
+        ``request_positions_refresh`` alone is a *nudge*: it wakes the background
+        refresher and returns immediately, so a caller that must decide now (a rare
+        entry signal on a 5m candle) gets no benefit from it. This waits for the
+        result, and while waiting also reads the daemon's shared cache once — the
+        cheapest fresh copy available, since it costs no exchange call.
+
+        Hard-bounded by ``_POS_WAIT_MAX_S`` so the trading loop can never be parked
+        on it, and a no-op (immediate answer) when the refresher is inactive.
+        """
+        ok, age = self.positions_are_trustworthy()
+        if ok or not self._pos_refresher_active:
+            return ok, age
+        budget = max(0.0, min(float(timeout_s), self._POS_WAIT_MAX_S))
+        deadline = time.monotonic() + budget
+        self.request_positions_refresh()
+        self._positions_sync_daemon_read()
+        while True:
+            ok, age = self.positions_are_trustworthy()
+            if ok:
+                self._ftcache_bump("positions_wait_recovered")
+                return True, age
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._ftcache_bump("positions_wait_timeout")
+                return False, age
+            time.sleep(min(self._POS_WAIT_POLL_S, remaining))
 
     def positions_are_trustworthy(self) -> tuple[bool, float]:
         """Circuit-breaker helper (used in phase 4): positions are trustworthy iff
