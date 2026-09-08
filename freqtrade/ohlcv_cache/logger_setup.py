@@ -12,12 +12,27 @@ Both daemon-side and client-side log records are emitted with a
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
 _DAEMON_FMT = "%(asctime)s [ftcache] %(levelname)s %(name)s: %(message)s"
 _CLIENT_FMT = "%(asctime)s [ftcache-client] %(levelname)s %(name)s: %(message)s"
+
+
+def _utc_formatter(fmt: str) -> logging.Formatter:
+    """Formatter whose `%(asctime)s` is UTC, not server-local time.
+
+    The daemon runs in its own process and does not necessarily import
+    `freqtrade.loggers` (which pins `Formatter.converter` globally), so it has to
+    pin the converter itself. Without this, `daemon.log` would switch to Europe/Paris
+    at the next daemon spawn while the fleet's bot logs stay in UTC, making the two
+    impossible to correlate line-by-line during a rate-limit incident.
+    """
+    f = logging.Formatter(fmt)
+    f.converter = time.gmtime
+    return f
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -91,7 +106,7 @@ def setup_daemon_logger(log_path: str | Path | None, level: str = "INFO") -> log
     for h in list(logger.handlers):
         logger.removeHandler(h)
 
-    fmt = logging.Formatter(_DAEMON_FMT)
+    fmt = _utc_formatter(_DAEMON_FMT)
 
     if log_path:
         p = Path(log_path)

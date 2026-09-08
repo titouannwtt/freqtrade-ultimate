@@ -1753,7 +1753,7 @@ class Trade(ModelBase, LocalTrade):
     max_stake_amount: Mapped[float | None] = mapped_column(Float())
     amount: Mapped[float] = mapped_column(Float())
     amount_requested: Mapped[float | None] = mapped_column(Float())
-    open_date: Mapped[datetime] = mapped_column(nullable=False, default=datetime.now)
+    open_date: Mapped[datetime] = mapped_column(nullable=False, default=dt_now)
     close_date: Mapped[datetime | None] = mapped_column()
     # absolute value of the stop loss
     stop_loss: Mapped[float] = mapped_column(Float(), nullable=True, default=0.0)

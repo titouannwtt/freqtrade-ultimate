@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial, wraps
 from html import escape
 from itertools import chain
@@ -1153,7 +1153,12 @@ class Telegram(RPCHandler):
                         direction = arg
                         context.args.pop(0)  # Remove direction from args
                 timescale = int(context.args[0]) - 1
-                today_start = datetime.combine(date.today(), datetime.min.time())
+                # UTC day, to match /daily (rpc.py uses datetime.now(UTC).date()) and
+                # the tz-naive-UTC close_date it is compared against. date.today() is
+                # the *server* local day: since the host moved to Europe/Paris it would
+                # start the window at 22:00 UTC the previous day, so `/profit 1` covered
+                # 26h instead of 24h and disagreed with `/daily 1`.
+                today_start = datetime.combine(datetime.now(UTC).date(), datetime.min.time())
                 start_date = today_start - timedelta(days=timescale)
         except (TypeError, ValueError, IndexError):
             pass
