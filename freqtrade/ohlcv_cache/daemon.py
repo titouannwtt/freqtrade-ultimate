@@ -741,6 +741,19 @@ class _PositionsCacheEntry:
     pushed_at: float  # time.monotonic()
 
 
+def positions_cache_key(exchange: str, wallet: str | None) -> tuple[str, str | None]:
+    """Cache identity of a positions view: an exchange AND an account address.
+
+    Hyperliquid addresses are case-insensitive hex, so they are lowercased: a bot
+    sending a checksummed address and one sending it lowercase are the same
+    account and must share one cache entry. ``None`` (a client too old to send its
+    address) is its own bucket: it is never mixed with a known address, so an
+    unidentified push can never be served to an identified reader.
+    """
+    w = (wallet or "").strip().lower()
+    return (exchange, w or None)
+
+
 @dataclass
 class _BalancesCacheEntry:
     """Cached balances result pushed by a bot."""
@@ -1051,13 +1064,17 @@ class Daemon:
         self._tickers_cache: dict[str, _TickersCacheEntry] = {}
         self._tickers_ttl_s = float(global_cfg.get("tickers_cache_ttl_s", 30.0))
         self._tickers_inflight: dict[str, asyncio.Event] = {}
-        self._positions_cache: dict[str, _PositionsCacheEntry] = {}
+        # Keyed by (exchange, wallet_address): the fleet is NOT guaranteed to be
+        # one address. A bot on a Hyperliquid sub-account must never be served the
+        # master wallet's positions (nor teach the fleet its own) — that fabricates
+        # external_close on live positions in every direction.
+        self._positions_cache: dict[tuple[str, str | None], _PositionsCacheEntry] = {}
         # Default raised 3.0 -> 15.0: all bots share one wallet, so coalescing
         # fetch_positions to ~1 real API call per TTL window across the whole
         # fleet cuts positions rate-limit pressure without risking staleness
         # (bot side still forces a fresh CRITICAL fetch past 45s when holding).
         self._positions_ttl_s = float(global_cfg.get("positions_cache_ttl_s", 15.0))
-        self._positions_inflight: dict[str, asyncio.Event] = {}
+        self._positions_inflight: dict[tuple[str, str | None], asyncio.Event] = {}
         # Phase 5: central positions fetcher. Learn (exchange -> wallet address)
         # from positions_get requests; a background task fetches clearinghouseState
         # (public /info, address-only) per target and keeps _positions_cache warm.
@@ -1071,8 +1088,11 @@ class Daemon:
         self._positions_daemon_fetch_interval_s = float(
             global_cfg.get("positions_daemon_fetch_interval_s", 10.0)
         )
-        self._positions_fetch_targets: dict[str, str] = {}  # exchange -> wallet_address
-        self._positions_fetch_clients: dict[str, Any] = {}  # exchange -> ccxt (address-only)
+        # (exchange, wallet) -> wallet_address. One entry per distinct address in the
+        # fleet, so the central fetcher refreshes every account, not just the last one
+        # that spoke.
+        self._positions_fetch_targets: dict[tuple[str, str], str] = {}
+        self._positions_fetch_clients: dict[tuple[str, str], Any] = {}  # ccxt (address-only)
         self._balances_cache: dict[str, _BalancesCacheEntry] = {}
         self._balances_ttl_s = float(global_cfg.get("balances_cache_ttl_s", 5.0))
         self._balances_inflight: dict[str, asyncio.Event] = {}
@@ -1654,8 +1674,12 @@ class Daemon:
         if cached is not None and (now - cached[0]) < 5.0:
             return cached[1]
         syms: set = set()
-        entry = self._positions_cache.get(exchange)
-        if entry is not None:
+        # Union over every account known on this exchange: this drives OHLCV fetch
+        # priority, where covering one address too many is harmless and missing one
+        # would de-prioritise a pair a bot actually holds.
+        for (ex_id, _wallet), entry in self._positions_cache.items():
+            if ex_id != exchange:
+                continue
             for p in entry.data:
                 try:
                     if p.get("contracts") and float(p.get("contracts") or 0) != 0:
@@ -1936,7 +1960,7 @@ class Daemon:
         """Bot pushes its fetch_positions() result into the shared cache."""
         exchange = req.get("exchange", "hyperliquid")
         data = req.get("data", [])
-        cache_key = exchange
+        cache_key = positions_cache_key(exchange, req.get("wallet_address"))
         self.stats.positions_puts += 1
         self._positions_cache[cache_key] = _PositionsCacheEntry(
             data=data,
@@ -1958,19 +1982,24 @@ class Daemon:
         the bot can skip the separate acquire() round-trip.
         """
         exchange = req.get("exchange", "hyperliquid")
-        cache_key = exchange
+        wallet = req.get("wallet_address")
+        cache_key = positions_cache_key(exchange, wallet)
         self.stats.positions_gets += 1
         # Phase 5: learn the wallet address so the central fetcher can serve this
-        # exchange. Bots send it on every positions_get; recording is idempotent.
-        wallet = req.get("wallet_address")
-        if wallet and self._positions_fetch_targets.get(exchange) != wallet:
-            self._positions_fetch_targets[exchange] = wallet
-            logger.info(
-                "positions central fetch: learned %s wallet %s…%s",
-                exchange,
-                str(wallet)[:6],
-                str(wallet)[-4:],
-            )
+        # account. Bots send it on every positions_get; recording is idempotent.
+        # Targets ACCUMULATE per address — a second address never replaces the first,
+        # or the fleet would be served another account's positions.
+        if wallet and cache_key[1] is not None:
+            target_key = (exchange, cache_key[1])
+            if target_key not in self._positions_fetch_targets:
+                self._positions_fetch_targets[target_key] = wallet
+                logger.info(
+                    "positions central fetch: learned %s wallet %s…%s (%d address(es))",
+                    exchange,
+                    str(wallet)[:6],
+                    str(wallet)[-4:],
+                    sum(1 for k in self._positions_fetch_targets if k[0] == exchange),
+                )
         entry = self._positions_cache.get(cache_key)
         if entry and (time.monotonic() - entry.pushed_at) < self._positions_ttl_s:
             self.stats.positions_cache_hits += 1
@@ -2832,7 +2861,8 @@ class Daemon:
     async def _positions_fetch_client(self, exchange: str, wallet: str) -> Any:
         """Lazily build an address-only async ccxt client for the central
         positions fetch. No private key — clearinghouseState/info is public."""
-        client = self._positions_fetch_clients.get(exchange)
+        key = (exchange, (wallet or "").strip().lower())
+        client = self._positions_fetch_clients.get(key)
         if client is not None:
             return client
         import ccxt.async_support as ccxt_async
@@ -2842,8 +2872,13 @@ class Daemon:
         if dt:
             cfg["options"] = {"defaultType": dt}
         client = getattr(ccxt_async, exchange)(cfg)
-        self._positions_fetch_clients[exchange] = client
-        logger.info("central positions client created for %s (address-only)", exchange)
+        self._positions_fetch_clients[key] = client
+        logger.info(
+            "central positions client created for %s %s…%s (address-only)",
+            exchange,
+            str(wallet)[:6],
+            str(wallet)[-4:],
+        )
         return client
 
     async def _periodic_positions_fetch(self) -> None:
@@ -2855,19 +2890,26 @@ class Daemon:
         interval = self._positions_daemon_fetch_interval_s
         logger.info("central positions fetcher started (interval=%.0fs)", interval)
         while not self._shutdown_event.is_set():
-            for exchange, wallet in list(self._positions_fetch_targets.items()):
+            for (exchange, _norm), wallet in list(self._positions_fetch_targets.items()):
+                cache_key = positions_cache_key(exchange, wallet)
                 try:
                     client = await self._positions_fetch_client(exchange, wallet)
                     positions = await client.fetch_positions()
-                    self._positions_cache[exchange] = _PositionsCacheEntry(
+                    self._positions_cache[cache_key] = _PositionsCacheEntry(
                         data=positions, pushed_at=time.monotonic()
                     )
-                    ev = self._positions_inflight.pop(exchange, None)
+                    ev = self._positions_inflight.pop(cache_key, None)
                     if ev is not None:
                         ev.set()
                     self.stats.positions_puts += 1
                 except Exception as e:  # keep the loop alive; bots fall back locally
-                    logger.warning("central positions fetch failed for %s: %s", exchange, e)
+                    logger.warning(
+                        "central positions fetch failed for %s %s…%s: %s",
+                        exchange,
+                        str(wallet)[:6],
+                        str(wallet)[-4:],
+                        e,
+                    )
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
             except TimeoutError:
