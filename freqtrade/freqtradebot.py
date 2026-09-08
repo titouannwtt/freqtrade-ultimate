@@ -57,6 +57,7 @@ from freqtrade.fleet_coordination import PositionCoordinator
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
+from freqtrade.netting_metrics import NettingMetrics
 from freqtrade.order_identity import is_ours
 from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_db
 from freqtrade.persistence.key_value_store import set_startup_time
@@ -234,6 +235,8 @@ class FreqtradeBot(LoggingMixin):
 
             # Fleet position coordination (fork extension)
             self._coordinator = PositionCoordinator(self.config)
+            # Shared-wallet (netting) instrumentation: records, never decides.
+            self._netting = NettingMetrics(self.config.get("bot_name", ""))
             # Asserts the exchange/book position arithmetic around every order.
             self._iso_guard = PositionIsoGuard(self.config, self.exchange, self._coordinator)
             # Per-bot append-only record of position-affecting events. Sharded by bot so
@@ -523,6 +526,7 @@ class FreqtradeBot(LoggingMixin):
             self._push_fleet_digest()
         except Exception as exc:  # never let a dashboard convenience break trading
             logger.debug("fleet digest push failed: %s", exc)
+        self._netting.maybe_log_summary()
         _cp("snapshot")
 
         # Placed after the snapshot step (not before it) so a latency regression there
@@ -825,6 +829,26 @@ class FreqtradeBot(LoggingMixin):
             resolved = decision.leverage
             if not self._coordination_exchange_check(pair, is_short, resolved):
                 return False, resolved
+            # Netting instrumentation, recorded only once every refusal path above has
+            # been cleared, so the counters describe orders that are actually sent.
+            # Purely observational; it cannot refuse anything. Skipped when
+            # coordination is off: that bot opted out of fleet awareness, and a replay
+            # (which forces mode=off) would otherwise pay a sibling scan on every one
+            # of its thousands of simulated entries.
+            if self._coordinator.enabled:
+                try:
+                    self._netting.record_entry_attempt(
+                        pair,
+                        is_short,
+                        self._coordinator.sibling_snapshot(pair),
+                        leverage=resolved,
+                        overridden=decision.overridden,
+                        blocked_reason=decision.blocked_reason,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Netting: entry instrumentation failed for %s", pair, exc_info=True
+                    )
             self._coordinator.mark_intent(pair, is_short, resolved)
             return True, resolved
 
@@ -1450,6 +1474,7 @@ class FreqtradeBot(LoggingMixin):
             trade.close(close_price, show_msg=False)
             self._ensure_close_profit(trade)
             Trade.commit()
+            self._netting.record_external_close(trade.pair)
 
             # Send notification
             self._notify_exit(trade, "external_close", fill=True)
@@ -2210,6 +2235,10 @@ class FreqtradeBot(LoggingMixin):
 
         # Trade is now persisted and visible to sibling bots; drop the intent marker (if any).
         self._coordinator.clear_intent(pair)
+        if mode == "initial":
+            # Stamp the shared-wallet context of the entry on the trade itself, so a
+            # trade that only existed in this bot's book can be told apart afterwards.
+            self._netting.stamp_trade(trade, pair)
 
         # Updating wallets
         self.wallets.update()
@@ -3216,6 +3245,7 @@ class FreqtradeBot(LoggingMixin):
             amount,
             owned,
         )
+        self._netting.record_capped_exit(pair)
         return owned
 
     def _safe_exit_amount(self, trade: Trade, pair: str, amount: float) -> float:

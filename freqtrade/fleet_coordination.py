@@ -33,6 +33,14 @@ Three modes (config key ``position_coordination.mode``):
                higher leverage from a more aggressive sibling on a shared wallet.
 * ``strict`` — a pair already held by a sibling can never be entered.
 
+``position_coordination.never_block_entries`` (bool, per bot) keeps all of the above
+running — sibling discovery, the per-pair lock, intent markers, the exchange
+cross-check — but downgrades every refusal to an allow, at the leverage the coin
+already carries and without ever changing it. The suppressed refusal is reported on
+the ``Decision`` (``overridden`` / ``blocked_reason``) and logged, so a bot whose
+signals are too rare to afford a missed entry can trade through the shared wallet
+while the cost of doing so stays measurable.
+
 An ``flock`` + short-lived *intent marker* serialises concurrent entries on the
 same (group, pair) so two bots cannot both pass the check on the same candle
 close (first to acquire the lock wins).
@@ -121,6 +129,12 @@ class Decision:
     # True when the resolved leverage differs from what already sits on the
     # shared coin and a real exchange leverage change is therefore required.
     leverage_changed: bool = False
+    # True when the decision engine wanted to refuse this entry but
+    # ``never_block_entries`` turned the refusal into an allow. ``blocked_reason``
+    # then carries the refusal that WOULD have been applied, so the entry can be
+    # measured afterwards instead of silently disappearing.
+    overridden: bool = False
+    blocked_reason: str = ""
 
 
 def _db_url_to_path(db_url: str, config_dir: Path | None) -> Path | None:
@@ -338,6 +352,14 @@ class PositionCoordinator:
             logger.warning("Coordination: invalid scope '%s', falling back to 'wallet'", self.scope)
             self.scope = SCOPE_WALLET
         self.exchange_check = coord.get("exchange_check", EXCHANGE_WARN)
+        # Fork extension, opt-in per bot: keep the whole coordination machinery
+        # (sibling discovery, per-pair lock, intent markers, the exchange
+        # cross-check) but never let it REFUSE an entry. Intended for a bot whose
+        # signals are rare enough that a missed entry costs more than a trade
+        # blurred by the shared wallet. Every refusal it suppresses is still
+        # computed, reported on the Decision (``overridden`` / ``blocked_reason``)
+        # and logged, so the cost of the choice stays measurable.
+        self.never_block_entries = bool(coord.get("never_block_entries", False))
 
         self.enabled = self.mode != MODE_OFF
         self._self_bot = config.get("bot_name", "")
@@ -412,6 +434,22 @@ class PositionCoordinator:
             )
         return False
 
+    def sibling_snapshot(self, pair: str) -> list[dict[str, Any]]:
+        """What the rest of the fleet holds on ``pair`` right now, as plain dicts.
+
+        Read regardless of coordination ``mode`` (like ``opposite_side_sibling``):
+        measuring the shared wallet must not depend on whether the decision engine
+        is switched on. Never raises — an unreadable fleet yields an empty list.
+        """
+        try:
+            return [
+                {"bot": sp.bot_name, "side": "short" if sp.is_short else "long", "lev": sp.leverage}
+                for sp in self._sibling_positions(pair)
+            ]
+        except Exception:
+            logger.debug("Coordination: sibling snapshot failed for %s", pair, exc_info=True)
+            return []
+
     def _read_intents(self, pair: str) -> list[SiblingPosition]:
         """Read other bots' fresh intent markers (covers the pre-commit window)."""
         out: list[SiblingPosition] = []
@@ -444,7 +482,35 @@ class PositionCoordinator:
     # ----- decision -----------------------------------------------------------
 
     def evaluate(self, pair: str, is_short: bool, my_leverage: float) -> Decision:
-        """Decide whether this bot may open ``pair`` and at which leverage."""
+        """Decide whether this bot may open ``pair`` and at which leverage.
+
+        With ``never_block_entries`` set, a refusal is downgraded to an allow that
+        carries the refusal it replaced (``overridden`` / ``blocked_reason``). The
+        leverage handed back in that case is the one the coin ALREADY sits at on the
+        shared wallet — that is what the venue will execute at — and
+        ``leverage_changed`` stays False so no sibling position is ever disturbed.
+        """
+        decision = self._decide(pair, is_short, my_leverage)
+        if decision.allow or not self.never_block_entries:
+            return decision
+        coin_lev = my_leverage
+        try:
+            sib_levs = [s.leverage for s in self._sibling_positions(pair)]
+            if sib_levs:
+                coin_lev = max(sib_levs)
+        except Exception:  # an override must never be the thing that breaks entry
+            logger.debug("Coordination: could not read coin leverage for %s", pair, exc_info=True)
+        return Decision(
+            True,
+            float(coin_lev),
+            reason=decision.reason,
+            leverage_changed=False,
+            overridden=True,
+            blocked_reason=decision.reason,
+        )
+
+    def _decide(self, pair: str, is_short: bool, my_leverage: float) -> Decision:
+        """Raw coordination verdict, before any ``never_block_entries`` override."""
         if not self.enabled:
             return Decision(True, my_leverage)
 
