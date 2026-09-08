@@ -80,6 +80,11 @@ GLOBAL_DEFAULTS: dict = {
     "positions_refresh_backoff_max_s": 120,  # cap on the adaptive backoff after consecutive failures
     "positions_soft_stale_s": 45,  # cache older than this -> best-effort direct fetch
     "positions_hard_stale_s": 90,  # circuit breaker: older than this -> refuse risky actions
+    # Seconds an ENTRY may wait, synchronously, for the positions view to become
+    # trustworthy again before the circuit breaker decides (0 = current behaviour:
+    # the entry is refused for this cycle). Only worth raising on a bot whose
+    # signals are too rare to survive a lost candle; hard-capped at 10s bot-side.
+    "positions_wait_on_entry_s": 0,
     "positions_equiv_check_interval_s": 3600,  # HL public-vs-signed field cross-check cadence
     "positions_report_to_daemon": True,  # push refreshed positions to the shared cache (non-blocking)
     # --- Phase 5: daemon-side central positions fetch ---
