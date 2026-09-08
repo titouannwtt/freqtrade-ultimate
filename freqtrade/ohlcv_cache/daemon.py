@@ -1113,6 +1113,10 @@ class Daemon:
         self._markets_cache: dict[str, _MarketsCacheEntry] = {}
         self._markets_ttl_s = float(global_cfg.get("markets_cache_ttl_s", 3600.0))
         self._markets_inflight: dict[str, asyncio.Event] = {}
+        # Cooldown after a failed markets fetch. Without it every waiting bot starts
+        # its own fetch as soon as one fails, and the fleet stampedes the exchange.
+        self._markets_failed_at: dict[str, float] = {}
+        self._markets_retry_cooldown_s = float(global_cfg.get("markets_retry_cooldown_s", 60.0))
         self._funding_rates_cache: dict[str, _FundingRatesCacheEntry] = {}
         self._funding_rates_ttl_s = float(global_cfg.get("funding_rates_cache_ttl_s", 300.0))
         self._funding_rates_inflight: dict[str, asyncio.Event] = {}
@@ -2159,6 +2163,20 @@ class Daemon:
                 "age_s": now - entry.fetched_at,
             }
 
+        def _stale(reason: str) -> dict | None:
+            # Expired markets are still overwhelmingly correct: symbols change rarely.
+            # Serving them beats making every bot wait out the client timeout.
+            stale_entry = self._markets_cache.get(cache_key)
+            if stale_entry is None:
+                return None
+            return {
+                "req_id": req.get("req_id", ""),
+                "ok": True,
+                "data": stale_entry.data,
+                "served_from": reason,
+                "age_s": time.monotonic() - stale_entry.fetched_at,
+            }
+
         inflight = self._markets_inflight.get(cache_key)
         if inflight is not None:
             await inflight.wait()
@@ -2171,6 +2189,17 @@ class Daemon:
                     "served_from": "cache",
                     "age_s": time.monotonic() - entry.fetched_at,
                 }
+            # The fetch we waited on failed. Do NOT start our own: that is the
+            # stampede that turns one failure into one fetch per waiting bot.
+            served = _stale("stale_after_failed_inflight")
+            if served is not None:
+                return served
+
+        failed_at = self._markets_failed_at.get(cache_key)
+        if failed_at is not None and (now - failed_at) < self._markets_retry_cooldown_s:
+            served = _stale("stale_during_cooldown")
+            if served is not None:
+                return served
 
         evt = asyncio.Event()
         self._markets_inflight[cache_key] = evt
@@ -2205,6 +2234,7 @@ class Daemon:
                 data=data,
                 fetched_at=time.monotonic(),
             )
+            self._markets_failed_at.pop(cache_key, None)
             logger.info(
                 "markets fetched for %s/%s: %d symbols",
                 exchange,
@@ -2221,6 +2251,11 @@ class Daemon:
             msg = str(e)
             if "429" in msg or "RateLimit" in e.__class__.__name__:
                 budget.trigger_backoff(2.0)
+            self._markets_failed_at[cache_key] = time.monotonic()
+            logger.warning("markets fetch failed for %s: %s", cache_key, msg)
+            served = _stale("stale_after_error")
+            if served is not None:
+                return served
             return {
                 "req_id": req.get("req_id", ""),
                 "ok": False,
