@@ -622,6 +622,28 @@ class CachedExchangeMixin:
 
     # ---------------------------------------------------------------- positions refresher (phase 2)
 
+    def _ftcache_account_address(self) -> str | None:
+        """Public address identifying WHICH account this bot trades, or None.
+
+        Every daemon cache whose content is account-scoped (positions, balances)
+        is keyed on it. Hyperliquid exposes it as ``walletAddress``; it is public
+        (it is the argument of the unauthenticated /info endpoints), so sending it
+        to the daemon leaks nothing. ``None`` on exchanges that do not have one
+        keeps the pre-existing anonymous bucket, i.e. today's exact behaviour.
+        """
+        try:
+            resolver = getattr(self, "account_address", None)
+            if callable(resolver):  # Hyperliquid: sub-account / vault aware
+                return resolver() or None
+            opts = getattr(self._api, "options", {}) or {}
+            for key in ("user", "address", "subAccountAddress", "vaultAddress"):
+                value = opts.get(key)
+                if value:
+                    return str(value)
+            return getattr(self._api, "walletAddress", None) or None
+        except Exception:  # a half-built ccxt client must never break a read
+            return None
+
     def _resolve_positions_source(self) -> str:
         """HL live futures can read positions from the *public* clearinghouseState
         /info endpoint (ccxt.hyperliquid.fetch_positions uses handle_public_address
@@ -653,7 +675,8 @@ class CachedExchangeMixin:
         if self.trading_mode == TradingMode.FUTURES and opts.get("defaultType"):
             cfg["options"] = {"defaultType": opts["defaultType"]}
         if self._pos_source == "hl_public":
-            cfg["walletAddress"] = getattr(self._api, "walletAddress", None)
+            # The account we READ, which on a sub-account is not the signing wallet.
+            cfg["walletAddress"] = self._ftcache_account_address()
         else:
             for k in ("apiKey", "secret", "password", "walletAddress", "privateKey"):
                 v = getattr(self._api, k, None)
@@ -722,7 +745,7 @@ class CachedExchangeMixin:
         # whole fleet). Sending our wallet_address also teaches the daemon which
         # wallet to fetch. Fall through to our own /info only when it's a miss
         # (daemon central fetch off/cold/failed) — that's the fallback path.
-        wallet = getattr(self._api, "walletAddress", None)
+        wallet = self._ftcache_account_address()
         try:
             res = self._positions_daemon_read(wallet)
         except Exception as e:  # daemon unreachable/slow — fall back to own /info
@@ -853,7 +876,7 @@ class CachedExchangeMixin:
         """
         try:
             fetched_at = time.monotonic()
-            res = self._positions_daemon_read(getattr(self._api, "walletAddress", None))
+            res = self._positions_daemon_read(self._ftcache_account_address())
             if not res:
                 return False
             hit, positions = res
@@ -1651,7 +1674,12 @@ class CachedExchangeMixin:
         auto_granted = False
         _t_cache = time.monotonic()
         try:
-            ok, result = self._ftcache_run_on_loop(client.get_positions())
+            # Account-scoped read: the daemon keys positions on (exchange, address).
+            # The refresher path (_positions_refresher_loop) already did this; this
+            # ccxt-override path is the one every bot without the refresher uses.
+            ok, result = self._ftcache_run_on_loop(
+                client.get_positions(wallet_address=self._ftcache_account_address())
+            )
             if ok:
                 hit, positions, auto_granted = result
                 if hit:
@@ -1723,7 +1751,9 @@ class CachedExchangeMixin:
         self._ftcache_save_positions(positions)
 
         try:
-            self._ftcache_run_on_loop(client.push_positions(positions))
+            self._ftcache_run_on_loop(
+                client.push_positions(positions, wallet_address=self._ftcache_account_address())
+            )
         except CacheUnavailable:
             pass
 
@@ -1797,9 +1827,13 @@ class CachedExchangeMixin:
 
         client = self._ftcache_get_client()
         auto_granted = False
+        # WHOSE balance this is. The daemon caches balances per (exchange, address):
+        # without it a bot moved to a sub-account is served the master wallet's
+        # equity — wrong currencies, wrong free collateral, wrong position sizing.
+        wallet = self._ftcache_account_address()
         if client is not None:
             try:
-                ok, result = self._ftcache_run_on_loop(client.get_balances())
+                ok, result = self._ftcache_run_on_loop(client.get_balances(wallet_address=wallet))
                 if ok:
                     hit, balances, auto_granted = result
                     if hit:
@@ -1830,7 +1864,7 @@ class CachedExchangeMixin:
 
         if client is not None:
             try:
-                self._ftcache_run_on_loop(client.push_balances(balances))
+                self._ftcache_run_on_loop(client.push_balances(balances, wallet_address=wallet))
             except CacheUnavailable:
                 pass
 

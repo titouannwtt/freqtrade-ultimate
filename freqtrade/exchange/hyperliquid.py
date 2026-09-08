@@ -71,6 +71,29 @@ class Hyperliquid(Exchange):
         (TradingMode.FUTURES, MarginMode.CROSS),
     ]
 
+    def _configured_account_address(self) -> str | None:
+        """The account this bot TRADES, when it is not the signing wallet itself.
+
+        A Hyperliquid sub-account (or vault) is configured as
+        ``exchange.ccxt_config.options.vaultAddress`` (alias ``subAccountAddress``):
+        that address is hashed into every signed action, so orders execute on the
+        sub-account. Reads are a different code path — ccxt's
+        ``handle_public_address`` resolves ``clearinghouseState`` from
+        ``options.user`` / ``options.subAccountAddress`` and otherwise falls back to
+        the SIGNER's ``walletAddress``, i.e. the master. Configured with
+        ``vaultAddress`` alone, a bot therefore traded the sub-account while reading
+        the master's balance and positions. Returns None for the ordinary
+        single-wallet case, where the signer is the account.
+        """
+        ex = self._config.get("exchange", {}) or {}
+        for section in ("ccxt_config", "ccxt_sync_config", "ccxt_async_config"):
+            opts = (ex.get(section) or {}).get("options") or {}
+            for key in ("user", "address", "subAccountAddress", "vaultAddress"):
+                value = opts.get(key)
+                if value:
+                    return str(value)
+        return None
+
     @property
     def _ccxt_config(self) -> dict:
         # ccxt Hyperliquid defaults to swap
@@ -78,7 +101,30 @@ class Hyperliquid(Exchange):
         if self.trading_mode == TradingMode.SPOT:
             config.update({"options": {"defaultType": "spot"}})
         config.update(super()._ccxt_config)
+        # Point READS at the same account the signed actions target. Set as a client
+        # option rather than a per-call param: passing ``user`` in params makes ccxt
+        # re-probe unified-margin status on every fetch_balance, one extra /info call
+        # per read on the API we are already rate-limited on.
+        target = self._configured_account_address()
+        if target:
+            options = dict(config.get("options") or {})
+            options.setdefault("user", target)
+            config["options"] = options
         return config
+
+    def account_address(self) -> str | None:
+        """Public address of the account this bot reads: sub-account/vault if any,
+        else the signing wallet. This is the identity every account-scoped shared
+        cache is keyed on."""
+        try:
+            opts = getattr(self._api, "options", {}) or {}
+            for key in ("user", "address", "subAccountAddress", "vaultAddress"):
+                value = opts.get(key)
+                if value:
+                    return str(value)
+        except Exception as e:  # a half-built ccxt client must never break a read
+            logger.debug("could not read ccxt options for the account address: %s", e)
+        return getattr(self._api, "walletAddress", None) or None
 
     @retrier
     def additional_exchange_init(self) -> None:
@@ -93,9 +139,11 @@ class Hyperliquid(Exchange):
             if self.trading_mode == TradingMode.FUTURES and not self._config["dry_run"]:
                 # Determine account status
                 # Unified accounts must use the spot endpoint for balances
+                # The sub-account, not the signer: unified-margin status is a
+                # property of the account whose balance we will read.
                 request = {
                     "type": "userAbstraction",
-                    "user": self._api.walletAddress,
+                    "user": self.account_address(),
                 }
                 response = self._api.publicPostInfo(request)
                 self.unified_account = response in ('"unifiedAccount"', '"portfolioMargin"')

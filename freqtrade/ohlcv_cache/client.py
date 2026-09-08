@@ -578,14 +578,22 @@ class OhlcvCacheClient:
         except (CacheUnavailable, CacheTimedOut, CacheRateLimited):
             pass
 
-    async def push_balances(self, balances: dict) -> None:
-        """Push get_balances() result into the daemon's shared cache."""
+    async def push_balances(self, balances: dict, wallet_address: str | None = None) -> None:
+        """Push get_balances() result into the daemon's shared cache.
+
+        ``wallet_address`` identifies WHICH account this money belongs to. The
+        daemon keys its cache on (exchange, address): without it the push lands in
+        an anonymous bucket that is never served to an address-aware reader, so a
+        bot on a sub-account can never be handed the master wallet's equity.
+        """
         req = {
             "op": "balances_put",
             "req_id": uuid.uuid4().hex,
             "exchange": self.exchange_id,
             "data": balances,
         }
+        if wallet_address:
+            req["wallet_address"] = wallet_address
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(
@@ -609,13 +617,20 @@ class OhlcvCacheClient:
             raise CacheUnavailable(f"markets failed: {err_type} {err_msg}")
         return True, resp.get("data", {})
 
-    async def get_balances(self) -> tuple[bool, dict, bool]:
-        """Get cached balances from the daemon. Returns (hit, data, auto_grant)."""
+    async def get_balances(self, wallet_address: str | None = None) -> tuple[bool, dict, bool]:
+        """Get cached balances from the daemon. Returns (hit, data, auto_grant).
+
+        ``wallet_address`` scopes the read to our own account (public address only,
+        safe to send). Omitting it keeps the legacy anonymous bucket, so a client
+        running older code is served exactly as before.
+        """
         req = {
             "op": "balances_get",
             "req_id": uuid.uuid4().hex,
             "exchange": self.exchange_id,
         }
+        if wallet_address:
+            req["wallet_address"] = wallet_address
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             raise CacheUnavailable(

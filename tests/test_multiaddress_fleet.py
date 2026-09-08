@@ -783,3 +783,367 @@ def test_monitor_429_never_reads_a_private_key():
     src = (REPO / "user_data" / "monitor_429_orphans.py").read_text()
     assert "privateKey" not in src
     assert "_hyperliquid_freqtrade_access" not in src
+
+
+# --------------------------------------------------------------------------- #
+# 5. freqtrade/ohlcv_cache — the daemon's shared BALANCES cache
+#
+# Same defect as the positions cache, found 2026-09-08 on
+# `hyperliquid_hippo_original_multi`: moved to a sub-account, its /balance served
+# the MASTER wallet (1555 USDC plus HYPE and ETH that exist only on the master)
+# instead of its own 3015.40 USDC. A balance is an account reading, not a market
+# reading, so it must be keyed on (exchange, address) like positions.
+# --------------------------------------------------------------------------- #
+def _daemon_bal(tmp_path):
+    from freqtrade.ohlcv_cache.daemon import Daemon
+
+    return Daemon(str(tmp_path / "b.sock"), {"balances_cache_ttl_s": 999.0})
+
+
+BAL_MASTER = {"USDC": {"free": 1555.0, "total": 1555.0}, "HYPE": {"free": 3.0, "total": 3.0}}
+BAL_SUB = {"USDC": {"free": 3015.40, "total": 3015.40}}
+
+
+def test_daemon_balances_cache_is_keyed_by_address(tmp_path):
+    """Two bots, two addresses: neither is ever served the other's money."""
+    d = _daemon_bal(tmp_path)
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_A, "data": BAL_MASTER}
+        )
+    )
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_B, "data": BAL_SUB}
+        )
+    )
+    ra = _run(d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_A}))
+    rb = _run(d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_B}))
+    assert ra["hit"] and ra["data"] == BAL_MASTER
+    assert rb["hit"] and rb["data"] == BAL_SUB
+    # The exact symptom: no foreign currency crosses over.
+    assert "HYPE" not in rb["data"]
+
+
+def test_daemon_balances_would_have_leaked_before_the_fix(tmp_path):
+    """Proves the test above is not vacuous: one key per exchange DID overwrite."""
+    d = _daemon_bal(tmp_path)
+    _run(d._handle_balances_put({"exchange": "hyperliquid", "data": BAL_MASTER}))
+    _run(d._handle_balances_put({"exchange": "hyperliquid", "data": BAL_SUB}))
+    # Both pushes were anonymous, so they legitimately share one bucket and the
+    # second wins — which is precisely what every bot used to do.
+    r = _run(d._handle_balances_get({"exchange": "hyperliquid"}))
+    assert r["hit"] and r["data"] == BAL_SUB
+
+
+def test_daemon_balances_old_and_new_clients_cohabit(tmp_path):
+    """An un-upgraded bot (no address) and an upgraded one must not mix.
+
+    The 30 other bots keep running the old client for now: their anonymous push
+    must still serve them exactly as today, and must never be handed to the bot
+    that identifies itself.
+    """
+    d = _daemon_bal(tmp_path)
+    _run(d._handle_balances_put({"exchange": "hyperliquid", "data": BAL_MASTER}))
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_B, "data": BAL_SUB}
+        )
+    )
+    old_reader = _run(d._handle_balances_get({"exchange": "hyperliquid"}))
+    new_reader = _run(
+        d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_B})
+    )
+    assert old_reader["hit"] and old_reader["data"] == BAL_MASTER
+    assert new_reader["hit"] and new_reader["data"] == BAL_SUB
+
+
+def test_daemon_balances_identified_reader_misses_an_anonymous_push(tmp_path):
+    """A miss costs one API call; being served another account's equity costs money."""
+    d = _daemon_bal(tmp_path)
+    _run(d._handle_balances_put({"exchange": "hyperliquid", "data": BAL_MASTER}))
+    r = _run(d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_A}))
+    assert r["hit"] is False
+    assert r["data"] == {}
+    assert r["auto_grant"] is True
+
+
+def test_daemon_balances_anonymous_reader_misses_an_identified_push(tmp_path):
+    """Symmetric direction: an old bot must not inherit the sub-account's money."""
+    d = _daemon_bal(tmp_path)
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_B, "data": BAL_SUB}
+        )
+    )
+    r = _run(d._handle_balances_get({"exchange": "hyperliquid"}))
+    assert r["hit"] is False
+
+
+def test_daemon_balances_single_address_behaviour_unchanged(tmp_path):
+    """Non-regression: the whole fleet on one address still shares ONE fetch."""
+    d = _daemon_bal(tmp_path)
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_A, "data": BAL_MASTER}
+        )
+    )
+    for _ in range(5):  # five bots reading — all cache hits, no extra fetch
+        r = _run(d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_A}))
+        assert r["hit"] and r["data"] == BAL_MASTER
+    assert len(d._balances_cache) == 1
+
+
+def test_daemon_balances_address_case_does_not_split_the_cache(tmp_path):
+    """Checksummed and lowercase spellings are the same account."""
+    d = _daemon_bal(tmp_path)
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_A, "data": BAL_MASTER}
+        )
+    )
+    r = _run(
+        d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_A.lower()})
+    )
+    assert r["hit"] and r["data"] == BAL_MASTER
+    assert len(d._balances_cache) == 1
+
+
+def test_daemon_balances_inflight_coalescing_is_per_address(tmp_path):
+    """A miss on one address must not make the other address wait on it."""
+    d = _daemon_bal(tmp_path)
+    _run(d._handle_balances_get({"exchange": "hyperliquid", "wallet_address": WALLET_A}))
+    assert set(d._balances_inflight) == {("hyperliquid", WALLET_A.lower())}
+    # B's put must resolve B's waiter only, and must not clear A's.
+    _run(
+        d._handle_balances_put(
+            {"exchange": "hyperliquid", "wallet_address": WALLET_B, "data": BAL_SUB}
+        )
+    )
+    assert set(d._balances_inflight) == {("hyperliquid", WALLET_A.lower())}
+
+
+def test_client_balances_carry_the_wallet_and_stay_backward_compatible():
+    """The wire keeps its old shape when no address is known."""
+    from freqtrade.ohlcv_cache.client import OhlcvCacheClient
+
+    sent = {}
+
+    class _C(OhlcvCacheClient):
+        async def _send_and_receive(self, req):
+            sent.clear()
+            sent.update(req)
+            return {"ok": True, "hit": False, "data": {}, "auto_grant": False}
+
+    c = _C(socket_path="/nonexistent.sock", exchange_id="hyperliquid", trading_mode="futures")
+
+    _run(c.push_balances(BAL_SUB, wallet_address=WALLET_B))
+    assert sent["op"] == "balances_put" and sent["wallet_address"] == WALLET_B
+
+    _run(c.get_balances(wallet_address=WALLET_B))
+    assert sent["op"] == "balances_get" and sent["wallet_address"] == WALLET_B
+
+    # No address -> the field is absent, byte-for-byte the old request.
+    _run(c.push_balances(BAL_MASTER))
+    assert "wallet_address" not in sent
+    _run(c.get_balances())
+    assert "wallet_address" not in sent
+
+
+# --------------------------------------------------------------------------- #
+# 6. The mixin must actually SEND the address on both account-scoped paths.
+#
+# The positions fix of 02623e616 only covered the background refresher; the plain
+# ccxt override below is the path every bot without the refresher takes, and it
+# was still calling get_positions()/push_positions() blind.
+# --------------------------------------------------------------------------- #
+class _FakeCacheClient:
+    """Records what the mixin sends, and answers a miss so both paths run."""
+
+    def __init__(self, hit_positions=None, hit_balances=None):
+        self.calls = []
+        self._hit_positions = hit_positions
+        self._hit_balances = hit_balances
+        self.socket_path = "/nonexistent.sock"
+        self.last_positions_age_s = 0.0
+
+    async def get_positions(self, wallet_address=None):
+        self.calls.append(("get_positions", wallet_address))
+        if self._hit_positions is not None:
+            return True, self._hit_positions, False
+        return False, [], False
+
+    async def push_positions(self, positions, wallet_address=None):
+        self.calls.append(("push_positions", wallet_address))
+
+    async def get_balances(self, wallet_address=None):
+        self.calls.append(("get_balances", wallet_address))
+        if self._hit_balances is not None:
+            return True, self._hit_balances, False
+        return False, {}, False
+
+    async def push_balances(self, balances, wallet_address=None):
+        self.calls.append(("push_balances", wallet_address))
+
+
+def _mixin_instance(client, wallet, exchange_positions=None, exchange_balances=None):
+    """A CachedExchangeMixin wired to fakes, without building a real ccxt exchange."""
+    from freqtrade.ohlcv_cache.mixin import CachedExchangeMixin
+
+    class _Venue:
+        def fetch_positions(self, pair=None, params=None):
+            return exchange_positions or []
+
+        def get_balances(self, params=None):
+            return exchange_balances or {}
+
+    class _Ex(CachedExchangeMixin, _Venue):
+        pass
+
+    class _Api:
+        walletAddress = wallet
+
+    obj = object.__new__(_Ex)
+    obj._api = _Api()
+    obj._config = {"dry_run": False}
+    obj._pos_refresher_active = False
+    obj._ftcache_last_balances = {}
+    obj._get_configured_hip3_dexes = lambda: []
+    obj._ftcache_get_client = lambda: client
+    obj._ftcache_run_on_loop = lambda coro: (True, asyncio.run(coro))
+    obj._ftcache_record_cached = lambda *a, **k: None
+    obj._ftcache_save_positions = lambda *a, **k: None
+    obj._log_exchange_response = lambda *a, **k: None
+    obj._ftcache_init_priority = lambda p: p
+    obj._ftcache_acquire_sync = lambda **k: True
+    return obj
+
+
+def test_mixin_fetch_positions_sends_the_address_on_hit_and_on_push():
+    """Isolation: this bot asks for ITS account and labels what it pushes back."""
+    pos = [{"symbol": "BTC/USDC:USDC", "contracts": 1.0}]
+    client = _FakeCacheClient()
+    ex = _mixin_instance(client, WALLET_B, exchange_positions=pos)
+    assert ex.fetch_positions() == pos
+    assert ("get_positions", WALLET_B) in client.calls
+    assert ("push_positions", WALLET_B) in client.calls
+
+
+def test_mixin_get_balances_sends_the_address_on_hit_and_on_push():
+    client = _FakeCacheClient()
+    ex = _mixin_instance(client, WALLET_B, exchange_balances=BAL_SUB)
+    assert ex.get_balances() == BAL_SUB
+    assert ("get_balances", WALLET_B) in client.calls
+    assert ("push_balances", WALLET_B) in client.calls
+
+
+def test_mixin_serves_a_cache_hit_scoped_to_its_own_address():
+    """A hit is returned as-is — the isolation is the daemon's key, not a filter."""
+    client = _FakeCacheClient(hit_balances=BAL_SUB, hit_positions=[{"symbol": "ETH/USDC:USDC"}])
+    ex = _mixin_instance(client, WALLET_B)
+    assert ex.get_balances() == BAL_SUB
+    assert ex.fetch_positions() == [{"symbol": "ETH/USDC:USDC"}]
+    assert [c for c in client.calls if c[0].startswith("push")] == []
+
+
+def test_mixin_without_a_wallet_address_sends_nothing_extra():
+    """Non-HL / un-addressed exchange: the anonymous bucket, i.e. today's behaviour."""
+    client = _FakeCacheClient()
+    ex = _mixin_instance(client, None, exchange_balances=BAL_MASTER)
+    ex.get_balances()
+    assert ("get_balances", None) in client.calls
+    assert ("push_balances", None) in client.calls
+
+
+def test_mixin_whole_fleet_on_one_address_is_unchanged():
+    """Non-regression: several bots on the master wallet all key the same bucket."""
+    clients = [_FakeCacheClient() for _ in range(3)]
+    for c in clients:
+        _mixin_instance(c, WALLET_A, exchange_balances=BAL_MASTER).get_balances()
+    assert {c.calls[0][1] for c in clients} == {WALLET_A}
+
+
+# --------------------------------------------------------------------------- #
+# 7. Resolving WHICH account a bot trades — the identity every account-scoped
+#    cache is keyed on.
+#
+# A Hyperliquid sub-account is configured as `ccxt_config.options.vaultAddress`.
+# That address is hashed into signed actions (orders execute on the sub-account),
+# but ccxt resolves READS from `options.user` / `options.subAccountAddress` and
+# otherwise falls back to the signer's `walletAddress` — the master. Keying a cache
+# on `walletAddress` would have put the sub-account bot back in the master bucket,
+# i.e. fixed nothing.
+# --------------------------------------------------------------------------- #
+SUB = "0x" + "C" * 36 + "3333"
+
+
+def _hl(exchange_conf, trading_mode=None):
+    from freqtrade.enums import TradingMode
+    from freqtrade.exchange.hyperliquid import Hyperliquid
+
+    ex = object.__new__(Hyperliquid)
+    ex._config = {"exchange": exchange_conf}
+    ex.trading_mode = trading_mode or TradingMode.FUTURES
+    ex._ft_has = {"ccxt_futures_name": "swap"}
+    ex._exchange_ws = None  # __del__ closes the ws; we never built one
+    return ex
+
+
+def test_subaccount_is_read_from_the_vault_address():
+    ex = _hl({"ccxt_config": {"options": {"vaultAddress": SUB}}})
+    assert ex._configured_account_address() == SUB
+    assert ex._ccxt_config["options"]["user"] == SUB
+
+
+def test_subaccount_alias_and_explicit_user_are_both_honoured():
+    assert (
+        _hl({"ccxt_config": {"options": {"subAccountAddress": SUB}}})._ccxt_config["options"][
+            "user"
+        ]
+        == SUB
+    )
+    assert (
+        _hl({"ccxt_async_config": {"options": {"user": SUB}}})._ccxt_config["options"]["user"]
+        == SUB
+    )
+
+
+def test_single_wallet_config_is_untouched():
+    """Non-regression: the 63 bots on the master wallet get exactly today's config."""
+    ex = _hl({"ccxt_config": {"options": {}}})
+    assert ex._configured_account_address() is None
+    assert "user" not in ex._ccxt_config["options"]
+
+
+def test_account_address_prefers_the_subaccount_over_the_signer():
+    """The signer stays the master; the account we read is the sub-account."""
+    ex = _hl({})
+
+    class _Api:
+        options = {"user": SUB}
+        walletAddress = WALLET_A
+
+    ex._api = _Api()
+    assert ex.account_address() == SUB
+
+
+def test_account_address_falls_back_to_the_signing_wallet():
+    ex = _hl({})
+
+    class _Api:
+        options = {"defaultType": "swap"}
+        walletAddress = WALLET_A
+
+    ex._api = _Api()
+    assert ex.account_address() == WALLET_A
+
+
+def test_mixin_keys_the_cache_on_the_subaccount_not_the_signer():
+    """End of the chain: the daemon must be told the sub-account, or nothing is fixed."""
+    client = _FakeCacheClient()
+    ex = _mixin_instance(client, WALLET_A, exchange_balances=BAL_SUB)
+    ex.account_address = lambda: SUB  # what a Hyperliquid sub-account bot resolves to
+    ex.get_balances()
+    assert ("get_balances", SUB) in client.calls
+    assert ("push_balances", SUB) in client.calls
+    assert all(c[1] != WALLET_A for c in client.calls)
