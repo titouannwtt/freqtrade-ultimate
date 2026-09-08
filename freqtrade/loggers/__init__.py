@@ -2,6 +2,7 @@ import logging
 import logging.config
 import os
 import re
+import time
 from copy import deepcopy
 from logging import Formatter
 from pathlib import Path
@@ -20,6 +21,19 @@ from freqtrade.loggers.rich_console import get_rich_console
 
 logger = logging.getLogger(__name__)
 LOGFORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Fork: pin every log timestamp to UTC, process-wide.
+#
+# `logging.Formatter` renders `%(asctime)s` with `time.localtime` by default, so the
+# log clock follows the *server* timezone. The host moved from UTC to Europe/Paris on
+# 2026-09-08 (+2h in CEST): without this, the next restart of each bot would start
+# writing Paris-stamped lines into log files that already contain UTC-stamped ones,
+# and every log timestamp would sit 2h away from the trade dates in the database
+# (which are stored in UTC). Both make post-mortems on a 37-bot fleet unreliable.
+#
+# Setting the class attribute covers every Formatter built in this process,
+# including the ftcache client formatter, and is independent of the TZ env var.
+Formatter.converter = time.gmtime
 
 # Initialize bufferhandler - will be used for /log endpoints
 bufferHandler = FTBufferingHandler(1000)

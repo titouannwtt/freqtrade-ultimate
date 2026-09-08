@@ -2,6 +2,15 @@
 # Auto-restart loop for a Freqtrade trading bot.
 # Press Ctrl+C during the 60s countdown to stop completely.
 
+# Pin the trading process to UTC, whatever the server's display timezone is.
+# The host moved from UTC to Europe/Paris on 2026-09-08 (+2h in CEST). Trade dates,
+# candle dates and every ROI/timestop computation are UTC; keeping the process clock
+# on UTC too means no naive datetime can ever be off by the local offset, and the
+# ftcache daemon (spawned as a child of this process, inheriting its environment)
+# stays on the same clock. FreqUI is unaffected: the API serves epoch milliseconds
+# and the browser renders them in the viewer's own timezone.
+export TZ=UTC
+
 if [ -z "$1" ]; then
     echo "Usage: $0 <config_file.json>"
     echo "The config file should exist in live_configs/"
