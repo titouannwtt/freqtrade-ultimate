@@ -1485,6 +1485,16 @@ class CachedExchangeMixin:
                 priority=priority,
             )
             self._ftcache_record_cached("_async_get_candle_history", pair=pair)
+            if candle_type == CandleType.FUNDING_RATE:
+                # The daemon's own candle store is 6-wide for every candle type
+                # (funding rate padded with zeros, mirroring the pre-candle_columns
+                # exchange format). Trim to (timestamp, rate) here, at the boundary
+                # where daemon data re-enters the bot process, so downstream
+                # ohlcv_to_dataframe(candle_type=FUNDING_RATE) gets the 2-column
+                # shape it now expects without touching the shared daemon's
+                # internal representation.
+                rp, rtf, rct, rdata, rdrop = result
+                result = (rp, rtf, rct, [row[:2] for row in rdata], rdrop)
             return result
         except CacheRateLimited:
             self._ftcache_bump("rate_limited")
