@@ -101,6 +101,7 @@ class OhlcvCacheClient:
         self._respawn_cfg: dict | None = respawn_cfg
         self._bot_identity: dict | None = None
         self._registered = False
+        self.fleet_size = 0
         self._last_state: str = ""
         self._last_pairs_count: int = 0
         self.hold_off_s: float = 0.0
@@ -191,6 +192,9 @@ class OhlcvCacheClient:
                 resp = loads_response(line)
                 if resp.get("ok"):
                     self._registered = True
+                    # Kept so the local fallback limiter can size itself on the real
+                    # fleet instead of a hardcoded guess.
+                    self.fleet_size = int(resp.get("fleet_size", 0) or 0)
                     self.hold_off_s = float(resp.get("hold_off_s", 0))
                     self.hold_off_reason = resp.get("hold_off_reason", "")
                     logger.info(
@@ -918,9 +922,9 @@ def _ensure_daemon_running(
                 _trop_gros = _st.st_size > 5 * 1024 * 1024
                 _trop_vieux = (time.time() - _st.st_mtime) > 7 * 86400
                 if _trop_gros or _trop_vieux:
-                    _std_path.unlink()          # repart à zéro : aucun descripteur ne le tient
+                    _std_path.unlink()  # repart à zéro : aucun descripteur ne le tient
         except Exception:
-            pass                                 # jamais fatal : on ne bloque pas un démarrage
+            pass  # jamais fatal : on ne bloque pas un démarrage
         log_f = _std_path.open("ab", buffering=0)
         try:
             subprocess.Popen(
