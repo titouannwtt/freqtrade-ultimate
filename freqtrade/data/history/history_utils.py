@@ -727,7 +727,7 @@ def download_data(
     timerange = TimeRange()
     if "days" in config and config["days"] is not None:
         # TODO: use native datetime instead of strftime to avoid timezone issues
-        time_since = (datetime.now() - timedelta(days=config["days"])).strftime("%Y%m%d")  # noqa: DTZ005
+        time_since = (datetime.now() - timedelta(days=config["days"])).strftime("%Y%m%d")
         timerange = TimeRange.parse_timerange(f"{time_since}-")
 
     if "timerange" in config:
