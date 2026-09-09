@@ -68,9 +68,21 @@ class _LocalRateLimiter:
         exchange_budget_per_min: float = 1200.0,
         assumed_bots: int = 6,
     ):
+        self._exchange_budget_per_min = exchange_budget_per_min
+        self.assumed_bots = assumed_bots
         self._budget = exchange_budget_per_min / assumed_bots
         self._window: list[tuple[float, float]] = []  # (timestamp, cost)
         self._lock = threading.Lock()
+
+    def resize(self, assumed_bots: int) -> None:
+        """Re-share the exchange budget across a larger known fleet.
+
+        Only ever shrinks each bot's share: the fallback exists to protect the
+        exchange, so a stale small estimate must never widen the allowance.
+        """
+        if assumed_bots > self.assumed_bots:
+            self.assumed_bots = assumed_bots
+            self._budget = self._exchange_budget_per_min / assumed_bots
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -225,6 +237,16 @@ class CachedExchangeMixin:
 
     def _ftcache_get_local_limiter(self) -> _LocalRateLimiter:
         """Lazy-init the local fallback rate limiter."""
+        # Size the share on the real fleet when the daemon has told us how big it is.
+        # The hardcoded floor assumed 6 bots: with 37 live bots each one granted itself
+        # 1200/6 = 200 weight/min, a six-fold overshoot of the exchange limit. That is
+        # what turned a slow daemon into hard 429s and kept the fleet in a feedback loop
+        # on 2026-09-08.
+        fleet = self._LOCAL_LIMITER_ASSUMED_BOTS
+        client = getattr(self, "_ftcache_client", None)
+        if client:
+            fleet = max(fleet, int(getattr(client, "fleet_size", 0) or 0))
+
         if self._ftcache_local_limiter is None:
             from freqtrade.ohlcv_cache.defaults import EXCHANGE_DEFAULTS
 
@@ -234,15 +256,17 @@ class CachedExchangeMixin:
             # Use the real exchange budget (not the 85% daemon budget)
             self._ftcache_local_limiter = _LocalRateLimiter(
                 exchange_budget_per_min=budget,
-                assumed_bots=self._LOCAL_LIMITER_ASSUMED_BOTS,
+                assumed_bots=fleet,
             )
             logger.warning(
                 "local fallback rate limiter activated: %.0f weight/min budget "
-                "(assuming %d concurrent bots, exchange=%s)",
-                budget / self._LOCAL_LIMITER_ASSUMED_BOTS,
-                self._LOCAL_LIMITER_ASSUMED_BOTS,
+                "(sharing across %d bots, exchange=%s)",
+                budget / fleet,
+                fleet,
                 exchange_id,
             )
+        else:
+            self._ftcache_local_limiter.resize(fleet)
         return self._ftcache_local_limiter
 
     def _ftcache_should_block_ccxt(self) -> bool:
