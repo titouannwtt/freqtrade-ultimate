@@ -285,7 +285,9 @@ class VolumePairList(IPairList):
                 if p not in self._pair_cache and p not in shared_volumes
             ]
 
-            candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms)
+            candles = self._exchange.refresh_ohlcv_with_cache(
+                needed_pairs, lookback_period=self._lookback_period
+            )
 
             newly_computed: dict[str, dict] = {}
             for i, p in enumerate(filtered_tickers):

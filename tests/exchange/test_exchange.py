@@ -31,6 +31,7 @@ from freqtrade.exchange import (
     Kraken,
     date_minus_candles,
     market_is_active,
+    timeframe_to_msecs,
     timeframe_to_prev_date,
 )
 from freqtrade.exchange.common import (
@@ -2965,23 +2966,31 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
 
     assert len(exchange._expiring_candle_cache) == 0
 
-    res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
-    assert ohlcv_mock.call_count == 1
-    assert ohlcv_mock.call_args_list[0][0][0] == pairs
-    assert len(ohlcv_mock.call_args_list[0][0][0]) == 5
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=5)
+    # One download call per timeframe
+    assert ohlcv_mock.call_count == 3
+    requested = [p for call in ohlcv_mock.call_args_list for p in call[0][0]]
+    assert set(requested) == set(pairs)
+    assert len(requested) == 5
+    for call in ohlcv_mock.call_args_list:
+        timeframe = call[0][0][0][1]
+        expected_since = dt_ts(timeframe_to_prev_date(timeframe, start)) - 6 * timeframe_to_msecs(
+            timeframe
+        )
+        assert call[1]["since_ms"] == expected_since
 
     assert len(res) == 5
     # length of 3 - as we have 3 different timeframes
     assert len(exchange._expiring_candle_cache) == 3
 
     ohlcv_mock.reset_mock()
-    res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=5)
     assert ohlcv_mock.call_count == 0
     assert len(res) == 5
 
     # # re-run with one additional pair
     res = exchange.refresh_ohlcv_with_cache(
-        pairs + [("NEW/PAIR", "1d", CandleType.SPOT)], start.timestamp()
+        pairs + [("NEW/PAIR", "1d", CandleType.SPOT)], lookback_period=5
     )
     assert ohlcv_mock.call_count == 1
     assert len(res) == 6
@@ -2990,7 +2999,7 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     time_machine.move_to(start + timedelta(minutes=6), tick=False)
 
     ohlcv_mock.reset_mock()
-    res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=5)
     assert ohlcv_mock.call_count == 1
     assert len(ohlcv_mock.call_args_list[0][0][0]) == 1
     assert len(res) == 5
@@ -2999,20 +3008,31 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     time_machine.move_to(start + timedelta(hours=2), tick=False)
 
     ohlcv_mock.reset_mock()
-    res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
-    assert ohlcv_mock.call_count == 1
-    assert len(ohlcv_mock.call_args_list[0][0][0]) == 2
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=5)
+    assert ohlcv_mock.call_count == 2
+    requested = [p for call in ohlcv_mock.call_args_list for p in call[0][0]]
+    assert len(requested) == 2
     assert len(res) == 5
 
     # Expire all caches
     time_machine.move_to(start + timedelta(days=1, hours=2), tick=False)
 
     ohlcv_mock.reset_mock()
-    res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
-    assert ohlcv_mock.call_count == 1
-    assert len(ohlcv_mock.call_args_list[0][0][0]) == 5
-    assert ohlcv_mock.call_args_list[0][0][0] == pairs
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=5)
+    assert ohlcv_mock.call_count == 3
+    requested = [p for call in ohlcv_mock.call_args_list for p in call[0][0]]
+    assert set(requested) == set(pairs)
     assert len(res) == 5
+
+    # Cache keys must remain stable over time
+    assert len(exchange._expiring_candle_cache) == 3
+    # Expired entries are evicted when the cache is written to again -
+    # NEW/PAIR was never re-requested, so only the 3 base pairs remain.
+    assert exchange._expiring_candle_cache[("1d", 5)].currsize == 3
+
+    # A different lookback period uses separate caches
+    res = exchange.refresh_ohlcv_with_cache(pairs, lookback_period=6)
+    assert len(exchange._expiring_candle_cache) == 6
 
 
 def test_refresh_latest_ohlcv_funding_rate(mocker, default_conf_usdt, caplog) -> None:
@@ -4064,9 +4084,7 @@ def test_cancel_order_with_result_fetch_retry_finds_fill(
     api_mock = MagicMock()
     api_mock.cancel_order = MagicMock(side_effect=ccxt.InvalidOrder("Already filled"))
     filled_order = {"id": "1234", "status": "closed", "amount": 5.0, "filled": 5.0, "fee": {}}
-    api_mock.fetch_order = MagicMock(
-        side_effect=[ccxt.InvalidOrder("hiccup"), filled_order]
-    )
+    api_mock.fetch_order = MagicMock(side_effect=[ccxt.InvalidOrder("hiccup"), filled_order])
     exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange=exchange_name)
 
     res = exchange.cancel_order_with_result("1234", "ETH/BTC", 5.0)
