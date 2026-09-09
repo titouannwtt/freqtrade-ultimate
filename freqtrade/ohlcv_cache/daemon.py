@@ -436,6 +436,11 @@ class TokenBucket:
                 if self._waiters:
                     entry = self._waiters[0]
                     cost = entry[3]
+                    # Drop waiters whose client already gave up (shed deadline reached):
+                    # spending tokens on them starves the callers still waiting.
+                    if entry[4].done():
+                        heapq.heappop(self._waiters)
+                        continue
                     if self.tokens >= cost:
                         heapq.heappop(self._waiters)
                         self.tokens -= cost
@@ -1115,6 +1120,11 @@ class Daemon:
         self._markets_inflight: dict[str, asyncio.Event] = {}
         # Cooldown after a failed markets fetch. Without it every waiting bot starts
         # its own fetch as soon as one fails, and the fleet stampedes the exchange.
+        # A bot gives up on `acquire` after 120s and then rate-limits ITSELF, assuming a
+        # small fleet. That self-granted budget is what actually overshoots the exchange
+        # limit. Shedding before the client's timeout keeps refusals on the safe path:
+        # the bot raises DDosProtection instead of calling ccxt unmetered.
+        self._acquire_max_wait_s = float(global_cfg.get("acquire_max_wait_s", 90.0))
         self._markets_failed_at: dict[str, float] = {}
         self._markets_retry_cooldown_s = float(global_cfg.get("markets_retry_cooldown_s", 60.0))
         self._funding_rates_cache: dict[str, _FundingRatesCacheEntry] = {}
@@ -1777,7 +1787,26 @@ class Daemon:
         cost = float(req.get("cost", default_weight))
         budget = self._get_budget(exchange)
         self.stats.acquire_total += 1
-        await budget.acquire(cost, priority=priority, capital=capital)
+        try:
+            await asyncio.wait_for(
+                budget.acquire(cost, priority=priority, capital=capital),
+                timeout=self._acquire_max_wait_s,
+            )
+        except TimeoutError:
+            logger.info(
+                "acquire shed after %.0fs (priority=%d, cost=%.0f, exchange=%s)",
+                self._acquire_max_wait_s,
+                priority,
+                cost,
+                exchange,
+            )
+            return {
+                "req_id": req.get("req_id", ""),
+                "ok": False,
+                "throttled": True,
+                "error_type": "CacheRateLimited",
+                "error_message": (f"acquire not granted within {self._acquire_max_wait_s:.0f}s"),
+            }
         resp: dict[str, Any] = {"req_id": req.get("req_id", ""), "ok": True}
         if budget.backoff_active:
             resp["backoff_active"] = True
