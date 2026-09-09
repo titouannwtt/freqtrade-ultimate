@@ -1125,6 +1125,12 @@ class Daemon:
         # limit. Shedding before the client's timeout keeps refusals on the safe path:
         # the bot raises DDosProtection instead of calling ccxt unmetered.
         self._acquire_max_wait_s = float(global_cfg.get("acquire_max_wait_s", 90.0))
+        # Un rafraichissement de marches lent bloquait le bot pendant tout son delai
+        # client (240 s). Sur un pas de 5 min, cela fait sauter ~4 bougies sur TOUTES
+        # les paires d'un coup, a chaque expiration du TTL : mesure le 2026-09-09,
+        # deux heures consecutives a 77 % de captation contre 92 % en regime normal.
+        # Passe ce delai, on sert l'entree perimee et la recuperation continue en fond.
+        self._markets_max_wait_s = float(global_cfg.get("markets_max_wait_s", 20.0))
         self._markets_failed_at: dict[str, float] = {}
         self._markets_retry_cooldown_s = float(global_cfg.get("markets_retry_cooldown_s", 60.0))
         self._funding_rates_cache: dict[str, _FundingRatesCacheEntry] = {}
@@ -2240,13 +2246,34 @@ class Daemon:
                 cache_key,
                 markets_weight,
             )
-            await budget.acquire(markets_weight, priority=TokenBucket.NORMAL)
-            fetcher = self._get_fetcher(exchange, trading_mode)
-            client = await fetcher._ensure_client()
-            data = await asyncio.wait_for(
-                client.load_markets(),
-                timeout=120.0,
-            )
+
+            async def _do_fetch() -> dict:
+                await budget.acquire(markets_weight, priority=TokenBucket.NORMAL)
+                fetcher = self._get_fetcher(exchange, trading_mode)
+                client = await fetcher._ensure_client()
+                return await asyncio.wait_for(client.load_markets(), timeout=120.0)
+
+            fetch_task = asyncio.create_task(_do_fetch())
+            try:
+                # shield : le depassement de delai ne DOIT pas annuler la recuperation,
+                # sinon elle repart de zero au prochain appel et n'aboutit jamais.
+                data = await asyncio.wait_for(
+                    asyncio.shield(fetch_task), timeout=self._markets_max_wait_s
+                )
+            except TimeoutError:
+                served = _stale("stale_slow_fetch")
+                if served is not None:
+                    logger.info(
+                        "markets fetch trop lente (%.0fs) pour %s — entree perimee servie,"
+                        " recuperation poursuivie en fond",
+                        self._markets_max_wait_s,
+                        cache_key,
+                    )
+                    fetch_task.add_done_callback(
+                        lambda t: self._absorb_markets_result(cache_key, t)
+                    )
+                    return served
+                data = await fetch_task
             if not isinstance(data, dict):
                 logger.error(
                     "load_markets returned %s instead of dict — discarding (exchange=%s)",
@@ -2294,6 +2321,21 @@ class Daemon:
         finally:
             evt.set()
             self._markets_inflight.pop(cache_key, None)
+
+    def _absorb_markets_result(self, cache_key: str, task: asyncio.Task) -> None:
+        """Enregistre une recuperation de marches terminee APRES qu'on ait servi du perime."""
+        try:
+            data = task.result()
+        except Exception as e:  # une panne de fond ne doit rien casser
+            self._markets_failed_at[cache_key] = time.monotonic()
+            logger.warning("markets fetch de fond echouee pour %s: %s", cache_key, e)
+            return
+        if isinstance(data, dict) and data:
+            self._markets_cache[cache_key] = _MarketsCacheEntry(
+                data=data, fetched_at=time.monotonic()
+            )
+            self._markets_failed_at.pop(cache_key, None)
+            logger.info("markets fetch de fond terminee pour %s: %d symboles", cache_key, len(data))
 
     # --------- centralized: shared funding rates cache
 
