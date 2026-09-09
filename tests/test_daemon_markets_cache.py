@@ -14,6 +14,22 @@ import pytest
 from freqtrade.ohlcv_cache.daemon import Daemon, _MarketsCacheEntry
 
 
+@pytest.fixture(autouse=True)
+def _preserve_event_loop():
+    """Rend la boucle d'evenements trouvee a l'entree.
+
+    `asyncio.run` ferme sa boucle et n'en laisse aucune courante. D'autres modules de tests
+    construisent une boucle une fois par fixture puis appellent `run_until_complete` dessus :
+    une boucle effacee faisait echouer leurs tests de delai selon l'ordre de collecte.
+    """
+    try:
+        previous = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        previous = None
+    yield
+    asyncio.set_event_loop(previous)
+
+
 class _Budget:
     def __init__(self):
         self.backoff_calls = []
@@ -33,6 +49,7 @@ def _make_daemon(fetch_result=None, fetch_error=None):
     d._markets_inflight = {}
     d._markets_failed_at = {}
     d._markets_retry_cooldown_s = 60.0
+    d._markets_max_wait_s = 20.0
     d._budget = _Budget()
     d._get_budget = lambda exchange: d._budget
     d._get_weight = lambda exchange, op: 20.0
@@ -61,7 +78,9 @@ KEY = "hyperliquid:futures"
 
 def test_fresh_cache_is_served_without_fetching():
     d = _make_daemon(fetch_result={"BTC/USDC:USDC": {}})
-    d._markets_cache[KEY] = _MarketsCacheEntry(data={"ETH/USDC:USDC": {}}, fetched_at=time.monotonic())
+    d._markets_cache[KEY] = _MarketsCacheEntry(
+        data={"ETH/USDC:USDC": {}}, fetched_at=time.monotonic()
+    )
 
     resp = asyncio.run(d._handle_markets(dict(REQ)))
 
@@ -152,3 +171,81 @@ def test_waiters_of_a_failed_fetch_do_not_each_start_their_own(waiters):
 
     assert all(r["ok"] for r in responses)
     assert d._fetch_calls["n"] == 1, "only the leader may hit the exchange"
+
+
+class TestSlowMarketsFetch:
+    """Une recuperation de marches lente ne doit pas bloquer le bot.
+
+    Le client abandonne au bout de 240 s. Sur un pas de 5 minutes, ce blocage fait sauter
+    environ quatre bougies sur TOUTES les paires a la fois, a chaque expiration du TTL :
+    mesure le 2026-09-09, deux heures consecutives a 77 % de captation contre 92 % en
+    regime normal. Passe un court delai, on sert l'entree perimee.
+    """
+
+    @staticmethod
+    def _daemon(fetch_delay, result=None, max_wait=0.15):
+        d = _make_daemon(fetch_result=result or {"BTC/USDC:USDC": {}})
+        d._markets_max_wait_s = max_wait
+        calls = {"n": 0, "fini": False}
+
+        class _Client:
+            async def load_markets(self):
+                calls["n"] += 1
+                await asyncio.sleep(fetch_delay)
+                calls["fini"] = True
+                return result or {"BTC/USDC:USDC": {}}
+
+        class _Fetcher:
+            async def _ensure_client(self):
+                return _Client()
+
+        d._get_fetcher = lambda exchange, mode: _Fetcher()
+        d._calls = calls
+        return d
+
+    def test_une_recuperation_lente_sert_l_entree_perimee(self):
+        d = self._daemon(fetch_delay=5.0)
+        d._markets_cache[KEY] = _MarketsCacheEntry(
+            data={"ETH/USDC:USDC": {}}, fetched_at=time.monotonic() - 7200
+        )
+
+        resp = asyncio.run(d._handle_markets(dict(REQ)))
+
+        assert resp["ok"] is True
+        assert resp["served_from"] == "stale_slow_fetch"
+        assert resp["data"] == {"ETH/USDC:USDC": {}}
+
+    def test_la_recuperation_n_est_pas_annulee_et_alimente_le_cache(self):
+        """Sans shield, le depassement annulerait la tache et le cache ne se remplirait jamais."""
+
+        async def _run():
+            d = self._daemon(fetch_delay=0.3, result={"NEW/USDC:USDC": {}})
+            d._markets_cache[KEY] = _MarketsCacheEntry(
+                data={"OLD/USDC:USDC": {}}, fetched_at=time.monotonic() - 7200
+            )
+            resp = await d._handle_markets(dict(REQ))
+            assert resp["served_from"] == "stale_slow_fetch"
+            await asyncio.sleep(0.6)  # laisse la recuperation de fond se terminer
+            return d
+
+        d = asyncio.run(_run())
+        assert d._calls["fini"] is True, "la recuperation a ete annulee"
+        assert d._markets_cache[KEY].data == {"NEW/USDC:USDC": {}}, "cache non alimente"
+        assert KEY not in d._markets_failed_at
+
+    def test_une_recuperation_rapide_passe_normalement(self):
+        d = self._daemon(fetch_delay=0.0, result={"BTC/USDC:USDC": {}})
+
+        resp = asyncio.run(d._handle_markets(dict(REQ)))
+
+        assert resp["served_from"] == "fetch"
+        assert resp["data"] == {"BTC/USDC:USDC": {}}
+
+    def test_sans_entree_perimee_on_attend_la_recuperation(self):
+        """Mieux vaut attendre que renvoyer une erreur quand on n'a rien en main."""
+        d = self._daemon(fetch_delay=0.3, result={"BTC/USDC:USDC": {}})
+
+        resp = asyncio.run(d._handle_markets(dict(REQ)))
+
+        assert resp["ok"] is True
+        assert resp["served_from"] == "fetch"
