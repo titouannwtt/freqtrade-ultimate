@@ -251,7 +251,6 @@ class TestSlowMarketsFetch:
         assert resp["ok"] is True
         assert resp["served_from"] == "fetch"
 
-
     def test_une_seule_recuperation_de_fond_a_la_fois(self):
         """Le bug du 2026-09-10 : le bloc finally retirait le marqueur pendant que la tache
         de fond tournait, donc CHAQUE requete suivante lancait un nouveau load_markets.
@@ -271,4 +270,3 @@ class TestSlowMarketsFetch:
         d, suivantes = asyncio.run(_run())
         assert all(r["served_from"] == "stale_bg_fetch_running" for r in suivantes)
         assert d._calls["n"] == 1, f"{d._calls['n']} recuperations lancees au lieu d'une seule"
-
