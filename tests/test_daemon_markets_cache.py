@@ -50,6 +50,7 @@ def _make_daemon(fetch_result=None, fetch_error=None):
     d._markets_failed_at = {}
     d._markets_retry_cooldown_s = 60.0
     d._markets_max_wait_s = 20.0
+    d._markets_bg = {}
     d._budget = _Budget()
     d._get_budget = lambda exchange: d._budget
     d._get_weight = lambda exchange, op: 20.0
@@ -249,3 +250,25 @@ class TestSlowMarketsFetch:
 
         assert resp["ok"] is True
         assert resp["served_from"] == "fetch"
+
+
+    def test_une_seule_recuperation_de_fond_a_la_fois(self):
+        """Le bug du 2026-09-10 : le bloc finally retirait le marqueur pendant que la tache
+        de fond tournait, donc CHAQUE requete suivante lancait un nouveau load_markets.
+        Avec 36 bots, tempete sur l'appel le plus lourd de la place."""
+
+        async def _run():
+            d = self._daemon(fetch_delay=3.0, result={"NEW/USDC:USDC": {}})
+            d._markets_cache[KEY] = _MarketsCacheEntry(
+                data={"OLD/USDC:USDC": {}}, fetched_at=time.monotonic() - 7200
+            )
+            premieres = await d._handle_markets(dict(REQ))
+            assert premieres["served_from"] == "stale_slow_fetch"
+            # 20 bots demandent pendant que la recuperation de fond tourne encore
+            suivantes = [await d._handle_markets(dict(REQ)) for _ in range(20)]
+            return d, suivantes
+
+        d, suivantes = asyncio.run(_run())
+        assert all(r["served_from"] == "stale_bg_fetch_running" for r in suivantes)
+        assert d._calls["n"] == 1, f"{d._calls['n']} recuperations lancees au lieu d'une seule"
+

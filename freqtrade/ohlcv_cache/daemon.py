@@ -1131,6 +1131,11 @@ class Daemon:
         # deux heures consecutives a 77 % de captation contre 92 % en regime normal.
         # Passe ce delai, on sert l'entree perimee et la recuperation continue en fond.
         self._markets_max_wait_s = float(global_cfg.get("markets_max_wait_s", 20.0))
+        # Recuperations de marches passees en fond apres avoir servi du perime. Sans ce
+        # registre, le bloc finally retire le marqueur "en cours" pendant que la tache
+        # tourne encore : la requete suivante n'en voit aucune et en lance une NOUVELLE.
+        # Avec 36 bots, cela declenche une tempete sur l'appel le plus lourd de la place.
+        self._markets_bg: dict[str, asyncio.Task] = {}
         self._markets_failed_at: dict[str, float] = {}
         self._markets_retry_cooldown_s = float(global_cfg.get("markets_retry_cooldown_s", 60.0))
         self._funding_rates_cache: dict[str, _FundingRatesCacheEntry] = {}
@@ -2230,6 +2235,12 @@ class Daemon:
             if served is not None:
                 return served
 
+        bg = self._markets_bg.get(cache_key)
+        if bg is not None and not bg.done():
+            served = _stale("stale_bg_fetch_running")
+            if served is not None:
+                return served
+
         failed_at = self._markets_failed_at.get(cache_key)
         if failed_at is not None and (now - failed_at) < self._markets_retry_cooldown_s:
             served = _stale("stale_during_cooldown")
@@ -2269,6 +2280,7 @@ class Daemon:
                         self._markets_max_wait_s,
                         cache_key,
                     )
+                    self._markets_bg[cache_key] = fetch_task
                     fetch_task.add_done_callback(
                         lambda t: self._absorb_markets_result(cache_key, t)
                     )
@@ -2324,6 +2336,8 @@ class Daemon:
 
     def _absorb_markets_result(self, cache_key: str, task: asyncio.Task) -> None:
         """Enregistre une recuperation de marches terminee APRES qu'on ait servi du perime."""
+        if self._markets_bg.get(cache_key) is task:
+            self._markets_bg.pop(cache_key, None)
         try:
             data = task.result()
         except Exception as e:  # une panne de fond ne doit rien casser
