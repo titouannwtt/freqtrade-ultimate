@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "ftcache Daemon — Candle Fetch Sequence",
+    "output": "ftcache-sequence.html",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "views": [
+      { "id": "cache-hit", "label": "Cache path", "focus": ["bot", "client", "daemon", "store"], "note": "Every bot goes through the same in-process client and daemon before touching the store." },
+      { "id": "rate-limited-fetch", "label": "Rate-limited fetch", "focus": ["daemon", "bucket", "fetcher", "exchange"], "note": "Only missing candles reach Hyperliquid, and only through the shared token bucket." }
+    ]
+  },
+  "participants": [
+    { "id": "bot", "type": "backend", "label": "Bot", "sublabel": "CachedExchangeMixin" },
+    { "id": "client", "type": "backend", "label": "Client", "sublabel": "OhlcvCacheClient" },
+    { "id": "daemon", "type": "backend", "label": "ftcache", "sublabel": "Daemon" },
+    { "id": "store", "type": "database", "label": "Store", "sublabel": "CandleStore" },
+    { "id": "bucket", "type": "messagebus", "label": "TokenBucket", "sublabel": "priority limiter" },
+    { "id": "fetcher", "type": "backend", "label": "Fetcher", "sublabel": "ExchangeFetcher" },
+    { "id": "exchange", "type": "cloud", "label": "Hyperliquid", "sublabel": "ccxt" }
+  ],
+  "segments": [
+    { "from": 160, "to": 265, "label": "Request" },
+    { "from": 275, "to": 445, "label": "Rate-limited fetch" },
+    { "from": 455, "to": 505, "label": "Response" }
+  ],
+  "messages": [
+    { "id": "get-candles", "from": "bot", "to": "client", "y": 165, "label": "get_candles(pair, tf)", "variant": "emphasis" },
+    { "id": "socket-request", "from": "client", "to": "daemon", "y": 195, "label": "fetch request (Unix socket)", "variant": "default" },
+    { "id": "check-store", "from": "daemon", "to": "store", "y": 225, "label": "check cache", "variant": "default" },
+    { "id": "gaps-found", "from": "store", "to": "daemon", "y": 255, "label": "missing range", "variant": "return" },
+    { "id": "acquire-token", "from": "daemon", "to": "bucket", "y": 285, "label": "acquire(priority)", "variant": "default" },
+    { "id": "token-granted", "from": "bucket", "to": "daemon", "y": 315, "label": "token granted", "variant": "return" },
+    { "id": "fetch-missing", "from": "daemon", "to": "fetcher", "y": 345, "label": "fetch missing candles", "variant": "emphasis" },
+    { "id": "ccxt-call", "from": "fetcher", "to": "exchange", "y": 375, "label": "REST/WS call", "variant": "emphasis" },
+    { "id": "ohlcv-rows", "from": "exchange", "to": "fetcher", "y": 405, "label": "OHLCV rows", "variant": "return" },
+    { "id": "merge-rows", "from": "fetcher", "to": "daemon", "y": 435, "label": "rows", "variant": "return" },
+    { "id": "daemon-response", "from": "daemon", "to": "client", "y": 465, "label": "merged series (JSON)", "variant": "return" },
+    { "id": "client-response", "from": "client", "to": "bot", "y": 495, "label": "DataFrame", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "client", "from": 170, "to": 501, "type": "backend" },
+    { "participant": "daemon", "from": 200, "to": 471, "type": "backend" },
+    { "participant": "store", "from": 220, "to": 260, "type": "database" },
+    { "participant": "bucket", "from": 280, "to": 320, "type": "messagebus" },
+    { "participant": "fetcher", "from": 340, "to": 440, "type": "backend" },
+    { "participant": "exchange", "from": 370, "to": 410, "type": "cloud" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Why it exists", "items": ["N bots refreshing candles independently used to cascade into Hyperliquid rate limits", "One daemon per host serves the whole fleet from one shared cache"] },
+    { "dot": "orange", "title": "Priority levels", "items": ["CRITICAL (orders/exits) is never shed, even during a 429 backoff", "HIGH/NORMAL/LOW degrade progressively as backoff escalates"] },
+    { "dot": "rose", "title": "Fallback", "items": ["If the daemon is unreachable, the client raises CacheUnavailable and the bot falls back to a direct ccxt call", "The daemon is auto-spawned by the first bot's client and self-stops after idle_daemon_shutdown_s"] }
+  ]
+}
