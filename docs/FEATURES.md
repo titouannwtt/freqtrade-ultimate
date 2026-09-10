@@ -115,6 +115,10 @@ Everything below documents these changes one feature at a time, with the upstrea
 shortcoming, the fork's solution, configuration, an example, measured impact when known, and
 known limitations.
 
+**Visual reference.** [`docs/diagrams/`](diagrams/README.md) has three interactive HTML
+diagrams: the full system architecture, the `ftcache` fetch sequence, and the bot loop
+(including the Hyperliquid safety branches). Open any `.html` file directly in a browser.
+
 ---
 
 ## 1. Multi-Bot Infrastructure
@@ -126,6 +130,10 @@ no protection against two bots taking opposite positions on the same pair. Secti
 addresses each of those gaps.
 
 ### 1.1 OHLCV Cache Daemon (`ftcache`)
+
+**Diagram:** [`docs/diagrams/ftcache-sequence.html`](diagrams/ftcache-sequence.html) walks
+through one candle fetch end to end (cache check, token-bucket rate limiting, ccxt call,
+fallback path).
 
 **Where upstream falls short.** Each Freqtrade process fetches its own OHLCV candles, ticker
 snapshots, and position lists. When 5 to 15 bots share a single Hyperliquid API account, the
@@ -615,6 +623,10 @@ report is the same artifact that the FreqUI Ultimate strategy-dev panel consumes
 `freqtrade-ultimate` is the only Freqtrade fork that ships **first-class Hyperliquid support
 for perpetual futures**, including features that upstream simply does not handle because
 Hyperliquid behaves differently from CEX exchanges.
+
+**Diagram:** [`docs/diagrams/bot-loop.html`](diagrams/bot-loop.html) shows where liquidation
+detection and external-close detection (§3.1, §3.2) rejoin the normal `process()` loop, next
+to the shared-wallet guards from §1.3.
 
 ### 3.1 Liquidation Detection
 

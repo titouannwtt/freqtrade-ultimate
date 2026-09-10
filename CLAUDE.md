@@ -19,6 +19,7 @@ Fork of Freqtrade with Hyperliquid-specific handling and a trading co-pilot. Rea
 Trading loop: `freqtradebot.py:process()` → create trades → manage open orders → exit positions.
 Hyperliquid additions include external-close handling, liquidation detection and shared-wallet exit guard.
 Replay is for live-behavior validation/dry-run seeding, not strategy selection; read `.claude-tips/replay.md`.
+Visual diagrams (system architecture, `ftcache` sequence, bot loop): `docs/diagrams/README.md`.
 
 Strategy parameters: `JSON > buy_params/sell_params > DecimalParameter default`.
 Always check co-located hyperopt JSON for actual values.

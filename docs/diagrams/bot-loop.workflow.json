@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Freqtrade Ultimate — Bot Loop",
+    "output": "bot-loop.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "happy-path", "label": "One process() cycle", "focus": ["enter", "create_trade", "manage", "exit_pos", "handle_trade", "update_state"], "note": "The six steps FreqtradeBot.process() runs every throttle cycle." },
+      { "id": "hyperliquid-safety", "label": "Hyperliquid safety net", "focus": ["guard", "detect_exit", "handle_trade"], "note": "Where shared-wallet guards, external closes and liquidations join the normal loop." },
+      { "id": "persistence", "label": "Persistence and notify", "focus": ["handle_trade", "update_state", "db", "notify"], "note": "Every state change is written to the trade DB and pushed to Telegram/API." }
+    ]
+  },
+  "lanes": [
+    { "id": "loop", "label": "Bot Loop (freqtradebot.py)" },
+    { "id": "safety", "label": "Hyperliquid Safety", "variant": "exception" },
+    { "id": "persist", "label": "Persistence & Notify" }
+  ],
+  "phases": [
+    { "id": "entries", "label": "Entries", "fromCol": 0, "toCol": 1 },
+    { "id": "management", "label": "Manage + exit", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "settle", "label": "Settle", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "safety_net", "label": "Shared-wallet + Hyperliquid checks", "lane": "safety", "fromCol": 1, "toCol": 3, "variant": "security" }
+  ],
+  "mainPath": ["enter", "create_trade", "manage", "exit_pos", "handle_trade", "update_state"],
+  "nodes": [
+    { "id": "enter", "lane": "loop", "col": 0, "type": "backend", "label": "enter_positions()", "sublabel": "scan whitelist", "width": 140 },
+    { "id": "create_trade", "lane": "loop", "col": 1, "type": "backend", "label": "create_trade()", "sublabel": "per pair", "width": 140 },
+    { "id": "manage", "lane": "loop", "col": 2, "type": "backend", "label": "manage_open_orders()", "sublabel": "poll open orders", "width": 140 },
+    { "id": "exit_pos", "lane": "loop", "col": 3, "type": "backend", "label": "exit_positions()", "sublabel": "check ROI/stop/signal", "width": 140 },
+    { "id": "handle_trade", "lane": "loop", "col": 4, "type": "backend", "label": "handle_trade()", "sublabel": "submit exit order", "width": 140 },
+    { "id": "update_state", "lane": "loop", "col": 5, "type": "backend", "label": "update_trade_state()", "sublabel": "reconcile fill", "width": 140 },
+    { "id": "guard", "lane": "safety", "col": 1, "type": "security", "label": "Wallet Guards", "sublabel": "reduceOnly + hedge check", "width": 140 },
+    { "id": "detect_exit", "lane": "safety", "col": 3, "type": "security", "label": "External Exit Detect", "sublabel": "external close or liquidation", "width": 150 },
+    { "id": "db", "lane": "persist", "col": 4, "type": "database", "label": "Trade DB", "sublabel": "SQLite", "width": 140 },
+    { "id": "notify", "lane": "persist", "col": 5, "type": "messagebus", "label": "RPC Notify", "sublabel": "Telegram / API", "width": 140 }
+  ],
+  "edges": [
+    { "id": "enter-create", "from": "enter", "to": "create_trade", "variant": "default" },
+    { "id": "create-manage", "from": "create_trade", "to": "manage", "variant": "default" },
+    { "id": "manage-exit", "from": "manage", "to": "exit_pos", "variant": "default" },
+    { "id": "exit-handle", "from": "exit_pos", "to": "handle_trade", "variant": "default" },
+    { "id": "handle-update", "from": "handle_trade", "to": "update_state", "variant": "default" },
+    { "id": "create-guard", "from": "create_trade", "to": "guard", "label": "pre-order check (reduceOnly)", "variant": "security" },
+    { "id": "manage-detect", "from": "manage", "to": "detect_exit", "label": "position gone / user fills?", "variant": "dashed", "role": "branch" },
+    { "id": "exit-detect", "from": "exit_pos", "to": "detect_exit", "variant": "dashed", "role": "branch" },
+    { "id": "detect-handle", "from": "detect_exit", "to": "handle_trade", "label": "exit_reason=external_close|LIQUIDATION", "variant": "dashed" },
+    { "id": "handle-db", "from": "handle_trade", "to": "db", "label": "persist order" },
+    { "id": "update-notify", "from": "update_state", "to": "notify", "label": "trade event" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "One cycle", "items": ["Every throttle tick runs the same six steps, in order", "enter_positions and exit_positions are the only steps that can open or close a trade"] },
+    { "dot": "rose", "title": "Hyperliquid safety net", "items": ["Wallet guards run before every order on a shared wallet", "External close and liquidation are detected inside manage/exit and rejoin handle_trade with a distinct exit_reason"] },
+    { "dot": "emerald", "title": "Persistence", "items": ["update_trade_state() is the single place a fill becomes durable state", "Every state change is persisted before it is notified"] }
+  ]
+}

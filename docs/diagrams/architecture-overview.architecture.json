@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Freqtrade Ultimate — System Architecture",
+    "output": "architecture-overview.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "fleet-caching", "label": "Fleet caching", "focus": ["bot", "ftcache", "ftpairlists", "exchange"], "note": "Every bot shares market data and pairlist computation through the two daemons instead of calling Hyperliquid individually." },
+      { "id": "trade-path", "label": "Trade decision path", "focus": ["bot", "strategy", "pairlist_plugins", "guards", "exchange", "db"], "note": "How one bot turns a strategy signal into a guarded order and a persisted trade." },
+      { "id": "observability", "label": "Observability", "focus": ["bot", "rpc", "frequi", "trader"], "note": "How trade events reach the operator through Telegram and the FreqUI dashboard." }
+    ]
+  },
+  "layout": { "mode": "grid", "cols": 6, "cellW": 160, "cellH": 100, "gapX": 55, "gapY": 90 },
+  "components": [
+    { "id": "trader", "type": "external", "label": "Operator", "sublabel": "trader", "row": 1, "col": 0 },
+    { "id": "frequi", "type": "frontend", "label": "FreqUI Ultimate", "sublabel": "dashboard", "row": 1, "col": 1 },
+    { "id": "db", "type": "database", "label": "Trade DB", "sublabel": "SQLite per bot", "row": 0, "col": 2 },
+    { "id": "rpc", "type": "backend", "label": "RPC & API", "sublabel": "Telegram, REST", "row": 1, "col": 2 },
+    { "id": "ftpairlists", "type": "backend", "label": "ftpairlists daemon", "sublabel": "whitelist dedup", "row": 2, "col": 2 },
+    { "id": "strategy", "type": "backend", "label": "IStrategy", "sublabel": "entry/exit signals", "row": 0, "col": 3 },
+    { "id": "bot", "type": "backend", "label": "Bot Process (× N)", "sublabel": "process() loop", "row": 1, "col": 3 },
+    { "id": "pairlist_plugins", "type": "backend", "label": "Pairlist Plugins", "sublabel": "whitelist filters", "row": 2, "col": 3 },
+    { "id": "guards", "type": "security", "label": "Wallet Guards", "sublabel": "reduceOnly + hedge", "row": 1, "col": 4 },
+    { "id": "ftcache", "type": "backend", "label": "ftcache daemon", "sublabel": "shared market cache", "row": 2, "col": 4 },
+    { "id": "exchange", "type": "cloud", "label": "Hyperliquid", "sublabel": "ccxt REST/WS", "row": 1, "col": 5 }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Bot process (repeated per instance)", "wraps": ["strategy", "bot", "pairlist_plugins"] },
+    { "kind": "region", "label": "Shared daemons (one per host, serves whole fleet)", "wraps": ["ftpairlists", "ftcache"] }
+  ],
+  "connections": [
+    { "id": "trader-frequi", "from": "trader", "to": "frequi", "label": "browser" },
+    { "id": "frequi-rpc", "from": "frequi", "to": "rpc", "label": "REST API" },
+    { "id": "rpc-trader", "from": "rpc", "to": "trader", "label": "Telegram alerts", "variant": "dashed", "fromSide": "top", "toSide": "top" },
+    { "id": "bot-strategy", "from": "bot", "to": "strategy", "label": "entry/exit signals" },
+    { "id": "bot-pairlist-plugins", "from": "bot", "to": "pairlist_plugins", "label": "whitelist", "labelDy": 24 },
+    { "id": "bot-guards", "from": "bot", "to": "guards", "label": "pre-trade check", "variant": "security" },
+    { "id": "guards-exchange", "from": "guards", "to": "exchange", "label": "guarded orders" },
+    { "id": "bot-ftcache", "from": "bot", "to": "ftcache", "label": "candles/tickers/positions" },
+    { "id": "ftcache-exchange", "from": "ftcache", "to": "exchange", "label": "rate-limited fetch" },
+    { "id": "bot-ftpairlists", "from": "bot", "to": "ftpairlists", "label": "shared whitelist" },
+    { "id": "bot-db", "from": "bot", "to": "db", "label": "persist trades/orders", "labelDy": -12 },
+    { "id": "bot-rpc", "from": "bot", "to": "rpc", "label": "trade events", "labelDy": 12 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Why the daemons exist", "items": ["Multiple bots refreshing candles/positions independently used to cascade into Hyperliquid rate limits", "ftcache and ftpairlists mutualize those calls once per host, shared by every bot"] },
+    { "dot": "rose", "title": "Shared-wallet safety", "items": ["Guards run before every order when bots share one Hyperliquid wallet", "They neutralize reduceOnly conflicts and block unintended hedges/conflicting entries"] },
+    { "dot": "emerald", "title": "Observability", "items": ["Trade DB, Telegram and the REST API are fed from the same bot loop", "FreqUI Ultimate consumes the enriched REST API (/cache_status, /fleet/status, ...)"] }
+  ]
+}

@@ -20,6 +20,7 @@
   <a href="#-already-running-freqtrade-switch-to-ultimate-without-losing-anything">Migrate from upstream</a> ·
   <a href="#-new-to-freqtrade-start-here">Start fresh</a> ·
   <a href="#-what-is-freqtrade-ultimate">About</a> ·
+  <a href="docs/diagrams/README.md">Architecture</a> ·
   <a href="#-feature-highlights">Features</a> ·
   <a href="#-showcase-strategies">Strategies</a> ·
   <a href="#-learn-algorithmic-trading">Learn</a> ·
@@ -190,6 +191,10 @@ docker compose up -d
 A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream.
 
 **Why this fork exists.** Running multiple Freqtrade bots in production on Hyperliquid surfaces real-world problems upstream wasn't designed for — rate-limit cascades when four bots refresh OHLCV simultaneously, ADL and liquidation handling on a DEX without traditional liquidation events, multi-bot pairlist deduplication, and statistically valid hyperopt without curve-fitting. This fork solves those.
+
+**Architecture at a glance.** [`docs/diagrams/`](docs/diagrams/README.md) has three
+interactive diagrams (system architecture, the `ftcache` fetch sequence, and the bot loop with
+its Hyperliquid safety branches) — download any `.html` file and open it in a browser.
 
 **Editorial principle: no curve-fitted strategies.** Every showcase strategy in this repo ships with its walk-forward analysis and real drawdowns. We do not promote backtest-pretty strategies that fail live — many popular Freqtrade strategies embed subtle lookahead biases that make backtests look magical and live results disappointing. We document why, and we publish the methodology that avoids it.
 
