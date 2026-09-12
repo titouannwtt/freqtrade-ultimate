@@ -237,7 +237,7 @@ candle-boundary thundering herds.
 **Limitations.**
 
 - Single-host only (Unix socket, not networked).
-- Requires Python 3.10+ for the async daemon.
+- Requires Python 3.11+ as specified by the project’s `pyproject.toml`.
 - A daemon crash will force all bots to fall through to direct exchange calls; they will
   reconnect on the next cycle but may emit a burst of 429s in the meantime.
 
@@ -1333,7 +1333,7 @@ minimum-change path:
 8. **launch scripts**. Replace `freqtrade trade --config ...` with
    `./launch_bot.sh path/to/config.json` to get auto-restart, candle-boundary jitter and
    fleet stagger for free.
-9. **FreqUI**. Run `freqtrade deploy-ui` to fetch the [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)
+9. **FreqUI**. Run `freqtrade install-ui` to fetch the [FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)
    build — the upstream FreqUI build does not know about the new endpoints
    (`/cache_status`, `/rate_metrics`, `/fleet/*`, `/volume_history`, `/signal_summary`,
    `/stratdev/*`) and will not render the corresponding widgets.
@@ -1347,8 +1347,7 @@ No DB migration is required; the SQLAlchemy schema is unchanged. The pool sizing
 
 - **Upstream base.** Tracks `freqtrade/freqtrade` `stable` branch. The fork sits ~58,400
   lines added and ~2,450 lines removed across 50 commits.
-- **Python.** Requires Python **3.10 or newer** (the async daemons and `cloudpickle`
-  pickle-by-value integration need it).
+- **Python.** Requires Python **3.11 or newer**, as declared in `pyproject.toml`.
 - **CCXT.** Pinned to a version supporting Hyperliquid spot and perpetuals (see the
   fork's `setup.py` / `pyproject.toml` for the exact pin).
 - **Hyperliquid.** First-class support, including liquidation detection
