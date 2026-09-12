@@ -109,6 +109,13 @@ class TokenBucket:
       - NORMAL/LOW: immediately refused (circuit breaker)
     After backoff expires, rate ramps back up over 10s instead of
     dumping the entire queue at once.
+
+    Priority is strict but NOT absolute: a band whose demand permanently
+    saturates the budget would otherwise keep every lower band from ever
+    reaching the head of the heap (see ``_select_next``).  One grant in
+    ``starvation_grant_interval + 1`` is therefore reserved for the most
+    starved lower band, which bounds the wait of a cold fetch instead of
+    letting it depend on a gap in the higher band's arrivals.
     """
 
     CRITICAL = 0
@@ -158,6 +165,12 @@ class TokenBucket:
         self._waiters: list[tuple[int, float, int, float, asyncio.Future]] = []
         self._counter = 0
         self._drain_task: asyncio.Task | None = None
+        # Anti-starvation / heap hygiene (see _select_next, _reap_dead_waiters)
+        self.starvation_grant_interval = self._STARVATION_GRANT_INTERVAL
+        self._grants_since_yield = 0
+        self._last_reap = time.monotonic()
+        self.starvation_yields = 0
+        self.reaped_count = 0
         # Stats
         self.shed_count = 0
         self.queued_during_backoff = 0
@@ -385,6 +398,64 @@ class TokenBucket:
         await future
         self._record_weight(cost)
 
+    # Grants served from the head of the heap before one grant is handed to
+    # the most starved lower band.  3 → the lower bands keep at least 25% of
+    # the budget, which is what bounds a bot's cold-start fetches when the
+    # HIGH band (open positions, hot timeframes, builder-dex refreshes) has
+    # enough standing demand to spend the whole budget on its own.
+    _STARVATION_GRANT_INTERVAL = 3
+
+    # A waiter whose client has already given up costs nothing to serve but
+    # still hides the bands below it and inflates queue_depths.  Sweep them.
+    _REAP_INTERVAL_S = 10.0
+
+    def _reap_dead_waiters(self) -> int:
+        """Drop waiters whose future is already done (client gave up).
+
+        The drain loop only ever inspects the head, so abandoned waiters in a
+        starved band are never reached and accumulate for as long as the band
+        stays starved.  Caller must hold ``self._lock``.
+        """
+        self._last_reap = time.monotonic()
+        if not self._waiters:
+            return 0
+        live = [w for w in self._waiters if not w[4].done()]
+        dropped = len(self._waiters) - len(live)
+        if dropped:
+            self._waiters = live
+            heapq.heapify(self._waiters)
+            self.reaped_count += dropped
+        return dropped
+
+    def _select_next(self) -> tuple[int, tuple[int, float, int, float, asyncio.Future]] | None:
+        """Pick the next waiter to serve, as ``(heap_index, entry)``.
+
+        Normally the head.  Every ``starvation_grant_interval`` head grants,
+        the best live waiter of the most starved lower band is chosen instead
+        so strict priority cannot translate into indefinite postponement.
+        """
+        if not self._waiters:
+            return None
+        if self._grants_since_yield >= self.starvation_grant_interval:
+            head_priority = self._waiters[0][0]
+            best_i = -1
+            for i, w in enumerate(self._waiters):
+                if w[0] <= head_priority or w[4].done():
+                    continue
+                if best_i < 0 or w[:3] < self._waiters[best_i][:3]:
+                    best_i = i
+            if best_i >= 0:
+                return best_i, self._waiters[best_i]
+        return 0, self._waiters[0]
+
+    def _remove_at(self, index: int) -> None:
+        """Remove ``self._waiters[index]``, keeping the heap invariant."""
+        if index == 0:
+            heapq.heappop(self._waiters)
+            return
+        self._waiters.pop(index)
+        heapq.heapify(self._waiters)
+
     def _ensure_drain(self) -> None:
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(self._drain_loop())
@@ -433,16 +504,24 @@ class TokenBucket:
                                 continue
 
                 self._refill()
-                if self._waiters:
-                    entry = self._waiters[0]
+                if now - self._last_reap >= self._REAP_INTERVAL_S:
+                    self._reap_dead_waiters()
+                selected = self._select_next()
+                if selected is not None:
+                    index, entry = selected
                     cost = entry[3]
                     # Drop waiters whose client already gave up (shed deadline reached):
                     # spending tokens on them starves the callers still waiting.
                     if entry[4].done():
-                        heapq.heappop(self._waiters)
+                        self._remove_at(index)
                         continue
                     if self.tokens >= cost:
-                        heapq.heappop(self._waiters)
+                        self._remove_at(index)
+                        if index == 0:
+                            self._grants_since_yield += 1
+                        else:
+                            self._grants_since_yield = 0
+                            self.starvation_yields += 1
                         self.tokens -= cost
                         future = entry[4]
                         if not future.done():
@@ -1225,10 +1304,15 @@ class Daemon:
             now = time.monotonic()
             backoff_remaining = max(0.0, bucket._backoff_until - now)
             q_depths = {"critical": 0, "high": 0, "normal": 0, "low": 0}
+            # Waiters abandoned by their client are swept on a timer, so the raw
+            # depth over-reports what is really waiting between two sweeps.
+            q_live = {"critical": 0, "high": 0, "normal": 0, "low": 0}
             prio_names = {0: "critical", 1: "high", 2: "normal", 3: "low"}
             for waiter in bucket._waiters:
                 prio_name = prio_names.get(waiter[0], "low")
                 q_depths[prio_name] += 1
+                if not waiter[4].done():
+                    q_live[prio_name] += 1
             budget_entry: dict[str, Any] = {
                 "tokens_available": round(bucket.tokens, 2),
                 "tokens_max": bucket.burst,
@@ -1238,6 +1322,10 @@ class Daemon:
                 "backoff_factor": round(bucket._backoff_factor, 2),
                 "backoff_remaining_s": round(backoff_remaining, 1),
                 "queue_depths": q_depths,
+                "queue_live_depths": q_live,
+                "starvation_yields": bucket.starvation_yields,
+                "starvation_grant_interval": bucket.starvation_grant_interval,
+                "reaped_count": bucket.reaped_count,
                 "shed_count": bucket.shed_count,
                 "queued_during_backoff": bucket.queued_during_backoff,
                 "backoff_count": bucket.backoff_count,
