@@ -1185,7 +1185,12 @@ class CachedExchangeMixin:
         - On shed or timeout, retries in a loop (up to 10 min) instead of
           falling through to unmetered ccxt calls
         - Logs informative messages every 10s while waiting
-        - After 10 min, raises TemporaryError (clean crash, no silent bypass)
+        - After 10 min, falls back to the LOCAL limiter rather than raising
+          (6db741233): a utility command that crashes mid-run is worse than
+          one that proceeds at a metered rate. The fallback is only safe
+          because the local limiter is sized on the daemon's reported
+          fleet_size, so a bot arming it self-grants budget/fleet_size and
+          not the 6-bot share it was originally calibrated for.
 
         For live modes: existing behavior (timeout → allow through).
 
@@ -1423,9 +1428,13 @@ class CachedExchangeMixin:
                                 self._OFFLINE_ACQUIRE_MAX_S,
                             )
                             limiter = self._ftcache_get_local_limiter()
+                            # Charge the REAL cost, not a flat 4: a 5000-candle
+                            # chunk is ~104 weight at the daemon, so a flat 4
+                            # let the fallback self-grant 26x its share and
+                            # walk the bot straight into a hard 429.
                             await asyncio.to_thread(
                                 limiter.acquire,
-                                4.0,
+                                fetch_cost,
                                 OhlcvCacheClient.LOW,
                             )
                             break
@@ -1441,11 +1450,12 @@ class CachedExchangeMixin:
                             self._ftcache_last_wait_log_ts = now
                         await asyncio.sleep(self._OFFLINE_RETRY_INTERVAL_S)
             else:
-                # Daemon unavailable in offline mode — use local limiter
+                # Daemon unavailable in offline mode — use local limiter, at the
+                # real weight of the call (see the deadline branch above).
                 limiter = self._ftcache_get_local_limiter()
                 await asyncio.to_thread(
                     limiter.acquire,
-                    4.0,
+                    self._ftcache_offline_fetch_cost(timeframe, candle_type, since_ms),
                     OhlcvCacheClient.LOW,
                 )
             return await super()._async_get_candle_history(  # type: ignore[misc]

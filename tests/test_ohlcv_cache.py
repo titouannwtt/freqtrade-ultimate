@@ -6,12 +6,13 @@ rate-limited fallback behaviour, and CachedHyperliquid overrides.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import threading
 import time
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1859,41 +1860,54 @@ class TestOfflineRetryLoop:
         assert result is True
         assert call_count == 6  # 5 failures + 1 success
 
-    def test_deadline_exceeded_raises_temporary_error(self):
-        """After deadline, should raise TemporaryError, not fall through."""
-        from freqtrade.exceptions import TemporaryError
+    # Past the deadline the mixin no longer raises: 6db741233 (2026-06-16) chose a
+    # fallback to the LOCAL limiter over a mid-run crash. What must still hold is
+    # that the bypass is METERED — the call goes through the local limiter, never
+    # straight to unmetered ccxt — and that it only happens once the deadline is
+    # actually spent, never on the first shed.
 
-        mixin, client, _ = self._make_offline_mixin()
-        client.acquire_rate_token = AsyncMock(side_effect=CacheRateLimited("shed"))
+    def _assert_metered_fallback(self, mixin, side_effect, client):
+        client.acquire_rate_token = AsyncMock(side_effect=side_effect)
         mixin._OFFLINE_RETRY_INTERVAL_S = 0.01
         mixin._OFFLINE_ACQUIRE_MAX_S = 0.05
+        limiter = MagicMock()
+        mixin._ftcache_get_local_limiter = MagicMock(return_value=limiter)
+        result = CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=3, cost=7.0)
+        assert result is True
+        limiter.acquire.assert_called_once_with(cost=7.0, priority=3)
 
-        with pytest.raises(TemporaryError, match="live bots saturated"):
-            CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=3, cost=1.0)
-
-    def test_deadline_exceeded_on_timeout(self):
-        """TimeoutError past deadline should raise TemporaryError."""
-        from freqtrade.exceptions import TemporaryError
-
+    def test_deadline_exceeded_falls_back_to_the_metered_local_limiter(self):
         mixin, client, _ = self._make_offline_mixin()
-        client.acquire_rate_token = AsyncMock(side_effect=CacheTimedOut("timeout"))
-        mixin._OFFLINE_RETRY_INTERVAL_S = 0.01
-        mixin._OFFLINE_ACQUIRE_MAX_S = 0.05
+        self._assert_metered_fallback(mixin, CacheRateLimited("shed"), client)
 
-        with pytest.raises(TemporaryError, match="timed out"):
-            CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=3, cost=1.0)
-
-    def test_deadline_exceeded_on_unavailable(self):
-        """CacheUnavailable past deadline should raise TemporaryError."""
-        from freqtrade.exceptions import TemporaryError
-
+    def test_deadline_exceeded_on_timeout_falls_back_metered(self):
         mixin, client, _ = self._make_offline_mixin()
-        client.acquire_rate_token = AsyncMock(side_effect=CacheUnavailable("gone"))
-        mixin._OFFLINE_RETRY_INTERVAL_S = 0.01
-        mixin._OFFLINE_ACQUIRE_MAX_S = 0.05
+        self._assert_metered_fallback(mixin, CacheTimedOut("timeout"), client)
 
-        with pytest.raises(TemporaryError, match="daemon unavailable"):
-            CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=3, cost=1.0)
+    def test_deadline_exceeded_on_unavailable_falls_back_metered(self):
+        mixin, client, _ = self._make_offline_mixin()
+        self._assert_metered_fallback(mixin, CacheUnavailable("gone"), client)
+
+    def test_the_fallback_waits_out_the_deadline_before_arming(self):
+        """A single shed must be retried, not answered with the local limiter."""
+        mixin, client, _ = self._make_offline_mixin()
+        calls = 0
+
+        async def mock_acquire(priority=None, cost=1.0):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise CacheRateLimited("shed")
+            return None
+
+        client.acquire_rate_token = mock_acquire
+        mixin._OFFLINE_RETRY_INTERVAL_S = 0.01
+        mixin._OFFLINE_ACQUIRE_MAX_S = 30.0
+        limiter = MagicMock()
+        mixin._ftcache_get_local_limiter = MagicMock(return_value=limiter)
+        assert CachedExchangeMixin._ftcache_acquire_sync(mixin, priority=3, cost=1.0) is True
+        assert calls == 2
+        limiter.acquire.assert_not_called()
 
     def test_live_mode_shed_returns_false_no_retry(self):
         """In live mode, CacheRateLimited should NOT retry — return False."""
@@ -2243,10 +2257,14 @@ class TestAsyncOhlcvOfflineRetry:
         assert call_count == 3  # 2 retries + 1 success
 
     @pytest.mark.asyncio
-    async def test_ohlcv_offline_deadline_raises(self):
-        """In offline mode, exceeding deadline should raise TemporaryError."""
-        from freqtrade.exceptions import TemporaryError
+    async def test_ohlcv_offline_deadline_falls_back_at_the_real_weight(self):
+        """Past the deadline the fetch is metered locally, at its REAL cost.
 
+        6db741233 replaced the TemporaryError with a local-limiter fallback. The
+        fallback charged a flat 4 weight while the daemon charges the computed
+        cost (~104 for a 5000-candle chunk), so an offline run self-granted up
+        to 26x its share — the shape that produces hard 429s.
+        """
         mixin, client, _ = _make_mixin_exchange()
         mixin._ftcache_is_offline_mode = True
         mixin._ftcache_rate_limit_only = True
@@ -2256,8 +2274,13 @@ class TestAsyncOhlcvOfflineRetry:
         mixin._OFFLINE_ACQUIRE_MAX_S = 0.03
 
         client.acquire_rate_token = AsyncMock(side_effect=CacheRateLimited("shed"))
+        limiter = MagicMock()
+        mixin._ftcache_get_local_limiter = MagicMock(return_value=limiter)
+        expected = CachedExchangeMixin._ftcache_offline_fetch_cost(
+            mixin, "15m", CandleType.FUTURES, None
+        )
 
-        with pytest.raises(TemporaryError, match="live bots saturated"):
+        with contextlib.suppress(AttributeError, TypeError):
             await CachedExchangeMixin._async_get_candle_history(
                 mixin,
                 "BTC/USDC",
@@ -2266,8 +2289,34 @@ class TestAsyncOhlcvOfflineRetry:
                 None,
             )
 
+        limiter.acquire.assert_called_once()
+        assert limiter.acquire.call_args.args[0] == expected
+        assert expected > 4.0, "sinon le test ne distingue pas le forfait de 4"
 
-# -------------------------------------------------------------------- mixin: open pair priority escalation
+    @pytest.mark.asyncio
+    async def test_ohlcv_offline_without_daemon_also_charges_the_real_weight(self):
+        mixin, client, _ = _make_mixin_exchange()
+        mixin._ftcache_is_offline_mode = True
+        mixin._ftcache_rate_limit_only = True
+        mixin._ftcache_init_complete = True
+        mixin._ftcache_get_client = MagicMock(return_value=None)
+        limiter = MagicMock()
+        mixin._ftcache_get_local_limiter = MagicMock(return_value=limiter)
+        expected = CachedExchangeMixin._ftcache_offline_fetch_cost(
+            mixin, "15m", CandleType.FUTURES, None
+        )
+
+        with contextlib.suppress(AttributeError, TypeError):
+            await CachedExchangeMixin._async_get_candle_history(
+                mixin,
+                "BTC/USDC",
+                "15m",
+                CandleType.FUTURES,
+                None,
+            )
+
+        limiter.acquire.assert_called_once()
+        assert limiter.acquire.call_args.args[0] == expected
 
 
 class TestOpenPairPriorityEscalation:
