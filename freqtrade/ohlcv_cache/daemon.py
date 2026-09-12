@@ -399,11 +399,19 @@ class TokenBucket:
         self._record_weight(cost)
 
     # Grants served from the head of the heap before one grant is handed to
-    # the most starved lower band.  3 → the lower bands keep at least 25% of
-    # the budget, which is what bounds a bot's cold-start fetches when the
-    # HIGH band (open positions, hot timeframes, builder-dex refreshes) has
-    # enough standing demand to spend the whole budget on its own.
-    _STARVATION_GRANT_INTERVAL = 3
+    # the most starved lower band, when the higher band has enough standing
+    # demand to spend the whole budget on its own (HIGH = open positions, hot
+    # timeframes, builder-dex refreshes).
+    #
+    # 5 → one grant in six. Sized against the 12/09 production measurements
+    # (912 usable weight/min, HIGH demand 18 refreshes/min at 21 weight, a
+    # restarting bot needing 40 cold fetches at 104 weight): the lower bands
+    # get 4.4 grants/min, which bounds that bot's warmup at ~9 min, while HIGH
+    # keeps 21.8 grants/min and therefore still covers its own 18/min. A
+    # shorter interval buys ~2 min on the warmup but pushes HIGH below its
+    # demand, so the bands that carry open positions start falling behind —
+    # the wrong side of the trade.
+    _STARVATION_GRANT_INTERVAL = 5
 
     # A waiter whose client has already given up costs nothing to serve but
     # still hides the bands below it and inflates queue_depths.  Sweep them.

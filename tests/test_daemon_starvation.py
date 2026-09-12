@@ -242,10 +242,14 @@ async def test_the_high_band_keeps_the_bulk_of_the_budget():
     tasks = [asyncio.create_task(one(TokenBucket.HIGH)) for _ in range(40)]
     tasks += [asyncio.create_task(one(TokenBucket.NORMAL)) for _ in range(40)]
     await asyncio.gather(*tasks)
-    first_twenty = served[:20]
-    highs = first_twenty.count(TokenBucket.HIGH)
-    assert highs >= 14, f"HIGH got only {highs}/20 of the first grants"
-    assert TokenBucket.NORMAL in first_twenty, "NORMAL never served while HIGH remained"
+    first_eighteen = served[:18]
+    highs = first_eighteen.count(TokenBucket.HIGH)
+    # One grant in six goes to the starved band, so HIGH keeps 15 of any 18.
+    # This is the sizing the interval was chosen for: HIGH has to stay above
+    # its own measured demand (18 refreshes/min out of ~22 grants/min) or the
+    # bands carrying open positions start falling behind.
+    assert highs == 15, f"HIGH got {highs}/18 of the first grants, expected 15"
+    assert first_eighteen.count(TokenBucket.NORMAL) == 3
 
 
 # --- stats ------------------------------------------------------------------------
