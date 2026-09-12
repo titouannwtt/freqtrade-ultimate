@@ -325,9 +325,9 @@ Or visit [titouannwtt/frequi-ultimate](https://github.com/titouannwtt/frequi-ult
 
 **[Freqtrade France](https://buymeacoffee.com/freqtrade_france)** is the French-speaking community where Mouton (this fork's maintainer) publishes:
 
-- 📚 **Free tutorials** — Freqtrade basics, Hyperliquid setup, hyperopt, backtesting, walk-forward analysis (80 % of the content is free).
-- 💎 **Member tutorials** (9 € / month or 90 € / year) — PlateauSampler internals, custom hyperopt loss design, walk-forward CPCV deep dives, anti-overfitting playbook.
-- 🤖 **Ready-to-deploy strategies for members** — Live-tested, with reproducible backtests and live PnL.
+- **Free tutorials**: Freqtrade basics, Hyperliquid setup, hyperopt, backtesting, and walk-forward analysis.
+- **Member tutorials**: reproducible strategy studies, complete examples, and explanations of testing methods and their limitations. See [Freqtrade France](https://buymeacoffee.com/freqtrade_france) for the current membership offer and pricing. The public forks remain free to use.
+- **Strategy walkthroughs for members**: code and configuration, with the testing context and limitations described in each article.
 - 🎥 **Long-form YouTube** — [@freqtrade_france](https://www.youtube.com/@freqtrade_france).
 - 🐦 **Twitter** — [@MoutonCrypto](https://x.com/MoutonCrypto).
 
