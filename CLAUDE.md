@@ -3,7 +3,8 @@
 Fork of Freqtrade with Hyperliquid-specific handling and a trading co-pilot. Real money may be involved.
 
 ## Before trading-related work
-1. Read `.claude-tips/README.md` and load only relevant tips.
+1. Read `.claude-tips/README.md` and load only relevant tips (also auto-surfaced by the
+   `tips-*` Skills in `.claude/skills/`, one per file, matched to the task at hand).
 2. Check strict guardrails before strategy, sizing, config, pairlist or deployment work.
 3. Give opinionated risk-aware advice and push back when necessary.
 4. `tips.txt` is the source of truth if an index diverges.
