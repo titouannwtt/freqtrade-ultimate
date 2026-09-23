@@ -1240,9 +1240,27 @@ class Exchange:
             return 1 / pow(10, precision)
 
     def get_min_pair_stake_amount(
-        self, pair: str, price: float, stoploss: float, leverage: float = 1.0
+        self,
+        pair: str,
+        price: float,
+        stoploss: float,
+        leverage: float = 1.0,
+        *,
+        apply_reserve: bool = True,
     ) -> float | None:
-        return self._get_stake_amount_limit(pair, price, stoploss, "min", leverage)
+        """Minimum stake the venue accepts for this pair.
+
+        ``apply_reserve`` (default True) keeps the historical behaviour: the floor is
+        inflated by ``amount_reserve_percent`` and by the stoploss, so that a position
+        being OPENED stays above the venue minimum after an adverse move.
+
+        Pass ``apply_reserve=False`` when sizing an EXIT. There is nothing left to
+        provision once the position is closed, and inflating the floor by up to 1.5x
+        makes the bot refuse closing orders the venue would have accepted.
+        """
+        return self._get_stake_amount_limit(
+            pair, price, stoploss, "min", leverage, apply_reserve=apply_reserve
+        )
 
     def get_max_pair_stake_amount(self, pair: str, price: float, leverage: float = 1.0) -> float:
         max_stake_amount = self._get_stake_amount_limit(pair, price, 0.0, "max", leverage)
@@ -1260,6 +1278,8 @@ class Exchange:
         stoploss: float,
         limit: Literal["min", "max"],
         leverage: float = 1.0,
+        *,
+        apply_reserve: bool = True,
     ) -> float | None:
         isMin = limit == "min"
 
@@ -1269,10 +1289,19 @@ class Exchange:
             raise ValueError(f"Can't get market information for symbol {pair}")
 
         stake_limits = []
+        margin_reserve: float
         limits = market["limits"]
-        if isMin:
+        if isMin and not apply_reserve:
+            # Exit sizing: return the venue's raw floor. The reserves below exist so a
+            # freshly OPENED position survives an adverse move without falling under the
+            # minimum; on a close there is nothing left to provision, and applying them
+            # made the bot refuse orders the venue accepts (measured 2026-09-22: twelve
+            # closes between the raw floor and the inflated one, all accepted on-chain).
+            margin_reserve = 1.0
+            stoploss_reserve = 1.0
+        elif isMin:
             # reserve some percent defined in config (5% default) + stoploss
-            margin_reserve: float = 1.0 + self._config.get(
+            margin_reserve = 1.0 + self._config.get(
                 "amount_reserve_percent", DEFAULT_AMOUNT_RESERVE_PERCENT
             )
             stoploss_reserve = margin_reserve / (1 - abs(stoploss)) if abs(stoploss) != 1 else 1.5

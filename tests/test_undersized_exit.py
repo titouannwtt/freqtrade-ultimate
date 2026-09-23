@@ -87,3 +87,37 @@ def test_a_zero_amount_is_not_judged():
 def test_a_zero_rate_is_not_judged():
     bot = _bot(min_stake=4.1176)
     assert bot._exit_meets_exchange_minimum(_trade(), KAITO_AMOUNT, 0.0) is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-22 : the guard was refusing orders the venue accepts.
+#
+# get_min_pair_stake_amount() inflates the venue floor by a reserve capped at 1.5x,
+# so a freshly OPENED position survives an adverse move. That reserve was also being
+# applied to CLOSES, where nothing is left to provision. On Hyperliquid (raw floor
+# 10 USDC) the guard therefore refused everything under 15. Twelve closes in that
+# band were sent by hand and all were accepted and filled on-chain.
+# ---------------------------------------------------------------------------
+
+
+def test_exit_asks_for_the_raw_floor_not_the_inflated_one():
+    """The guard must request the venue floor WITHOUT the entry reserve."""
+    bot = _bot(min_stake=10.0)
+    bot._exit_meets_exchange_minimum(_trade(leverage=2.0), 6.2, 2.1644)
+    _, kwargs = bot.exchange.get_min_pair_stake_amount.call_args
+    assert kwargs.get("apply_reserve") is False, "the exit must not inflate the floor"
+
+
+def test_exit_between_raw_floor_and_inflated_floor_is_allowed():
+    """13.42 notional at 2x = 6.71 stake, over the raw 5.0 floor (10 / 2x).
+
+    The same exit was refused before the fix, because the inflated floor was 7.50.
+    """
+    bot = _bot(min_stake=5.0)
+    assert bot._exit_meets_exchange_minimum(_trade(leverage=2.0), 6.2, 2.1644) is True
+
+
+def test_exit_genuinely_under_the_raw_floor_is_still_refused():
+    """Below the venue floor the order really would be rejected: keep refusing."""
+    bot = _bot(min_stake=5.0)
+    assert bot._exit_meets_exchange_minimum(_trade(leverage=2.0), 2.0, 2.1644) is False

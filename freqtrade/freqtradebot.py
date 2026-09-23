@@ -3527,8 +3527,13 @@ class FreqtradeBot(LoggingMixin):
             # contract — leave these to the existing amount checks downstream.
             return True
         try:
+            # apply_reserve=False: the venue's RAW floor. Passing the strategy stoploss
+            # here inflated the floor by up to 1.5x (the reserve that keeps a freshly
+            # opened position viable after an adverse move), which has nothing to do with
+            # closing one. Measured 2026-09-22 on Hyperliquid: raw floor 10 USDC, guard
+            # refusing under 15, and twelve closes in that band all accepted on-chain.
             min_stake = self.exchange.get_min_pair_stake_amount(
-                trade.pair, rate, self.strategy.stoploss, trade.leverage or 1.0
+                trade.pair, rate, 0.0, trade.leverage or 1.0, apply_reserve=False
             )
         except Exception:
             return True
