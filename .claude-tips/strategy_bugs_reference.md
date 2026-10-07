@@ -202,6 +202,50 @@ produisent pas de rendement ajusté au risque. Le seul reglage qui sort de cette
 casse vers le bas (echelles profondes). Chercher un gain en jouant dessus est une impasse
 mesuree.
 
+### Pourquoi aucune echelle profonde ne marche ici : la DCA est un accelerateur de sortie
+
+18 calibrages mesures sur 18 mois (552 jours, 72 paires) : `safety_order_volume_scale` de
+0.6 a 3.6 (croissantes, plate, decroissantes), 2 a 4 paliers, `safety_order_step_scale` de
+2 a 4, `max_so_multiplier` de 2.7 a 65. **Tout calibrage qui achete plus bas que -7 % du
+prix d'entree multiplie le drawdown par 7 a 9**, independamment de la repartition des poids.
+
+  calibrage                          profit   drawdown   profit/drawdown
+  f1  vs3.6 n2 overbuy 1.295        1942.11     -4.80 %               405
+  f3  vs3.6 n2 overbuy 1.0          1512.78     -3.91 %               387
+  g5  vs0.7 n2 step 4               2003.64    -29.33 %                68
+  g2  vs0.6 n4                      1610.47    -33.06 %                49
+  g4  vs0.8 n3 step 3               1403.98    -32.99 %                43
+  g1  vs0.8 n4                      1222.34    -32.75 %                37
+  g3  vs1.0 n4                      1159.80    -34.91 %                33
+  d1  vs1.8 n4                       787.09    -20.72 %                38
+
+La colonne qui explique tout est la pire excursion sous la moyenne d'entree : **-10.56 %
+pour f1/f3, -41 a -46 % pour toutes les autres.** Ce n'est pas que les echelles profondes
+resistent mal, c'est que les positions de f3 n'atteignent jamais ces niveaux parce
+qu'elles sont **deja fermees**. f3 met 3.6 unites d'un coup a -6.9 %, ce qui ramene son
+point mort a -4.9 % et la fait sortir au premier rebond. Une echelle qui etale son capital
+jusqu'a -30 % n'a pas cette moyenne basse, donc elle reste ouverte, et une position ouverte
+dans un marche qui tombe de 50 % finit a -45 % de sa moyenne quel que soit le nombre de
+munitions restantes.
+
+**Dans cette famille la DCA n'est pas une assurance contre les baisses, c'est un
+accelerateur de sortie.** Couvrir -30 % exige de rester dans la position jusqu'a -30 %, et
+c'est le fait d'y rester qui coute, pas le capital depense.
+
+PIEGE DE MESURE : la simulation exhaustive par bougie d'entree (161 820 points) classe g3
+PREMIERE (epuisement d'echelle divise par 12, taux de stop meilleur que f3) alors que le
+backtest la classe DERNIERE. Elle juge chaque entree isolement : une position qui survit en
+restant ouverte trois semaines compte comme un succes, alors qu'elle a bloque un slot sur
+deux, empeche une dizaine d'entrees et creuse le drawdown non realise pendant tout ce
+temps. Pour un arbitrage de calibrage, c'est le backtest qui tranche.
+
+**Seule piste non exploree pour la queue de risque** : elle ne vient pas de l'echelle mais
+du CHOIX DES PAIRES. Les 5 pires baisses sur 30 jours (WLD -86 %, SUI -85 %, PUMP -84 %,
+ENA -84 %, DOT -81 %) sont toutes des altcoins et toutes sur l'episode de septembre 2025.
+Un filtre de pairlist ex ante (volatilite realisee, rang de capitalisation) ne couterait
+rien au cas courant, contrairement a tout ce qui a ete teste ici. Exige un critere choisi
+AVANT de regarder quelles paires ont crashe, sinon c'est du surapprentissage.
+
 ## Enveloppe de capital et sizing qui mesurent deux capitaux differents
 
 `max_position_stake_ratio` se jugeait sur `available_capital` brut, alors que le sizing
