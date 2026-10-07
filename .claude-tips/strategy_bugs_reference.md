@@ -239,12 +239,46 @@ restant ouverte trois semaines compte comme un succes, alors qu'elle a bloque un
 deux, empeche une dizaine d'entrees et creuse le drawdown non realise pendant tout ce
 temps. Pour un arbitrage de calibrage, c'est le backtest qui tranche.
 
-**Seule piste non exploree pour la queue de risque** : elle ne vient pas de l'echelle mais
-du CHOIX DES PAIRES. Les 5 pires baisses sur 30 jours (WLD -86 %, SUI -85 %, PUMP -84 %,
-ENA -84 %, DOT -81 %) sont toutes des altcoins et toutes sur l'episode de septembre 2025.
-Un filtre de pairlist ex ante (volatilite realisee, rang de capitalisation) ne couterait
-rien au cas courant, contrairement a tout ce qui a ete teste ici. Exige un critere choisi
-AVANT de regarder quelles paires ont crashe, sinon c'est du surapprentissage.
+### Filtres de pairlist : 8 variantes evaluees, toutes REFUTEES (2026-10-07)
+
+Fenetre 2025-07-01 -> 2026-10-05 (461 j), f3 reevaluee dessus comme reference (278 trades,
+1408.56, pire moins-value -192.9).
+
+  filtre (tous ex ante)                     trades   profit   pire MV
+  reference f3                                 278  1408.56    -192.9
+  atr_max_pct 2.0 -> 1.5                       243  1151.00    -192.9
+  univers crypto top 20 capitalisation         184   871.13    -192.9
+  univers crypto top 10                        152   709.97    -401.6
+  drawdown glissant 60 j > -55 %               105   513.69    -192.9
+  distance au plus haut 60 j > -25 %            86   417.32    -192.9
+  drawdown glissant 60 j > -40 %                68   302.71    -192.9
+  close > ema_200 (calculee, jamais utilisee)   14    74.36     -26.9
+  plancher de sortie en prix (0.0025)          278  1393.35    -192.9
+  levier xyz 2.0 -> 1.0 (+ plancher)           278  1313.55    -192.9
+
+**La pire moins-value est IDENTIQUE a -192.9 dans presque toutes les variantes**, sur le
+meme trade : XMR/USDC, LEVIER 1, rang 9 de capitalisation, excursion -10,52 %, portant une
+echelle complete de 1834 USDC. Aucun filtre de paire ne l'atteint (XMR les passe tous) et
+le levier n'y change rien (deja a 1). Les filtres ne touchent pas au risque, ils coupent le
+profit.
+
+Diagnostic ex ante prealable (au 2025-08-15, donnees anterieures seules, baisse subie
+jusqu'au 2025-11-01) : les criteres SONT correles a la baisse suivante (Spearman drawdown
+90 j +0,641, rang de capitalisation -0,589, volatilite 30 j -0,537) mais les niveaux sont
+tous catastrophiques en crash general : UNI rang 16 a fait -80,5 %, ADA rang 11 -70,9 %,
+LINK rang 10 -66,2 %. Seuls BTC, BNB, ETH et SOL ont ete epargnes.
+
+**Conclusion** : le risque de cette strategie ne vient pas des actifs a queue epaisse mais
+de la TAILLE de la position. Un actif banal a levier 1 produit le pire moment du
+portefeuille des qu'il porte 100 % de son slot. Seul levier demontre : le sizing (f1 -250.8,
+f3 -193.6, f5 avec MOT 3 -129.1, proportionnel au slot).
+
+PIEGE DE MESURE : ces 8 filtres affichaient des drawdowns de -3,99 % a -5,13 %, ce qui m'a
+fait conclure a tort qu'ils degradaient le risque. Le drawdown open-inclusif se calcule sur
+`BASE + realise + non_realise` : a risque absolu CONSTANT, moins de profit encaisse donne un
+pic d'equity plus bas donc un drawdown relatif plus grand (923 de profit encaisse avant le
+creux pour la reference, 135 pour le filtre le plus severe). Pour comparer des variantes a
+nombre de trades different, regarder la pire moins-value en VALEUR ABSOLUE.
 
 ## Enveloppe de capital et sizing qui mesurent deux capitaux differents
 
