@@ -158,12 +158,49 @@ et les instruments xyz ne descendant pas assez bas a levier 2.
   - le resultat depend d'un redemarrage du bot (branche de repli vs dictionnaire en
     memoire), donc deux executions du meme trade ne donnent pas la meme echelle.
 
-**Conclusion operationnelle** : ne pas corriger l'echelle sans recalibrer en meme temps
-`safety_order_volume_scale`. Une echelle bornee qui reproduit l'agressivite d'origine
-demande vs ~= 3.6 (paliers 1 / 3.6 / 12.96, max_so_multiplier 18.56), donc une mise
-initiale 2,6 fois plus petite : c'est un changement de sizing complet, a tester, pas un
-correctif de calcul. Le patch de correction est conserve sur la branche
-`fix/dca-ladder-capital-safety`, NON deploye.
+**Resolution, 2026-10-07 : variante "f3", DEPLOYEE.**
+
+    safety_order_volume_scale 3.6   max_so_multiplier_orig 2   overbuy_factor 1.0
+    max_position_stake_ratio 0.55 sur max_position_stake_basis "deployable"
+
+Reproduit EXACTEMENT le comportement de l'echelle d'origine (paliers 1 puis 3.6 x la mise
+initiale, cumul 5.6 x) mais en le DECLARANT : plus de 3e palier decoratif, plafond dur dans
+la strategie, et `overbuy_factor` 1.0 fait que l'echelle complete vaut exactement un slot,
+donc `max_open_trades` positions pleines tiennent dans 100 % du capital.
+
+  fenetre    avant      f3        ecart   drawdown avant -> f3
+  18 mois  1557.13   1512.78     -2.8 %    -4.00 % -> -3.91 %
+   6 mois   601.60    584.79     -2.8 %    -5.01 % -> -4.87 %
+   4 mois   433.96    421.77     -2.8 %    -4.94 % -> -4.80 %
+
+L'ecart de 2,8 % est integralement la taille (mise initiale 0.971 x l'ancienne) : memes
+trades, meme repartition de paliers, profits dans le meme rapport sur les trois fenetres.
+Verifie sur les deux positions ouvertes au moment du deploiement : comportement identique
+(XYZ-GOLD palier suivant 1161.82 contre 1161.64 avant ; SKY exactement a son plafond
+d'echelle, donc aucun palier, comme avant).
+
+**Variantes evaluees et REJETEES sur 18 mois** (552 jours, 302 trades, 72 paires) :
+  - 3 ou 4 paliers (vs 1.4 / 1.8 / 3.6) : profit par point de drawdown 31 a 38 contre ~390
+    pour la famille courte. Le 4e palier s'est declenche UNE fois sur 302 trades. La
+    couverture profonde assure contre un evenement que le signal d'entree ne rencontre
+    pas, et se paie en divisant par trois la mise initiale, qui sert les 73 % de trades
+    sans renfort. Mesure exhaustive contraire (22 x moins d'epuisement d'echelle) : elle
+    juge chaque entree isolement, sans portefeuille ni occupation du capital, donc elle ne
+    voit pas le cout d'un slot bloque par une position profonde.
+  - `max_open_trades_per_market` a 1 : -25 % de profit (1557 -> 1168) et drawdown
+    INCHANGE, legerement pire (-4.00 % -> -4.45 %). Le drawdown vient d'une position
+    profonde isolee, pas d'une correlation entre positions : diversifier entre marches ne
+    protege pas d'un risque concentre sur un trade.
+  - `stoploss_price` a -0.25 : realise des pertes que l'echelle absorbait.
+  - `overbuy_factor` 1.295 conserve (variante f1) : +24 % de profit mais 122,5 % du capital
+    engage. C'est de la taille deguisee ; la monter doit passer par `available_capital`.
+
+**Resultat structurel de l'etude** : dans cette famille, le profit par unite de capital
+engage est constant a ~1520 et le profit par point de drawdown a ~390, quelle que soit la
+forme de l'echelle ou le MOT. Ces parametres ne font que doser l'exposition ; ils ne
+produisent pas de rendement ajusté au risque. Le seul reglage qui sort de cette ligne la
+casse vers le bas (echelles profondes). Chercher un gain en jouant dessus est une impasse
+mesuree.
 
 ## Enveloppe de capital et sizing qui mesurent deux capitaux differents
 
