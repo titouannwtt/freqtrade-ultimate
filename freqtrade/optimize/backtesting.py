@@ -76,6 +76,7 @@ from freqtrade.resolvers import ExchangeResolver, StrategyResolver
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, dt_now, get_progress_tracker
+from freqtrade.util.capital_envelope import position_within_capital_envelope
 from freqtrade.util.migrations import migrate_data
 from freqtrade.wallets import Wallets
 
@@ -243,6 +244,7 @@ class Backtesting:
         self.enable_protections: bool = self.config.get("enable_protections", False)
         migrate_data(config, self.exchange)
 
+        self._envelope_warned: set = set()
         self.init_backtest()
 
     def _validate_pairlists_for_backtesting(self):
@@ -754,6 +756,13 @@ class Backtesting:
             if self.strategy.max_entry_position_adjustment > -1:
                 entry_count = trade.nr_of_successful_entries
                 check_adjust_entry = entry_count <= self.strategy.max_entry_position_adjustment
+            # Meme enveloppe de capital par position que la boucle live. Sans ce test, un
+            # backtest finance des echelles DCA que le live refuse : tout reglage de
+            # max_position_stake_ratio valide par backtest etait faux par construction.
+            if check_adjust_entry and not position_within_capital_envelope(
+                self.config, self.wallets, trade, stake_amount, self._envelope_warned
+            ):
+                check_adjust_entry = False
             if check_adjust_entry:
                 pos_trade = self._enter_trade(
                     trade.pair,

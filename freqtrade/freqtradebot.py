@@ -81,6 +81,7 @@ from freqtrade.rpc.rpc_types import (
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
+from freqtrade.util.capital_envelope import position_within_capital_envelope
 from freqtrade.util.migrations import migrate_live_content
 from freqtrade.wallets import Wallets
 
@@ -2050,45 +2051,45 @@ class FreqtradeBot(LoggingMixin):
         allocation, wiping out thirty winning trades. A martingale ladder
         (safety_order_volume_scale 3.7) reaches these sizes in two reinforcements.
 
-        The envelope is deliberately loose — a single position may commit up to the bot's
-        whole allocation — because it is a backstop against runaway compounding, not a
+        The envelope is deliberately loose - a single position may commit up to the bot's
+        whole allocation - because it is a backstop against runaway compounding, not a
         sizing policy. Tighten it per bot via `max_position_stake_ratio`; 0 disables it.
+
+        BASIS (`max_position_stake_basis`, default "allocated"):
+
+          "allocated"  - `available_capital` raw, as written in the config. Historical
+                         behaviour, kept as the default so no fleet bot changes silently.
+          "deployable" - `wallets.get_total_stake_amount()`, i.e. the SAME amount the
+                         sizing path divides by `max_open_trades`
+                         (`available_capital - capital_withdrawal + closed profit`, times
+                         `tradable_balance_ratio`).
+
+        Why the option exists: with "allocated", the envelope and the sizing measure two
+        different capitals, so whether a DCA ladder fits is an accident of the config.
+        Measured on hippo_original_multi (available_capital 7844.15, capital_withdrawal
+        4176.13, 1224.05 of closed profit, max_open_trades 2): the sizing slot is 2421.57,
+        so a full ladder needs exactly one slot of margin, while the envelope allowed
+        0.35 x 7844.15 = 2745.45 - it happened to fit, but only because the withdrawal was
+        large. One more withdrawal, or enough accumulated profit, and the last rung of the
+        ladder is refused with no config change and no log that says why.
+
+        On the "deployable" basis the condition becomes scale-free and auditable: a ladder
+        of `overbuy_factor` slots fits whenever
+
+            max_position_stake_ratio >= overbuy_factor / max_open_trades
+
+        which holds for every capital, withdrawal and profit level.
+
+        NOTE: the implementation lives in `freqtrade.util.capital_envelope` so that the
+        backtester applies the very same guard. It used to be live-only, which meant a
+        backtest funded ladders the live bot refuses.
         """
-        ratio = self.config.get("max_position_stake_ratio", 1.0)
-        if not ratio or ratio <= 0:
-            return True
-        allocated = self.config.get("available_capital")
-        if not allocated:
-            # No explicit allocation: fall back to what the bot may actually deploy.
-            try:
-                allocated = self.wallets.get_total_stake_amount()
-            except Exception:
-                return True
-        if not allocated or allocated <= 0:
-            return True
-        projected = (trade.stake_amount or 0.0) + added_stake
-        if projected <= allocated * ratio:
-            return True
-        # The guard runs every cycle while the DCA trigger stays true, so the same line was
-        # logged 7848 times in 36h by one bot. Once per trade per hour is enough to notice.
-        key = (getattr(trade, "id", 0) or 0, int(datetime.now(UTC).timestamp() // 3600))
         warned = getattr(self, "_envelope_warned", None)
         if warned is None:
             warned = self._envelope_warned = set()
-        if key not in warned:
-            warned.add(key)
-            logger.warning(
-                "%s: safety order of %.2f refused — it would take this single position to "
-                "%.2f of margin, past %.0f%% of the bot's %.2f allocation. "
-                "Raise max_position_stake_ratio to allow it (further identical refusals "
-                "for this trade are logged at most hourly).",
-                trade.pair,
-                added_stake,
-                projected,
-                ratio * 100,
-                allocated,
-            )
-        return False
+        return position_within_capital_envelope(
+            self.config, self.wallets, trade, added_stake, warned
+        )
 
     def check_and_call_adjust_trade_position(self, trade: Trade):
         """

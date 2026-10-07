@@ -70,3 +70,66 @@ WR > 95% et DD < 5% = toujours artificiel. Cause: profit gate + DCA illimite + s
 6. `CategoricalParameter` default dans la liste de choix?
 7. Pas de duplicate de methodes (confirm_trade_exit, etc.)?
 8. Backtest fait avec `--timeframe-detail 1m`?
+
+## Echelle DCA : composer sur le cumul au lieu de la mise initiale (famille hippo, corrige 2026-10-07)
+
+Pattern herite du template DCA "safety order" (NostalgiaForInfinity / Elliot-like). Dans la
+branche de compensation de remplissage partiel, l'echelle multipliait `already_bought`, le
+cumul deja engage, au lieu de la mise initiale :
+
+```python
+# FAUX
+current_actual_stake = already_bought * volume_scale ** (count_of_buys - 1)
+```
+
+Juste pour le 1er renfort (`volume_scale ** 0 == 1`), faux ensuite. Avec
+`safety_order_volume_scale = 1.8` et `max_so_multiplier_orig = 3`, l'echelle complete
+demandait **23,74 x la mise initiale** au lieu des **7,04 x** pour lesquels
+`custom_stake_amount` dimensionne la premiere entree (`proposed_stake / max_so_multiplier`).
+
+Trois symptomes, tous observes en live sur `hippo_original_multi` :
+
+1. le dernier palier etait TOUJOURS refuse par l'enveloppe de capital, donc une echelle
+   annoncee a 3 crans n'en avait que 2 ;
+2. une position pouvait depasser 100 % de son propre slot de capital en empruntant au
+   second slot (mesure : 103 % en backtest, et `SKY/USDC:USDC` a 2491 USDC de marge pour
+   une mise initiale de 445, soit 51 % du capital deployable du bot) ;
+3. le resultat dependait d'un redemarrage du bot : `cust_proposed_initial_stakes` est un
+   dictionnaire en memoire, et la branche de repli utilisee quand il est vide calculait,
+   elle, la bonne valeur. Meme trade, deux echelles selon qu'un restart a eu lieu.
+
+Formulation correcte, qui preserve l'intention de compensation de remplissage partiel :
+
+```python
+nominal  = proposed_initial_stake * volume_scale ** (count_of_buys - 1)
+expected = proposed_initial_stake * ladder_cumulative(count_of_buys - 1, volume_scale)
+stake    = lerp(nominal, nominal + max(0.0, expected - already_bought), compensation_scale)
+stake    = min(stake, max(0.0, proposed_initial_stake * max_so_multiplier - already_bought))
+```
+
+ou `ladder_cumulative(k, vs) = 1 + (vs**k - 1) / (vs - 1)` est le cumul nominal apres `k`
+renforts, en multiples de la mise initiale. Le `min` final est un plafond dur : l'echelle
+ne depasse jamais `max_so_multiplier x mise initiale`, et il rattrape proprement une
+position deja en surchauffe (sur `SKY`, il ramene le dernier palier de 8082 a 641 USDC).
+
+**Reflexe de review** : sur toute echelle DCA, verifier que la somme des paliers vaut
+exactement le diviseur utilise par `custom_stake_amount`. Si elle vaut davantage, le
+dernier palier est decoratif.
+
+## Enveloppe de capital et sizing qui mesurent deux capitaux differents
+
+`max_position_stake_ratio` se jugeait sur `available_capital` brut, alors que le sizing
+divise `available_capital - capital_withdrawal + profit realise` (x
+`tradable_balance_ratio`) par `max_open_trades`. Sur un bot avec un retrait important les
+deux bases n'ont aucun rapport, et l'echelle DCA tient ou ne tient pas par accident, sans
+qu'aucun reglage ne le dise.
+
+Cle ajoutee : `max_position_stake_basis` (`"allocated"` par defaut, comportement historique,
+ou `"deployable"`). Sur la base deployable la condition devient invariante d'echelle :
+
+    max_position_stake_ratio >= overbuy_factor / max_open_trades
+
+Le garde-fou vit desormais dans `freqtrade/util/capital_envelope.py` et le **backtester
+l'applique aussi**. Il etait live-only : un backtest finançait des echelles que le live
+refuse, donc tout reglage de `max_position_stake_ratio` valide par backtest etait faux par
+construction.
