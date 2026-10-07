@@ -116,6 +116,55 @@ position deja en surchauffe (sur `SKY`, il ramene le dernier palier de 8082 a 64
 exactement le diviseur utilise par `custom_stake_amount`. Si elle vaut davantage, le
 dernier palier est decoratif.
 
+### MAIS : corriger cette echelle naivement COUTE de la performance (mesure 2026-10-07)
+
+Resultat contre-intuitif, a connaitre avant de "corriger" ce pattern ailleurs. Composer sur
+le cumul n'est pas qu'une erreur de calcul : c'est une **martingale nettement plus
+agressive** (paliers 1 / 3.6 au lieu de 1 / 1.8), qui tire la moyenne d'entree vers le bas
+beaucoup plus vite, donc qui **sort plus tot et plus souvent en profit**.
+
+Backtest 6 mois (2026-04-07 -> 2026-10-05), 72 paires, hippo_original_multi, drawdown
+recalcule positions ouvertes incluses :
+
+  version                                     trades   profit   drawdown open-inclusif
+  echelle d'origine (compose sur le cumul)       142   +601.60                  -5.01 %
+  echelle bornee, stop -35 % inchange            136   -332.37                 -54.63 %
+  echelle bornee + stop resserre a -25 %         136   -127.65                 -40.44 %
+
+Tout l'ecart vient d'UN trade : ZEC/USDC du 2026-06-04, qui a chute de 52 % en dix heures.
+L'echelle d'origine, en sur-finançant son 2e palier (1214 USDC au lieu de 607), avait une
+moyenne d'entree assez basse pour sortir au ROI **huit heures avant le point bas**
+(+9.40). L'echelle bornee garde la moyenne plus haute, ne recupere pas, et realise -660.
+
+Simulation exhaustive (113 229 bougies d'entree candidates, meme fenetre), l'echelle
+d'origine correctement modelisee :
+
+  queue de risque (pire excursion)   origine   bornee   bornee + stop -25 %
+  centile 1                           -7.28 %  -8.21 %              -8.21 %
+  centile 0,1                        -32.78 % -28.98 %             -25.12 %
+  pire                               -37.92 % -38.95 %             -32.06 %
+  stop touche, crypto                 0.132 %  0.109 %              0.216 %
+  liquidation                         0.000 %  0.000 %              0.000 %
+
+L'echelle d'origine est donc MEILLEURE dans le corps de la distribution et son pire cas
+absolu est equivalent ; l'echelle bornee ne gagne qu'au centile 0,1. Aucune des deux ne
+liquide jamais, le levier 1 sur crypto rendant la liquidation structurellement impossible
+et les instruments xyz ne descendant pas assez bas a levier 2.
+
+**Ce qui reste un vrai defaut de l'echelle d'origine**, independamment du P&L :
+  - la position n'est bornee que par l'enveloppe de capital, pas par la strategie : elle a
+    atteint 103 % de son propre slot en backtest, donc elle emprunte au second slot ;
+  - le dernier palier est decoratif (toujours refuse) ;
+  - le resultat depend d'un redemarrage du bot (branche de repli vs dictionnaire en
+    memoire), donc deux executions du meme trade ne donnent pas la meme echelle.
+
+**Conclusion operationnelle** : ne pas corriger l'echelle sans recalibrer en meme temps
+`safety_order_volume_scale`. Une echelle bornee qui reproduit l'agressivite d'origine
+demande vs ~= 3.6 (paliers 1 / 3.6 / 12.96, max_so_multiplier 18.56), donc une mise
+initiale 2,6 fois plus petite : c'est un changement de sizing complet, a tester, pas un
+correctif de calcul. Le patch de correction est conserve sur la branche
+`fix/dca-ladder-capital-safety`, NON deploye.
+
 ## Enveloppe de capital et sizing qui mesurent deux capitaux differents
 
 `max_position_stake_ratio` se jugeait sur `available_capital` brut, alors que le sizing
