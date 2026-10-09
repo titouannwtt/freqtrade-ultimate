@@ -297,3 +297,61 @@ Le garde-fou vit desormais dans `freqtrade/util/capital_envelope.py` et le **bac
 l'applique aussi**. Il etait live-only : un backtest finançait des echelles que le live
 refuse, donc tout reglage de `max_position_stake_ratio` valide par backtest etait faux par
 construction.
+
+## Un stop place dans `custom_exit` est SUSPENDU quand un signal de sortie est present
+
+Verifie dans `freqtrade/strategy/interface.py` (~1528) :
+
+```python
+if self.use_exit_signal:
+    if exit_ and not enter:
+        exit_signal = ExitType.EXIT_SIGNAL      # <- custom_exit JAMAIS appele
+    else:
+        reason_cust = ... self.custom_exit(...)  # <- le stop vivait ici
+```
+
+La famille hippo mettait son stop (-35 % de mouvement de prix) dans `custom_exit`, avec
+`stoploss = -1` (natif desactive) et `use_custom_stoploss = False`. Des que `rsi > 60` (son
+signal de sortie), la branche EXIT_SIGNAL est prise et le seuil n'est jamais evalue. Et ce
+signal est lui-meme refuse par `confirm_trade_exit` puisque la position est en perte : donc
+aucune sortie du tout pendant ces fenetres. Mesure sur SKY/USDC, 7 jours : RSI > 60 pendant
+21,3 % du temps, sequences continues jusqu'a 245 minutes.
+
+Preuve en base, avant correctif : tous les trades portaient `stop_loss_pct = -1` et
+`stop_loss = 0.0` (SKY) ou `open_rate x 0.5` (GOLD a levier 2). **Aucun stop reel.**
+
+Second defaut du meme bloc : `confirm_trade_exit` teste `exit_reason == "stop_loss"`, faux
+puisque `custom_exit` renvoyait `f"stop_loss ({entry_tag})"`. Seul le test `_is_safety_exit`
+(sous-chaine "stop") sauvait la sortie.
+
+**Correctif (deploye le 2026-10-09)** : stop retire de `custom_exit`,
+`use_custom_stoploss = True`, et
+
+```python
+def custom_stoploss(self, pair, trade, current_time, current_rate, current_profit,
+                    after_fill, **kwargs) -> float | None:
+    lev = float(getattr(trade, "leverage", None) or 1.0)
+    return stoploss_from_open(MARKET_PARAMS[self.market_of(pair)]["stoploss_price"] * lev,
+                              current_profit, is_short=trade.is_short, leverage=lev)
+```
+
+Trois subtilites indispensables :
+  - `stoploss_from_open` divise par le levier en interne : MULTIPLIER par `lev` pour
+    exprimer un mouvement de prix. Verifie, stop a `moyenne x 0.65` a levier 1 et 2.
+  - `after_fill` DANS LA SIGNATURE fait passer `_ft_stop_uses_after_fill` a True, donc
+    freqtrade rappelle la methode apres chaque remplissage avec `allow_refresh=True` et
+    autorise le stop a DESCENDRE. Sans lui, le stoploss natif ne monte que et resterait
+    bloque au niveau d'avant le renfort alors que le DCA a abaisse la moyenne : il
+    declencherait AVANT les -35 % reels. Piege a faux negatif en backtest.
+  - en backtest le stop natif est evalue sur le PLUS BAS de la bougie, `custom_exit` sur
+    l'ouverture seule : le correctif rend le stop plus reactif, pas seulement plus fiable.
+
+**Cout mesure : zero.** 18 mois, 72 paires, 302 trades, avec et sans : identiques
+(1512.78, 0 perte, drawdown -3,91 %). Le stop ne s'est declenche dans aucune des deux
+variantes, pire excursion -10,52 % contre un seuil a -35 %. Le backtest ne pouvait donc pas
+valider le gain, seulement l'absence d'effet de bord.
+
+**REFLEXE DE CONTROLE sur toute strategie de la flotte** avec `use_exit_signal = True` :
+`select pair, stop_loss, stop_loss_pct from trades where is_open=1`. Si `stop_loss_pct`
+vaut -1 ou si `stop_loss` vaut 0, aucun stop n'est porte au niveau de freqtrade, quoi que
+dise le code de la strategie.
