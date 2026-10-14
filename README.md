@@ -220,7 +220,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **Liquidation detection** via user-fills monitoring (`liquidationMarkPx`).
 - **External close detection** (ADL or manual UI close) with `exit_reason="external_close"`.
 - **Resilient leverage / margin error handling** in DCA continues operation instead of crashing.
-- **Local Hyperliquid historical data bundle**: 3 250+ Feather files (300+ pairs × 8 timeframes including crypto indices and TradFi perpetuals).
+- **Local Hyperliquid historical data bundle**: 3 350+ Feather files (397 pairs × 8 timeframes including crypto indices and TradFi perpetuals, plus 271 funding-rate series).
 
 ### Position integrity (multi-bot / shared account)
 - **Provable order ownership**: every order carries a per-bot client order id, so a bot on a shared wallet can recover *its own* lost orders without ever claiming a sibling's.
@@ -247,7 +247,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 
 ### Developer experience
 - **Strategy Dev Backend**: reader, jobs runner, strategy editor APIs (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
-- **AI Copilot**: repository ships with [`CLAUDE.md`](CLAUDE.md) plus 14 tip files containing 199 trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
+- **AI Copilot**: repository ships with [`CLAUDE.md`](CLAUDE.md) plus 15 tip files containing 199 trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
 - **Enhanced CLI help**: practical guidance, recommendations, and tradeoffs documented in every option.
 
 **Full feature list with deep technical details:** [docs/FEATURES.md](docs/FEATURES.md)
