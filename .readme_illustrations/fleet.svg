@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 650" width="1280" height="650" role="img" aria-labelledby="t d">
+  <title id="t">Multi-bot infrastructure</title>
+  <desc id="d">Hyperliquid feeds two shared daemons: ftcache, a shared OHLCV cache with 75 percent fewer API calls measured in production with four bots, and ftpairlists, which brings the pairlist refresh from 15 to 3 minutes. Four bots share one wallet under Position Guard and Leverage Sync, and report to the FreqUI Ultimate dashboard through fleet REST endpoints.</desc>
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;Liberation Mono&quot;, monospace; }
+      .eye { animation: blink 5.5s infinite; transform-box: fill-box; transform-origin: center; }
+      .ping { animation: ping 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+      .flow { stroke-dasharray: 2 10; stroke-linecap: round; animation: dash 1.4s linear infinite; }
+      .float1 { animation: float 4s ease-in-out infinite; }
+      .float2 { animation: float 4.6s ease-in-out infinite -1.2s; }
+      .float3 { animation: float 5.2s ease-in-out infinite -2.4s; }
+      .float4 { animation: float 4.3s ease-in-out infinite -3.1s; }
+      @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.12); } }
+      @keyframes ping { 0% { transform: scale(1); opacity: 0.55; } 80%, 100% { transform: scale(2.3); opacity: 0; } }
+      @keyframes dash { to { stroke-dashoffset: -24; } }
+      @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B2545"/>
+      <stop offset="1" stop-color="#071A30"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#FFF8E7" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <g id="bot" stroke="#0B2545" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+      <line x1="200" y1="70" x2="200" y2="104" fill="none"/>
+      <circle class="ping" cx="200" cy="49" r="23" fill="#F7901E" stroke="none"/>
+      <circle cx="200" cy="49" r="23" fill="#F7901E"/>
+      <path d="M57 406 L62 336 C65 301 86 282 120 278 L280 278 C314 282 335 301 338 336 L343 406 Z" fill="#F7901E"/>
+      <path d="M117 281 C109 320 105 362 103 406" fill="none"/>
+      <path d="M283 281 C291 320 295 362 297 406" fill="none"/>
+      <path d="M63 328 C78 333 92 337 106 339" fill="none"/>
+      <path d="M294 339 C308 337 322 333 337 328" fill="none"/>
+      <ellipse cx="84" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <ellipse cx="316" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <path d="M200 100 C285 100 318 140 318 190 C318 249 281 286 200 286 C119 286 82 249 82 190 C82 140 115 100 200 100 Z" fill="#F7901E"/>
+      <rect x="110" y="142" width="180" height="105" rx="52" fill="#0B2545" stroke="none"/>
+      <ellipse class="eye" cx="158" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+      <ellipse class="eye" cx="242" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+    </g>
+    <clipPath id="disc"><circle cx="200" cy="200" r="197"/></clipPath>
+    <g id="avatar">
+      <circle cx="200" cy="200" r="200" fill="#5BC0CB"/>
+      <g clip-path="url(#disc)"><use href="#bot"/></g>
+      <circle cx="200" cy="200" r="197" fill="none" stroke="#0B2545" stroke-width="10"/>
+    </g>
+
+  </defs>
+  <rect width="1280" height="650" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="650" rx="28" fill="url(#grid)"/>
+<text x="56" y="64" class="mono" font-size="15" fill="#5BC0CB" font-weight="700" letter-spacing="2">MULTI-BOT INFRASTRUCTURE</text>
+<text x="56" y="102" class="sans" font-size="30" fill="#FFF8E7" font-weight="800">One exchange, a fleet of bots, one shared cache</text>
+<rect x="56" y="230" width="210" height="200" rx="20" fill="#0F3157" stroke="#5BC0CB" stroke-width="2"/>
+<text x="161" y="274" class="sans" font-size="22" fill="#FFF8E7" font-weight="800" text-anchor="middle">Hyperliquid</text>
+<text x="161" y="298" class="sans" font-size="15" fill="#C3D2E6" text-anchor="middle">perpetual futures</text>
+<g opacity="0.95">
+<g><line x1="91.0" y1="389.4" x2="91.0" y2="408.0" stroke="#3DDC97" stroke-width="2"/><rect x="85.6" y="398.1" width="10.8" height="3.4" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="109.0" y1="380.4" x2="109.0" y2="399.9" stroke="#3DDC97" stroke-width="2"/><rect x="103.6" y="382.2" width="10.8" height="15.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="127.0" y1="352.7" x2="127.0" y2="382.5" stroke="#3DDC97" stroke-width="2"/><rect x="121.6" y="353.7" width="10.8" height="28.5" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="145.0" y1="333.7" x2="145.0" y2="354.0" stroke="#3DDC97" stroke-width="2"/><rect x="139.6" y="341.5" width="10.8" height="12.2" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="163.0" y1="324.5" x2="163.0" y2="344.1" stroke="#3DDC97" stroke-width="2"/><rect x="157.6" y="331.3" width="10.8" height="10.3" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="181.0" y1="322.0" x2="181.0" y2="345.8" stroke="#F2635F" stroke-width="2"/><rect x="175.6" y="331.3" width="10.8" height="4.0" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="199.0" y1="333.6" x2="199.0" y2="357.0" stroke="#F2635F" stroke-width="2"/><rect x="193.6" y="335.3" width="10.8" height="20.5" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="217.0" y1="355.3" x2="217.0" y2="367.5" stroke="#F2635F" stroke-width="2"/><rect x="211.6" y="355.8" width="10.8" height="2.4" rx="1.5" fill="#F2635F"/></g>
+</g>
+<path class="flow" d="M266 330 C300 330 300 252 340 252" stroke="#5BC0CB" stroke-width="3" fill="none"/>
+<path class="flow" d="M266 330 C300 330 300 448 340 448" stroke="#5BC0CB" stroke-width="3" fill="none"/>
+<rect x="340" y="176" width="300" height="152" rx="20" fill="#0F3157" stroke="#F7901E" stroke-width="2"/>
+<text x="364" y="216" class="mono" font-size="22" fill="#FFB45E" font-weight="700">ftcache</text>
+<text x="364" y="242" class="sans" font-size="16" fill="#C3D2E6">shared OHLCV candle cache</text>
+<line x1="364" y1="260" x2="616" y2="260" stroke="#24507F" stroke-width="1.5"/>
+<text x="364" y="292" class="sans" font-size="24" fill="#FFF8E7" font-weight="800">75 % fewer API calls</text>
+<text x="364" y="315" class="sans" font-size="15" fill="#8FA6C4">measured in production, 4 bots</text>
+<rect x="340" y="372" width="300" height="152" rx="20" fill="#0F3157" stroke="#F7901E" stroke-width="2"/>
+<text x="364" y="412" class="mono" font-size="22" fill="#FFB45E" font-weight="700">ftpairlists</text>
+<text x="364" y="438" class="sans" font-size="16" fill="#C3D2E6">shared pairlist computation</text>
+<line x1="364" y1="456" x2="616" y2="456" stroke="#24507F" stroke-width="1.5"/>
+<text x="364" y="488" class="sans" font-size="24" fill="#FFF8E7" font-weight="800">15 min → 3 min</text>
+<text x="364" y="511" class="sans" font-size="15" fill="#8FA6C4">pairlist refresh</text>
+<rect x="718" y="140" width="280" height="420" rx="22" fill="none" stroke="#3DDC97" stroke-width="2" stroke-dasharray="8 7"/>
+<rect x="742" y="126" width="131.6" height="28" rx="14" fill="#0B2545" stroke="#3DDC97" stroke-width="1.5"/>
+<text x="807.8" y="145" class="mono" font-size="14" fill="#3DDC97" text-anchor="middle">shared wallet</text>
+<line x1="684" y1="202" x2="684" y2="448" stroke="#F7901E" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
+<path class="flow" d="M640 252 H684" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<path class="flow" d="M640 448 H684" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<path class="flow" d="M684 202 H758" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<path class="flow" d="M684 284 H758" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<path class="flow" d="M684 366 H758" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<path class="flow" d="M684 448 H758" stroke="#F7901E" stroke-width="2.5" fill="none" opacity="0.8"/>
+<g class="float1"><use href="#avatar" transform="translate(754.0 168.0) scale(0.1700)"/></g>
+<text x="838" y="198" class="sans" font-size="18" fill="#FFF8E7" font-weight="700">bot 1</text>
+<text x="838" y="221" class="mono" font-size="15" fill="#C3D2E6">trend</text>
+<g class="float2"><use href="#avatar" transform="translate(754.0 250.0) scale(0.1700)"/></g>
+<text x="838" y="280" class="sans" font-size="18" fill="#FFF8E7" font-weight="700">bot 2</text>
+<text x="838" y="303" class="mono" font-size="15" fill="#C3D2E6">mean-rev</text>
+<g class="float3"><use href="#avatar" transform="translate(754.0 332.0) scale(0.1700)"/></g>
+<text x="838" y="362" class="sans" font-size="18" fill="#FFF8E7" font-weight="700">bot 3</text>
+<text x="838" y="385" class="mono" font-size="15" fill="#C3D2E6">DCA</text>
+<g class="float4"><use href="#avatar" transform="translate(754.0 414.0) scale(0.1700)"/></g>
+<text x="838" y="444" class="sans" font-size="18" fill="#FFF8E7" font-weight="700">bot 4</text>
+<text x="838" y="467" class="mono" font-size="15" fill="#C3D2E6">short</text>
+<text x="858.0" y="530" class="sans" font-size="15" fill="#FFF8E7" font-weight="700" text-anchor="middle">Position Guard + Leverage Sync</text>
+<text x="858.0" y="550" class="sans" font-size="15" fill="#C3D2E6" text-anchor="middle">no conflicting entries or hedges</text>
+<path class="flow" d="M998 202 C1030 202 1020 330 1060 330" stroke="#5BC0CB" stroke-width="2" fill="none" opacity="0.6"/>
+<path class="flow" d="M998 284 C1030 284 1020 330 1060 330" stroke="#5BC0CB" stroke-width="2" fill="none" opacity="0.6"/>
+<path class="flow" d="M998 366 C1030 366 1020 330 1060 330" stroke="#5BC0CB" stroke-width="2" fill="none" opacity="0.6"/>
+<path class="flow" d="M998 448 C1030 448 1020 330 1060 330" stroke="#5BC0CB" stroke-width="2" fill="none" opacity="0.6"/>
+<rect x="1060" y="200" width="176" height="260" rx="18" fill="#0F3157" stroke="#5BC0CB" stroke-width="2"/>
+<rect x="1060" y="200" width="176" height="34" rx="18" fill="#071A30"/>
+<rect x="1060" y="218" width="176" height="16" fill="#071A30"/>
+<circle cx="1080" cy="217" r="5" fill="#F2635F"/>
+<circle cx="1096" cy="217" r="5" fill="#F7901E"/>
+<circle cx="1112" cy="217" r="5" fill="#3DDC97"/>
+<path d="M1076 320 L1106 304 L1132 312 L1164 280 L1190 288 L1220 258" fill="none" stroke="#3DDC97" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="1080" y="356" width="24" height="30" rx="4" fill="#F7901E" opacity="0.85"/>
+<rect x="1118" y="340" width="24" height="46" rx="4" fill="#F7901E" opacity="0.85"/>
+<rect x="1156" y="364" width="24" height="22" rx="4" fill="#F7901E" opacity="0.85"/>
+<rect x="1194" y="348" width="24" height="38" rx="4" fill="#F7901E" opacity="0.85"/>
+<text x="1148.0" y="418" class="sans" font-size="18" fill="#FFF8E7" font-weight="800" text-anchor="middle">FreqUI</text>
+<text x="1148.0" y="440" class="sans" font-size="18" fill="#FFB45E" font-weight="800" text-anchor="middle">Ultimate</text>
+<text x="1148.0" y="488" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">/fleet/status</text>
+<text x="1148.0" y="508" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">/rate_metrics</text>
+<text x="1148.0" y="528" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">/cache_status</text>
+<text x="56" y="610" class="sans" font-size="16" fill="#8FA6C4">Every order carries a per-bot client order id.  freqtrade position-audit attests the exchange against every bot's book.</text>
+</svg>

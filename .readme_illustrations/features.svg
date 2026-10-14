@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 628" width="1280" height="628" role="img" aria-labelledby="t d">
+  <title id="t">Feature highlights</title>
+  <desc id="d">Six feature families: multi-bot infrastructure, hyperopt and validation, Hyperliquid-specific handling, position integrity, dry-run replay and observability.</desc>
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;Liberation Mono&quot;, monospace; }
+      .eye { animation: blink 5.5s infinite; transform-box: fill-box; transform-origin: center; }
+      .ping { animation: ping 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+      .flow { stroke-dasharray: 2 10; stroke-linecap: round; animation: dash 1.4s linear infinite; }
+      .float1 { animation: float 4s ease-in-out infinite; }
+      .float2 { animation: float 4.6s ease-in-out infinite -1.2s; }
+      .float3 { animation: float 5.2s ease-in-out infinite -2.4s; }
+      .float4 { animation: float 4.3s ease-in-out infinite -3.1s; }
+      @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.12); } }
+      @keyframes ping { 0% { transform: scale(1); opacity: 0.55; } 80%, 100% { transform: scale(2.3); opacity: 0; } }
+      @keyframes dash { to { stroke-dashoffset: -24; } }
+      @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B2545"/>
+      <stop offset="1" stop-color="#071A30"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#FFF8E7" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <g id="bot" stroke="#0B2545" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+      <line x1="200" y1="70" x2="200" y2="104" fill="none"/>
+      <circle class="ping" cx="200" cy="49" r="23" fill="#F7901E" stroke="none"/>
+      <circle cx="200" cy="49" r="23" fill="#F7901E"/>
+      <path d="M57 406 L62 336 C65 301 86 282 120 278 L280 278 C314 282 335 301 338 336 L343 406 Z" fill="#F7901E"/>
+      <path d="M117 281 C109 320 105 362 103 406" fill="none"/>
+      <path d="M283 281 C291 320 295 362 297 406" fill="none"/>
+      <path d="M63 328 C78 333 92 337 106 339" fill="none"/>
+      <path d="M294 339 C308 337 322 333 337 328" fill="none"/>
+      <ellipse cx="84" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <ellipse cx="316" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <path d="M200 100 C285 100 318 140 318 190 C318 249 281 286 200 286 C119 286 82 249 82 190 C82 140 115 100 200 100 Z" fill="#F7901E"/>
+      <rect x="110" y="142" width="180" height="105" rx="52" fill="#0B2545" stroke="none"/>
+      <ellipse class="eye" cx="158" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+      <ellipse class="eye" cx="242" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+    </g>
+    <clipPath id="disc"><circle cx="200" cy="200" r="197"/></clipPath>
+    <g id="avatar">
+      <circle cx="200" cy="200" r="200" fill="#5BC0CB"/>
+      <g clip-path="url(#disc)"><use href="#bot"/></g>
+      <circle cx="200" cy="200" r="197" fill="none" stroke="#0B2545" stroke-width="10"/>
+    </g>
+
+  </defs>
+  <rect width="1280" height="628" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="628" rx="28" fill="url(#grid)"/>
+<rect x="52" y="40" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(76 64)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<g><use href="#avatar" transform="translate(5.0 9.0) scale(0.0550)"/></g>
+<g><use href="#avatar" transform="translate(29.0 9.0) scale(0.0550)"/></g>
+<g><use href="#avatar" transform="translate(17.0 27.0) scale(0.0550)"/></g>
+</g>
+<text x="148" y="100" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Multi-bot infrastructure</text>
+<text x="76" y="156" class="sans" font-size="18" fill="#C3D2E6">Shared OHLCV and pairlist caches,</text>
+<text x="76" y="183" class="sans" font-size="18" fill="#C3D2E6">position guard, leverage sync,</text>
+<text x="76" y="210" class="sans" font-size="18" fill="#C3D2E6">auto-restart with startup jitter.</text>
+<line x1="76" y1="246" x2="404" y2="246" stroke="#24507F" stroke-width="1"/>
+<text x="76" y="278" class="mono" font-size="15" fill="#FFB45E">ftcache · ftpairlists</text>
+<rect x="452" y="40" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(476 64)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<path d="M8 44 C16 44 18 18 28 18 C38 18 40 44 48 44" fill="none" stroke="#5BC0CB" stroke-width="3" stroke-linecap="round"/>
+<line x1="20" y1="18" x2="36" y2="18" stroke="#F7901E" stroke-width="4" stroke-linecap="round"/>
+<circle cx="28" cy="18" r="4" fill="#FFF8E7"/>
+</g>
+<text x="548" y="100" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Hyperopt &amp; validation</text>
+<text x="476" y="156" class="sans" font-size="18" fill="#C3D2E6">PlateauSampler, walk-forward with</text>
+<text x="476" y="183" class="sans" font-size="18" fill="#C3D2E6">CPCV, Monte Carlo drawdowns,</text>
+<text x="476" y="210" class="sans" font-size="18" fill="#C3D2E6">a PBO score and a verdict A to F.</text>
+<line x1="476" y1="246" x2="804" y2="246" stroke="#24507F" stroke-width="1"/>
+<text x="476" y="278" class="mono" font-size="15" fill="#FFB45E">freqtrade walk-forward</text>
+<rect x="852" y="40" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(876 64)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<line x1="20" y1="9" x2="20" y2="47" stroke="#F2635F" stroke-width="2.5"/>
+<rect x="14" y="14" width="12" height="28" rx="2" fill="#F2635F"/>
+<path d="M38 10 L31 29 H38 L34 46 L46 23 H39 L43 10 Z" fill="#F7901E"/>
+</g>
+<text x="948" y="100" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Hyperliquid-specific</text>
+<text x="876" y="156" class="sans" font-size="18" fill="#C3D2E6">Liquidation and external close</text>
+<text x="876" y="183" class="sans" font-size="18" fill="#C3D2E6">(ADL) detection, resilient DCA,</text>
+<text x="876" y="210" class="sans" font-size="18" fill="#C3D2E6">a local historical data bundle.</text>
+<line x1="876" y1="246" x2="1204" y2="246" stroke="#24507F" stroke-width="1"/>
+<text x="876" y="278" class="mono" font-size="15" fill="#FFB45E">exit_reason="external_close"</text>
+<rect x="52" y="326" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(76 350)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<path d="M28 9 L45 15 V28 C45 38 37 45 28 48 C19 45 11 38 11 28 V15 Z" fill="none" stroke="#3DDC97" stroke-width="3" stroke-linejoin="round"/>
+<path d="M20 28 L26 34 L37 22" fill="none" stroke="#3DDC97" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<text x="148" y="386" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Position integrity</text>
+<text x="76" y="442" class="sans" font-size="18" fill="#C3D2E6">Per-bot client order ids, guards</text>
+<text x="76" y="469" class="sans" font-size="18" fill="#C3D2E6">around every order, an append-only</text>
+<text x="76" y="496" class="sans" font-size="18" fill="#C3D2E6">hash-chained audit ledger.</text>
+<line x1="76" y1="532" x2="404" y2="532" stroke="#24507F" stroke-width="1"/>
+<text x="76" y="564" class="mono" font-size="15" fill="#FFB45E">freqtrade position-audit</text>
+<rect x="452" y="326" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(476 350)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<path d="M14 22 A16 16 0 1 1 13 33" fill="none" stroke="#5BC0CB" stroke-width="3" stroke-linecap="round"/>
+<path d="M8 18 L14 24 L19 16" fill="none" stroke="#5BC0CB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M24 20 L36 28 L24 36 Z" fill="#F7901E"/>
+</g>
+<text x="548" y="386" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Dry-run replay</text>
+<text x="476" y="442" class="sans" font-size="18" fill="#C3D2E6">The real live code path, candle</text>
+<text x="476" y="469" class="sans" font-size="18" fill="#C3D2E6">by candle on historical data:</text>
+<text x="476" y="496" class="sans" font-size="18" fill="#C3D2E6">hours instead of months.</text>
+<line x1="476" y1="532" x2="804" y2="532" stroke="#24507F" stroke-width="1"/>
+<text x="476" y="564" class="mono" font-size="15" fill="#FFB45E">dry_run_replay</text>
+<rect x="852" y="326" width="376" height="262" rx="20" fill="#0F3157" stroke="#24507F" stroke-width="1.5"/>
+<g transform="translate(876 350)">
+<rect width="56" height="56" rx="16" fill="#071A30" stroke="#24507F" stroke-width="1.5"/>
+<path d="M10 38 A18 18 0 0 1 46 38" fill="none" stroke="#24507F" stroke-width="5" stroke-linecap="round"/>
+<path d="M10 38 A18 18 0 0 1 36 22" fill="none" stroke="#3DDC97" stroke-width="5" stroke-linecap="round"/>
+<line x1="28" y1="38" x2="38" y2="24" stroke="#FFF8E7" stroke-width="3" stroke-linecap="round"/>
+<circle cx="28" cy="38" r="4" fill="#F7901E"/>
+</g>
+<text x="948" y="386" class="sans" font-size="22" fill="#FFF8E7" font-weight="800">Observability</text>
+<text x="876" y="442" class="sans" font-size="18" fill="#C3D2E6">API-call metrics and 429 tracking,</text>
+<text x="876" y="469" class="sans" font-size="18" fill="#C3D2E6">an enriched REST API, Telegram</text>
+<text x="876" y="496" class="sans" font-size="18" fill="#C3D2E6">and the FreqUI Ultimate dashboard.</text>
+<line x1="876" y1="532" x2="1204" y2="532" stroke="#24507F" stroke-width="1"/>
+<text x="876" y="564" class="mono" font-size="15" fill="#FFB45E">/fleet/status · /rate_metrics</text>
+</svg>

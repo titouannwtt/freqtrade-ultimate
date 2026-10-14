@@ -1,12 +1,5 @@
 <p align="center">
-  <img src=".readme_illustrations/logo_freqtrade_ultimate.jpg" width="180" alt="Freqtrade Ultimate logo">
-</p>
-
-<h1 align="center">Freqtrade Ultimate</h1>
-
-<p align="center">
-  <b>The production-grade Freqtrade fork for algorithmic trading on Hyperliquid.</b><br>
-  Maintained by <a href="https://buymeacoffee.com/freqtrade_france">Freqtrade France</a>.
+  <img src=".readme_illustrations/hero.svg" alt="Freqtrade Ultimate: the production-grade Freqtrade fork for algorithmic trading on Hyperliquid. The orange robot mascot leads a fleet of four smaller bots over a candlestick chart." width="100%">
 </p>
 
 <p align="center">
@@ -17,29 +10,39 @@
 </p>
 
 <p align="center">
-  <a href="#-already-running-freqtrade-switch-to-ultimate-without-losing-anything">Migrate from upstream</a> ·
-  <a href="#-new-to-freqtrade-start-here">Start fresh</a> ·
-  <a href="#-what-is-freqtrade-ultimate">About</a> ·
+  <a href="#choose-your-path"><b>Install</b></a> ·
+  <a href="#migrate-from-upstream-freqtrade">Migrate</a> ·
+  <a href="#start-fresh">Start fresh</a> ·
+  <a href="#why-this-fork-exists">Why this fork</a> ·
   <a href="docs/diagrams/README.md">Architecture</a> ·
-  <a href="#-feature-highlights">Features</a> ·
-  <a href="#-showcase-strategies">Strategies</a> ·
-  <a href="#-learn-algorithmic-trading">Learn</a> ·
-  <a href="docs/FEATURES.md">Full feature list</a>
+  <a href="#feature-highlights">Features</a> ·
+  <a href="#showcase-strategies">Strategies</a> ·
+  <a href="#the-dashboard-frequi-ultimate">Dashboard</a> ·
+  <a href="#learn-algorithmic-trading">Learn</a> ·
+  <a href="docs/FEATURES.md">All features</a>
 </p>
 
----
+## What is Freqtrade Ultimate?
 
-> **📦 Heads-up on repository size.** Freqtrade Ultimate ships a bundle of historical
-> Hyperliquid OHLCV data (397 pairs × 8 timeframes, reaching further back than Hyperliquid's
-> own 5000-candle API limit). It is one of the reasons the fork exists — but it makes a full
-> clone **~6.5 GB**.
+A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream. It is a **drop-in superset of upstream freqtrade**: same `freqtrade` command, same configuration schema, same database format, so an existing bot moves over without losing anything.
+
+Maintained by [Freqtrade France](https://buymeacoffee.com/freqtrade_france). Licensed GPLv3, like upstream Freqtrade.
+
+## Choose your path
+
+<p align="center"><img src=".readme_illustrations/paths.svg" alt="Everyone clones with --filter=blob:none. Already running freqtrade: migrate without losing anything, natively in a new folder or with Docker by swapping the image. New to freqtrade: start fresh with setup.sh or docker compose build." width="100%"></p>
+
+| You are... | Go to | Native (source / venv) | Docker |
+|---|---|---|---|
+| Already running freqtrade | [Migrate from upstream](#migrate-from-upstream-freqtrade) | [new folder, same files](#native-install-source--venv-no-docker) | [swap the image](#docker) |
+| New to freqtrade | [Start fresh](#start-fresh) | [`./setup.sh -i`](#native-install-source--venv) | [`docker compose build`](#docker-1) |
+
+> [!NOTE]
+> **Heads-up on repository size.** Freqtrade Ultimate ships a bundle of historical Hyperliquid OHLCV data (397 pairs × 8 timeframes, reaching further back than Hyperliquid's own 5000-candle API limit). It is one of the reasons the fork exists, but it makes a full clone **~6.5 GB**.
 >
-> Every `git clone` below therefore uses `--filter=blob:none`, which fetches file contents
-> on demand instead of every historical revision. Measured on a fresh clone: **~2 GB in
-> under a minute**, with the complete working tree — all the code *and* the 3358 data files.
+> Every `git clone` below therefore uses `--filter=blob:none`, which fetches file contents on demand instead of every historical revision. Measured on a fresh clone: **~2 GB in under a minute**, with the complete working tree: all the code *and* the 3358 data files.
 >
-> Want the code without the data bundle? A sparse checkout gets you there in
-> **~130 MB, in seconds**:
+> Want the code without the data bundle? A sparse checkout gets you there in **~130 MB, in seconds**:
 >
 > ```bash
 > git clone --filter=blob:none --sparse https://github.com/titouannwtt/freqtrade-ultimate.git
@@ -47,23 +50,21 @@
 > git sparse-checkout set --no-cone '/*' '!user_data/data'
 > ```
 
----
+## Migrate from upstream freqtrade
 
-## 🔄 Already running freqtrade? Switch to Ultimate without losing anything
-
-**Freqtrade Ultimate is a drop-in superset of upstream freqtrade.** Same `freqtrade` command, same configuration schema, same database format — it just adds features. Your bot *is* its `user_data/` folder (strategies, configs, hyperopt and backtest results, downloaded data) plus its trade database. Switching forks means pointing a Freqtrade Ultimate install at those same files. **Nothing about a running bot changes**: same open trades, same config, same strategy — it simply resumes with extra capabilities available.
+**Already running freqtrade? Switch to Ultimate without losing anything.** Freqtrade Ultimate keeps the same `freqtrade` command, the same configuration schema and the same database format; it just adds features. Your bot *is* its `user_data/` folder (strategies, configs, hyperopt and backtest results, downloaded data) plus its trade database. Switching forks means pointing a Freqtrade Ultimate install at those same files. **Nothing about a running bot changes**: same open trades, same config, same strategy. It simply resumes with extra capabilities available.
 
 <details>
 <summary><b>Before you start (30-second checklist)</b></summary>
 
-- **Stop the bot cleanly first** — let it finish its cycle (`Ctrl+C` in its screen/tmux, or `systemctl stop`). Don't migrate a bot mid-trade.
-- **Back up your trade database and config** — `cp tradesv3.sqlite tradesv3.sqlite.bak`. Cheap insurance.
-- **Database migrations are forward-only and automatic.** Ultimate tracks the current upstream version, so your DB upgrades itself on first start. (Only relevant edge case: don't point Ultimate at a DB written by a *newer* upstream `develop` than this fork — downgrading a DB is unsupported by freqtrade itself.)
+- **Stop the bot cleanly first**: let it finish its cycle (`Ctrl+C` in its screen/tmux, or `systemctl stop`). Don't migrate a bot mid-trade.
+- **Back up your trade database and config**: `cp tradesv3.sqlite tradesv3.sqlite.bak`. Cheap insurance.
+- **Database migrations are forward-only and automatic.** Ultimate tracks the current upstream version, so your DB upgrades itself on first start. (Only relevant edge case: don't point Ultimate at a DB written by a *newer* upstream `develop` than this fork; downgrading a DB is unsupported by freqtrade itself.)
 - You don't need to uninstall your current freqtrade. The cleanest migrations below keep your old setup intact as an instant rollback.
 
 </details>
 
-### 🖥️ Native install (source / venv — no Docker)
+### Native install (source / venv, no Docker)
 
 The safest path is **non-destructive**: install the fork in a *new* folder and run your existing bot from it. Your old install is never touched, so rollback is "just start the old one again".
 
@@ -73,7 +74,7 @@ The safest path is **non-destructive**: install the fork in a *new* folder and r
 # 2. Back up your trade database (cheap insurance).
 cp /path/to/tradesv3.sqlite /path/to/tradesv3.sqlite.bak
 
-# 3. Clone Freqtrade Ultimate into a NEW folder — your old install stays as rollback.
+# 3. Clone Freqtrade Ultimate into a NEW folder: your old install stays as rollback.
 git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
 #   ↑ ~6.5 GB of bundled Hyperliquid market data lives in this repo's history.
 #     --filter=blob:none fetches file contents on demand: same working tree,
@@ -87,7 +88,7 @@ cd freqtrade-ultimate
 source .venv/bin/activate
 freqtrade --version
 
-# 6. Run YOUR bot with YOUR existing files — nothing copied, nothing lost.
+# 6. Run YOUR bot with YOUR existing files: nothing copied, nothing lost.
 freqtrade trade \
   --config   /path/to/your/config.json \
   --strategy YourStrategy \
@@ -95,12 +96,11 @@ freqtrade trade \
   --db-url   sqlite:////absolute/path/to/your/tradesv3.sqlite
 ```
 
-> **Prefer one tidy folder?** Instead of pointing at old paths, copy your data into the clone:
-> `cp -a /path/to/your/user_data/. ./user_data/` then place your `config.json` and `*.sqlite` where you normally keep them, and launch as usual.
+> **Prefer one tidy folder?** Instead of pointing at old paths, copy your data into the clone: `cp -a /path/to/your/user_data/. ./user_data/` then place your `config.json` and `*.sqlite` where you normally keep them, and launch as usual.
 
-### 🐳 Docker
+### Docker
 
-There is **no public Ultimate image — you build it yourself from source** (the repo's `.dockerignore` excludes the bundled data, so the build stays small and fast). Recommended path: keep your working `docker-compose.yml`, volumes and DB exactly as they are, and **swap only the image**.
+There is **no public Ultimate image: you build it yourself from source** (the repo's `.dockerignore` excludes the bundled data, so the build stays small and fast). Recommended path: keep your working `docker-compose.yml`, volumes and DB exactly as they are, and **swap only the image**.
 
 ```bash
 # 1. Stop your current stack.
@@ -120,11 +120,12 @@ cd -
 #    to:
 #       image: freqtrade-ultimate:latest
 
-# 4. Bring the bot back up — same mounted user_data, same DB, same trades.
+# 4. Bring the bot back up: same mounted user_data, same DB, same trades.
 docker compose up -d
 ```
 
-> Your `user_data/` volume and database are never rewritten by this — only the code inside the container changes. **Rollback:** set the image line back to `freqtradeorg/freqtrade:stable` and `docker compose up -d`.
+> Your `user_data/` volume and database are never rewritten by this: only the code inside the container changes. **Rollback:** set the image line back to `freqtradeorg/freqtrade:stable` and `docker compose up -d`.
+>
 > **Update the fork later:** `git pull` in the clone → `docker build -t freqtrade-ultimate:latest .` → `docker compose up -d`.
 
 <details>
@@ -141,13 +142,13 @@ This fork keeps the official project as its `upstream` remote and merges upstrea
 
 </details>
 
-## 🌱 New to freqtrade? Start here
+## Start fresh
 
-You don't need to install upstream freqtrade first — Freqtrade Ultimate is a complete, ready-to-run installation on its own.
+**New to freqtrade? Start here.** You don't need to install upstream freqtrade first: Freqtrade Ultimate is a complete, ready-to-run installation on its own.
 
-> 🇫🇷 **Francophone ?** La communauté **Freqtrade France** propose un guide écrit pas-à-pas (installation, configuration, premier bot) : **[Freqtrade — le guide complet du bot de trading open source](https://buymeacoffee.com/freqtrade_france/freqtrade-le-guide-complet-du-bot-de-trading-open-source-installation-et-config)**. *(French only / en français uniquement.)*
+> **Francophone ?** La communauté **Freqtrade France** propose un guide écrit pas-à-pas (installation, configuration, premier bot) : **[Freqtrade, le guide complet du bot de trading open source](https://buymeacoffee.com/freqtrade_france/freqtrade-le-guide-complet-du-bot-de-trading-open-source-installation-et-config)**. *(French only / en français uniquement.)*
 
-### 🖥️ Native install (source / venv)
+### Native install (source / venv)
 
 ```bash
 git clone --filter=blob:none https://github.com/titouannwtt/freqtrade-ultimate.git
@@ -162,7 +163,7 @@ freqtrade create-userdir --userdir user_data
 freqtrade new-config --config user_data/config.json
 ```
 
-### 🐳 Docker
+### Docker
 
 The bundled `docker-compose.yml` builds the Ultimate image for you (tagged `freqtrade-ultimate:latest`):
 
@@ -184,74 +185,74 @@ docker compose run --rm freqtrade new-config --config user_data/config.json
 docker compose up -d
 ```
 
-**Next steps:** edit `user_data/config.json` (exchange, stake, pairs), drop a strategy into `user_data/strategies/`, then launch with `freqtrade trade` (native) or `docker compose up -d`. The full [Freqtrade documentation](https://www.freqtrade.io/) applies unchanged; see the [Learn](#-learn-algorithmic-trading) section below and [docs/FEATURES.md](docs/FEATURES.md) for what this fork adds.
+**Next steps:** edit `user_data/config.json` (exchange, stake, pairs), drop a strategy into `user_data/strategies/`, then launch with `freqtrade trade` (native) or `docker compose up -d`. The full [Freqtrade documentation](https://www.freqtrade.io/) applies unchanged; see the [Learn](#learn-algorithmic-trading) section below and [docs/FEATURES.md](docs/FEATURES.md) for what this fork adds.
 
-## 🎯 What is Freqtrade Ultimate?
+## Why this fork exists
 
-A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream.
+<p align="center"><img src=".readme_illustrations/fleet.svg" alt="Hyperliquid feeds two shared daemons, ftcache (75 % fewer API calls, measured in production with four bots) and ftpairlists (pairlist refresh from 15 min to 3 min). Four bots share one wallet under Position Guard and Leverage Sync and report to FreqUI Ultimate." width="100%"></p>
 
-**Why this fork exists.** Running multiple Freqtrade bots in production on Hyperliquid surfaces real-world problems upstream wasn't designed for — rate-limit cascades when four bots refresh OHLCV simultaneously, ADL and liquidation handling on a DEX without traditional liquidation events, multi-bot pairlist deduplication, and statistically valid hyperopt without curve-fitting. This fork solves those.
+Running multiple Freqtrade bots in production on Hyperliquid surfaces real-world problems upstream wasn't designed for: rate-limit cascades when four bots refresh OHLCV simultaneously, ADL and liquidation handling on a DEX without traditional liquidation events, multi-bot pairlist deduplication, and statistically valid hyperopt without curve-fitting. This fork solves those.
 
-**Architecture at a glance.** [`docs/diagrams/`](docs/diagrams/README.md) has three
-interactive diagrams (system architecture, the `ftcache` fetch sequence, and the bot loop with
-its Hyperliquid safety branches) — download any `.html` file and open it in a browser.
+**Architecture at a glance.** [`docs/diagrams/`](docs/diagrams/README.md) has three interactive diagrams (system architecture, the `ftcache` fetch sequence, and the bot loop with its Hyperliquid safety branches): download any `.html` file and open it in a browser.
 
-**Editorial principle: no curve-fitted strategies.** Every showcase strategy in this repo ships with its walk-forward analysis and real drawdowns. We do not promote backtest-pretty strategies that fail live — many popular Freqtrade strategies embed subtle lookahead biases that make backtests look magical and live results disappointing. We document why, and we publish the methodology that avoids it.
+**Editorial principle: no curve-fitted strategies.** Every showcase strategy in this repo ships with its walk-forward analysis and real drawdowns. We do not promote backtest-pretty strategies that fail live: many popular Freqtrade strategies embed subtle lookahead biases that make backtests look magical and live results disappointing. We document why, and we publish the methodology that avoids it.
 
-## ⚡ Feature highlights
+## Feature highlights
+
+<p align="center"><img src=".readme_illustrations/features.svg" alt="Six feature families: multi-bot infrastructure, hyperopt and validation, Hyperliquid-specific handling, position integrity, dry-run replay and observability." width="100%"></p>
 
 A quick tour. Full inventory with implementation details lives in [**docs/FEATURES.md**](docs/FEATURES.md).
 
 ### Multi-bot infrastructure
-- **OHLCV Cache Daemon (`ftcache`)** — Shared candle cache across N bots, **75 % API call reduction** measured in production with four bots.
-- **Pairlist Cache Daemon (`ftpairlists`)** — Deduplicates pairlist filter computation between bots (pairlist refresh: 15 min → 3 min).
-- **Position Guard + Leverage Sync** — Prevents conflicting entries and unintended hedges on shared wallets.
-- **Fleet State Notifications + Auto-Restart** — Thundering-herd prevention with startup jitter, `launch_bot.sh` auto-restart loop.
-- **Position reconciliation & safe retirement** *(optional)* — `reconcile_positions.py` detects orphan/phantom positions on a netted wallet; `retire_bot.py` cuts a bot without leaving an orphan (force-exit before stop). See [docs/fleet-reconciliation.md](docs/fleet-reconciliation.md). Everything works without them.
+- **OHLCV Cache Daemon (`ftcache`)**: shared candle cache across N bots, **75 % API call reduction** measured in production with four bots.
+- **Pairlist Cache Daemon (`ftpairlists`)**: deduplicates pairlist filter computation between bots (pairlist refresh: 15 min → 3 min).
+- **Position Guard + Leverage Sync**: prevents conflicting entries and unintended hedges on shared wallets.
+- **Fleet State Notifications + Auto-Restart**: thundering-herd prevention with startup jitter, `launch_bot.sh` auto-restart loop.
+- **Position reconciliation & safe retirement** *(optional)*: `reconcile_positions.py` detects orphan/phantom positions on a netted wallet; `retire_bot.py` cuts a bot without leaving an orphan (force-exit before stop). See [docs/fleet-reconciliation.md](docs/fleet-reconciliation.md). Everything works without them.
 
 ### Hyperopt & validation
-- **PlateauSampler** — Coordinate-wise Optuna sampler for robust hyperparameter optimization (four-phase: baseline → scan → assembly → refinement).
-- **`--sampler` CLI flag** — Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing your strategy code.
-- **Walk-Forward Analysis** (`freqtrade walk-forward`) — Rolling, anchored, and **CPCV (Combinatorial Purged Cross-Validation)** modes, plus Monte Carlo drawdown simulation, **PBO (Probability of Backtest Overfitting)** score, verdict A–F, and an interactive HTML report.
-- **Custom hyperopt losses** — `MoutonMeanRevHyperOptLoss` (mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (trend / momentum), `WalkForwardLoss` (multi-window robustness — rejects single-regime overfits), `MyProfitDrawDownHyperOptLoss` (simple baseline).
+- **PlateauSampler**: coordinate-wise Optuna sampler for robust hyperparameter optimization (four-phase: baseline → scan → assembly → refinement).
+- **`--sampler` CLI flag**: switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing your strategy code.
+- **Walk-Forward Analysis** (`freqtrade walk-forward`): rolling, anchored, and **CPCV (Combinatorial Purged Cross-Validation)** modes, plus Monte Carlo drawdown simulation, **PBO (Probability of Backtest Overfitting)** score, verdict A–F, and an interactive HTML report.
+- **Custom hyperopt losses**: `MoutonMeanRevHyperOptLoss` (mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (trend / momentum), `WalkForwardLoss` (multi-window robustness, rejects single-regime overfits), `MyProfitDrawDownHyperOptLoss` (simple baseline).
 
 ### Hyperliquid-specific
 - **Liquidation detection** via user-fills monitoring (`liquidationMarkPx`).
 - **External close detection** (ADL or manual UI close) with `exit_reason="external_close"`.
 - **Resilient leverage / margin error handling** in DCA continues operation instead of crashing.
-- **Local Hyperliquid historical data bundle** — 3 250+ Feather files (300+ pairs × 8 timeframes including crypto indices and TradFi perpetuals).
+- **Local Hyperliquid historical data bundle**: 3 250+ Feather files (300+ pairs × 8 timeframes including crypto indices and TradFi perpetuals).
 
 ### Position integrity (multi-bot / shared account)
-- **Provable order ownership** — every order carries a per-bot client order id, so a bot on a shared wallet can recover *its own* lost orders without ever claiming a sibling's.
-- **Guards around every order** — an external close requires a positions view newer than the trade's own fill; exits are capped at what the wallet holds; the position arithmetic is asserted after each fill.
-- **`freqtrade position-audit`** — dated attestation of exchange vs. every bot's book, with an append-only hash-chained ledger and a break register that ages each discrepancy until it is resolved. Read-only; exits non-zero on drift. See [docs/position-audit.md](docs/position-audit.md).
-- **Automatic bot logs** — a live/dry bot gets a rotating logfile without configuration.
-- **`user_data/bench_dashboard.py`** — measures what a dashboard page load costs the whole fleet (wall time, tail latency, payload per endpoint) and diffs two runs, so a performance claim can be checked rather than believed. See [docs/fleet-snapshot.md](docs/fleet-snapshot.md).
+- **Provable order ownership**: every order carries a per-bot client order id, so a bot on a shared wallet can recover *its own* lost orders without ever claiming a sibling's.
+- **Guards around every order**: an external close requires a positions view newer than the trade's own fill; exits are capped at what the wallet holds; the position arithmetic is asserted after each fill.
+- **`freqtrade position-audit`**: dated attestation of exchange vs. every bot's book, with an append-only hash-chained ledger and a break register that ages each discrepancy until it is resolved. Read-only; exits non-zero on drift. See [docs/position-audit.md](docs/position-audit.md).
+- **Automatic bot logs**: a live/dry bot gets a rotating logfile without configuration.
+- **`user_data/bench_dashboard.py`**: measures what a dashboard page load costs the whole fleet (wall time, tail latency, payload per endpoint) and diffs two runs, so a performance claim can be checked rather than believed. See [docs/fleet-snapshot.md](docs/fleet-snapshot.md).
 
 ### Pairlists & risk
-- **`TrendRegularityFilter`** — Excludes pairs with a regular linear uptrend (essential for short strategies).
-- **`backtest_lock_wallet`** — Disables compounding in backtests for honest equity curves.
-- **Capital withdrawal accounting** — Tracks net profit after capital removal in REST API, Telegram and `/profit`.
+- **`TrendRegularityFilter`**: excludes pairs with a regular linear uptrend (essential for short strategies).
+- **`backtest_lock_wallet`**: disables compounding in backtests for honest equity curves.
+- **Capital withdrawal accounting**: tracks net profit after capital removal in REST API, Telegram and `/profit`.
 
 ### Observability
-- **`ExchangeMetrics`** — Ring-buffered API-call metrics, 429 tracking, live token-bucket state.
-- **REST API enriched** — `/cache_status`, `/rate_metrics`, `/fleet/status`, `/fleet/events`, `/volume_history`, `/signal_summary`, `/stratdev/*` (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
-- **Enhanced Telegram** — `LIQUIDATION` and `external_close` exit reasons; withdrawal-aware `/profit`.
+- **`ExchangeMetrics`**: ring-buffered API-call metrics, 429 tracking, live token-bucket state.
+- **REST API enriched**: `/cache_status`, `/rate_metrics`, `/fleet/status`, `/fleet/events`, `/volume_history`, `/signal_summary`, `/stratdev/*` (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
+- **Enhanced Telegram**: `LIQUIDATION` and `external_close` exit reasons; withdrawal-aware `/profit`.
 
 ### Dry-run replay
-- **Replay engine** — Drives `FreqtradeBot.process()` (the real live code path) candle-by-candle over historical data via a virtual clock and fake exchange overlay. **Validate a strategy in hours instead of months.**
-- **1-minute resolution, real funding** — Stoploss/ROI/signals checked every virtual minute; funding computed from local Feather files. Equivalent to permanent `--timeframe-detail 1m` on the real engine.
-- **Config auto-launch** — Add a `dry_run_replay` block to your bot config and the bot auto-seeds a 5-month replay on first start, then transitions to normal dry-run. Zero manual action.
-- **Coordinator daemon** — Caps concurrent replays to `nproc - 2 - hyperopt_cores` with SIGSTOP/SIGCONT priority queue. Auto-spawned.
+- **Replay engine**: drives `FreqtradeBot.process()` (the real live code path) candle-by-candle over historical data via a virtual clock and fake exchange overlay. **Validate a strategy in hours instead of months.**
+- **1-minute resolution, real funding**: stoploss/ROI/signals checked every virtual minute; funding computed from local Feather files. Equivalent to permanent `--timeframe-detail 1m` on the real engine.
+- **Config auto-launch**: add a `dry_run_replay` block to your bot config and the bot auto-seeds a 5-month replay on first start, then transitions to normal dry-run. Zero manual action.
+- **Coordinator daemon**: caps concurrent replays to `nproc - 2 - hyperopt_cores` with SIGSTOP/SIGCONT priority queue. Auto-spawned.
 
 ### Developer experience
-- **Strategy Dev Backend** — Reader, jobs runner, strategy editor APIs (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
-- **AI Copilot** — Repository ships with [`CLAUDE.md`](CLAUDE.md) plus 14 tip files containing 199 trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
-- **Enhanced CLI help** — Practical guidance, recommendations, and tradeoffs documented in every option.
+- **Strategy Dev Backend**: reader, jobs runner, strategy editor APIs (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
+- **AI Copilot**: repository ships with [`CLAUDE.md`](CLAUDE.md) plus 14 tip files containing 199 trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
+- **Enhanced CLI help**: practical guidance, recommendations, and tradeoffs documented in every option.
 
-➡️ **Full feature list with deep technical details:** [docs/FEATURES.md](docs/FEATURES.md)
+**Full feature list with deep technical details:** [docs/FEATURES.md](docs/FEATURES.md)
 
-## 📊 Showcase strategies
+## Showcase strategies
 
 This repository ships with public showcase strategies directly inside [`user_data/strategies/`](user_data/strategies/). Each strategy follows a strict naming convention:
 
@@ -264,54 +265,51 @@ This repository ships with public showcase strategies directly inside [`user_dat
 
 These strategies are intentionally simple and **honest about their limits**. They demonstrate the methodology (anti-overfitting, walk-forward, real drawdowns), not maximum profitability. **More advanced and live-tested strategies are reserved for [Freqtrade France](https://buymeacoffee.com/freqtrade_france) members** along with full live PnL screenshots and reproducible parameters.
 
-## 🎛️ The dashboard: FreqUI Ultimate
+## The dashboard: FreqUI Ultimate
 
 Freqtrade Ultimate pairs with **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a ground-up redesign of the Freqtrade dashboard built for **monitoring a fleet of bots at once**. Where stock FreqUI shows one bot on a plain table, FreqUI Ultimate gives you a glassmorphism multi-bot command center: side-by-side bot comparison, live equity vs BTC benchmark, market regime context, portfolio-wide risk, and 13 cross-bot alert types.
 
-> 🔗 **Why it belongs here:** FreqUI Ultimate's advanced widgets (Risk Overview, Market Pulse, fleet comparison, volume/signal context, the in-browser strategy editor) are driven by **REST endpoints that only exist in Freqtrade Ultimate** — `/fleet/status`, `/fleet/events`, `/rate_metrics`, `/cache_status`, `/volume_history`, `/signal_summary`, `/stratdev/*`. Point the same UI at a stock freqtrade bot and those panels stay empty. **The full experience requires this fork as the backend.**
+> **Why it belongs here:** FreqUI Ultimate's advanced widgets (Risk Overview, Market Pulse, fleet comparison, volume/signal context, the in-browser strategy editor) are driven by **REST endpoints that only exist in Freqtrade Ultimate**: `/fleet/status`, `/fleet/events`, `/rate_metrics`, `/cache_status`, `/volume_history`, `/signal_summary`, `/stratdev/*`. Point the same UI at a stock freqtrade bot and those panels stay empty. **The full experience requires this fork as the backend.**
 
 ### The multi-bot dashboard
 
 A single screen for your whole fleet: live log console, cumulative profit vs BTC benchmark, per-bot comparison table (open/closed P&L, win/loss, monthly profit, DCA escalations), and every open position with duration-health bars.
 
-<img width="2544" height="1320" alt="image" src="https://github.com/user-attachments/assets/e2a2e95f-415e-49cb-9f2d-1aec80b5a9e0" />
-
+<img width="2544" height="1320" alt="FreqUI Ultimate multi-bot dashboard" src="https://github.com/user-attachments/assets/e2a2e95f-415e-49cb-9f2d-1aec80b5a9e0" />
 
 ### Fleet comparison & alerts
 
-Compare every bot head-to-head — custom columns, tags, filters, groups, drag-drop ordering, CSV export, and **13 cross-bot alert types** that flag anomalies across the whole fleet at a glance.
+Compare every bot head-to-head (custom columns, tags, filters, groups, drag-drop ordering, CSV export) with **13 cross-bot alert types** that flag anomalies across the whole fleet at a glance.
 
-<img width="2538" height="720" alt="image" src="https://github.com/user-attachments/assets/5a32c3d8-1501-4ba0-81a1-c3a3d22d0262" />
-
+<img width="2538" height="720" alt="FreqUI Ultimate fleet comparison and alerts" src="https://github.com/user-attachments/assets/5a32c3d8-1501-4ba0-81a1-c3a3d22d0262" />
 
 ### Market Pulse & portfolio Risk Overview
 
-Context stock FreqUI never surfaces: BTC dominance, Fear & Greed, your fleet's performance vs BTC/ETH on the left — and on the right, portfolio-wide exposure, net/gross/long-short split, average leverage, largest position, worst drawdown, and correlation warnings.
+Context stock FreqUI never surfaces: BTC dominance, Fear & Greed, your fleet's performance vs BTC/ETH on the left; on the right, portfolio-wide exposure, net/gross/long-short split, average leverage, largest position, worst drawdown, and correlation warnings.
 
-<img width="848" height="392" alt="image" src="https://github.com/user-attachments/assets/deef75ef-80da-4c28-a046-0c802604ce3c" />
-
+<img width="848" height="392" alt="FreqUI Ultimate Market Pulse and Risk Overview" src="https://github.com/user-attachments/assets/deef75ef-80da-4c28-a046-0c802604ce3c" />
 
 ### Analytics widgets
 
-Per-bot profit benchmarks, performance heatmap, activity timeline, and a Monte-Carlo stress test — the analytical depth a serious multi-bot operator needs.
-<img width="848" height="442" alt="image" src="https://github.com/user-attachments/assets/a4c6e52c-c99b-4279-a51f-c52dcb7c5285" />
+Per-bot profit benchmarks, performance heatmap, activity timeline, and a Monte-Carlo stress test: the analytical depth a serious multi-bot operator needs.
 
-<img width="848" height="596" alt="image" src="https://github.com/user-attachments/assets/96a9637c-20a8-4f3e-8a71-06931e37bd84" />
+<img width="848" height="442" alt="FreqUI Ultimate profit benchmarks and performance heatmap" src="https://github.com/user-attachments/assets/a4c6e52c-c99b-4279-a51f-c52dcb7c5285" />
+
+<img width="848" height="596" alt="FreqUI Ultimate activity timeline and stress test" src="https://github.com/user-attachments/assets/96a9637c-20a8-4f3e-8a71-06931e37bd84" />
 
 ### Rich context popovers
 
-Hover any metric for a glassmorphism context card — open positions, DCA escalations, exit reasons, price levels, and more.
+Hover any metric for a glassmorphism context card: open positions, DCA escalations, exit reasons, price levels, and more.
 
-<img width="1698" height="615" alt="image" src="https://github.com/user-attachments/assets/44d85ad0-65a5-49db-9659-cc44f1dd4e89" />
-<img width="417" height="527" alt="image" src="https://github.com/user-attachments/assets/8f75fd3b-0c87-4b7a-92eb-7d266de28d0a" />
-<img width="577" height="664" alt="image" src="https://github.com/user-attachments/assets/58ad99bc-b964-4c0c-a84d-5991bd698474" />
-
+<img width="1698" height="615" alt="FreqUI Ultimate context popovers" src="https://github.com/user-attachments/assets/44d85ad0-65a5-49db-9659-cc44f1dd4e89" />
+<img width="417" height="527" alt="FreqUI Ultimate open positions popover" src="https://github.com/user-attachments/assets/8f75fd3b-0c87-4b7a-92eb-7d266de28d0a" />
+<img width="577" height="664" alt="FreqUI Ultimate DCA escalations popover" src="https://github.com/user-attachments/assets/58ad99bc-b964-4c0c-a84d-5991bd698474" />
 
 More widgets, popovers, and the embedded strategy editor are shown in the [FreqUI Ultimate repo](https://github.com/titouannwtt/frequi-ultimate).
 
 ### Install it
 
-Installation of the fork itself is covered above — [migrate from upstream](#-already-running-freqtrade-switch-to-ultimate-without-losing-anything) or [start fresh](#-new-to-freqtrade-start-here). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
+Installation of the fork itself is covered above: [migrate from upstream](#migrate-from-upstream-freqtrade) or [start fresh](#start-fresh). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
 
 Then install the matching dashboard (50+ enhanced components, fleet comparison, market context):
 
@@ -321,29 +319,29 @@ freqtrade install-ui
 
 Or visit [titouannwtt/frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate).
 
-## 🎓 Learn algorithmic trading
+## Learn algorithmic trading
 
 **[Freqtrade France](https://buymeacoffee.com/freqtrade_france)** is the French-speaking community where Mouton (this fork's maintainer) publishes:
 
 - **Free tutorials**: Freqtrade basics, Hyperliquid setup, hyperopt, backtesting, and walk-forward analysis.
 - **Member tutorials**: reproducible strategy studies, complete examples, and explanations of testing methods and their limitations. See [Freqtrade France](https://buymeacoffee.com/freqtrade_france) for the current membership offer and pricing. The public forks remain free to use.
 - **Strategy walkthroughs for members**: code and configuration, with the testing context and limitations described in each article.
-- 🎥 **Long-form YouTube** — [@freqtrade_france](https://www.youtube.com/@freqtrade_france).
-- 🐦 **Twitter** — [@MoutonCrypto](https://x.com/MoutonCrypto).
+- **Long-form YouTube**: [@freqtrade_france](https://www.youtube.com/@freqtrade_france).
+- **Twitter**: [@MoutonCrypto](https://x.com/MoutonCrypto).
 
 If you don't want to subscribe but want to support the fork, the simplest free way is to use the [Hyperliquid referral link](https://app.hyperliquid.xyz/join/MOUTON) when creating your account.
 
-## 🤝 Contributing
+## Contributing
 
 PRs are welcome on infrastructure features (caching, hyperopt samplers, walk-forward, observability). See [CONTRIBUTING.md](CONTRIBUTING.md). Strategy-specific contributions and discussions happen in the [Freqtrade France](https://buymeacoffee.com/freqtrade_france) community.
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This is **educational software**. Past performance does not guarantee future results. You are responsible for your own trading and any losses incurred. This project does not provide investment advice. Trading crypto futures is high risk and can lead to total loss of capital.
 
-## 📄 License
+## License
 
-GPL-3.0 — same as upstream Freqtrade.
+GPL-3.0, same as upstream [Freqtrade](https://github.com/freqtrade/freqtrade).
 
 ---
 

@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
+  <title id="t">Freqtrade Ultimate</title>
+  <desc id="d">Banner: the orange Freqtrade Ultimate robot mascot in front of a candlestick chart, wired to four smaller bots labelled trend, mean-rev, DCA and short. Tagline: the production-grade Freqtrade fork for algorithmic trading on Hyperliquid.</desc>
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;Liberation Mono&quot;, monospace; }
+      .eye { animation: blink 5.5s infinite; transform-box: fill-box; transform-origin: center; }
+      .ping { animation: ping 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+      .flow { stroke-dasharray: 2 10; stroke-linecap: round; animation: dash 1.4s linear infinite; }
+      .float1 { animation: float 4s ease-in-out infinite; }
+      .float2 { animation: float 4.6s ease-in-out infinite -1.2s; }
+      .float3 { animation: float 5.2s ease-in-out infinite -2.4s; }
+      .float4 { animation: float 4.3s ease-in-out infinite -3.1s; }
+      @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.12); } }
+      @keyframes ping { 0% { transform: scale(1); opacity: 0.55; } 80%, 100% { transform: scale(2.3); opacity: 0; } }
+      @keyframes dash { to { stroke-dashoffset: -24; } }
+      @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+
+      .live { animation: live 2.2s ease-in-out infinite; transform-box: fill-box; transform-origin: center bottom; }
+      .draw { stroke-dasharray: 1600; stroke-dashoffset: 1600; animation: draw 7s ease-out infinite; }
+      .spin { animation: spin 60s linear infinite; transform-box: fill-box; transform-origin: center; }
+      @keyframes live { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.35); } }
+      @keyframes draw { 0% { stroke-dashoffset: 1600; } 60%, 100% { stroke-dashoffset: 0; } }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .draw { stroke-dashoffset: 0; } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B2545"/>
+      <stop offset="1" stop-color="#071A30"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#FFF8E7" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <g id="bot" stroke="#0B2545" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+      <line x1="200" y1="70" x2="200" y2="104" fill="none"/>
+      <circle class="ping" cx="200" cy="49" r="23" fill="#F7901E" stroke="none"/>
+      <circle cx="200" cy="49" r="23" fill="#F7901E"/>
+      <path d="M57 406 L62 336 C65 301 86 282 120 278 L280 278 C314 282 335 301 338 336 L343 406 Z" fill="#F7901E"/>
+      <path d="M117 281 C109 320 105 362 103 406" fill="none"/>
+      <path d="M283 281 C291 320 295 362 297 406" fill="none"/>
+      <path d="M63 328 C78 333 92 337 106 339" fill="none"/>
+      <path d="M294 339 C308 337 322 333 337 328" fill="none"/>
+      <ellipse cx="84" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <ellipse cx="316" cy="198" rx="28" ry="36" fill="#F7901E"/>
+      <path d="M200 100 C285 100 318 140 318 190 C318 249 281 286 200 286 C119 286 82 249 82 190 C82 140 115 100 200 100 Z" fill="#F7901E"/>
+      <rect x="110" y="142" width="180" height="105" rx="52" fill="#0B2545" stroke="none"/>
+      <ellipse class="eye" cx="158" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+      <ellipse class="eye" cx="242" cy="196" rx="11" ry="19" fill="#FFF8E7" stroke="none"/>
+    </g>
+    <clipPath id="disc"><circle cx="200" cy="200" r="197"/></clipPath>
+    <g id="avatar">
+      <circle cx="200" cy="200" r="200" fill="#5BC0CB"/>
+      <g clip-path="url(#disc)"><use href="#bot"/></g>
+      <circle cx="200" cy="200" r="197" fill="none" stroke="#0B2545" stroke-width="10"/>
+    </g>
+
+    <radialGradient id="glow" cx="0.76" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#5BC0CB" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5BC0CB" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#071A30" stop-opacity="0.85"/>
+      <stop offset="0.55" stop-color="#071A30" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#071A30" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#grid)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#glow)"/>
+<g opacity="0.3">
+<g><line x1="37.0" y1="588.7" x2="37.0" y2="594.2" stroke="#3DDC97" stroke-width="2"/><rect x="29.2" y="592.3" width="15.6" height="2.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="63.0" y1="585.8" x2="63.0" y2="594.3" stroke="#F2635F" stroke-width="2"/><rect x="55.2" y="592.3" width="15.6" height="2.0" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="89.0" y1="570.4" x2="89.0" y2="600.0" stroke="#3DDC97" stroke-width="2"/><rect x="81.2" y="573.4" width="15.6" height="19.4" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="115.0" y1="563.2" x2="115.0" y2="574.7" stroke="#3DDC97" stroke-width="2"/><rect x="107.2" y="566.0" width="15.6" height="7.4" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="141.0" y1="560.0" x2="141.0" y2="588.8" stroke="#F2635F" stroke-width="2"/><rect x="133.2" y="566.0" width="15.6" height="19.3" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="167.0" y1="562.7" x2="167.0" y2="597.5" stroke="#3DDC97" stroke-width="2"/><rect x="159.2" y="574.5" width="15.6" height="10.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="193.0" y1="571.2" x2="193.0" y2="585.1" stroke="#F2635F" stroke-width="2"/><rect x="185.2" y="574.5" width="15.6" height="8.5" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="219.0" y1="576.1" x2="219.0" y2="587.4" stroke="#3DDC97" stroke-width="2"/><rect x="211.2" y="579.7" width="15.6" height="3.3" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="245.0" y1="568.7" x2="245.0" y2="584.3" stroke="#3DDC97" stroke-width="2"/><rect x="237.2" y="571.5" width="15.6" height="8.2" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="271.0" y1="539.7" x2="271.0" y2="579.8" stroke="#3DDC97" stroke-width="2"/><rect x="263.2" y="543.6" width="15.6" height="27.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="297.0" y1="538.5" x2="297.0" y2="550.8" stroke="#F2635F" stroke-width="2"/><rect x="289.2" y="543.6" width="15.6" height="4.7" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="323.0" y1="541.5" x2="323.0" y2="550.1" stroke="#3DDC97" stroke-width="2"/><rect x="315.2" y="546.0" width="15.6" height="2.4" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="349.0" y1="539.3" x2="349.0" y2="551.9" stroke="#F2635F" stroke-width="2"/><rect x="341.2" y="546.0" width="15.6" height="2.3" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="375.0" y1="521.7" x2="375.0" y2="550.0" stroke="#3DDC97" stroke-width="2"/><rect x="367.2" y="527.4" width="15.6" height="20.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="401.0" y1="507.1" x2="401.0" y2="527.7" stroke="#3DDC97" stroke-width="2"/><rect x="393.2" y="517.5" width="15.6" height="9.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="427.0" y1="481.3" x2="427.0" y2="519.7" stroke="#3DDC97" stroke-width="2"/><rect x="419.2" y="495.4" width="15.6" height="22.1" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="453.0" y1="487.3" x2="453.0" y2="498.8" stroke="#3DDC97" stroke-width="2"/><rect x="445.2" y="493.0" width="15.6" height="2.4" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="479.0" y1="479.7" x2="479.0" y2="498.7" stroke="#3DDC97" stroke-width="2"/><rect x="471.2" y="489.9" width="15.6" height="3.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="505.0" y1="470.1" x2="505.0" y2="500.0" stroke="#3DDC97" stroke-width="2"/><rect x="497.2" y="476.7" width="15.6" height="13.2" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="531.0" y1="466.9" x2="531.0" y2="485.7" stroke="#3DDC97" stroke-width="2"/><rect x="523.2" y="467.7" width="15.6" height="9.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="557.0" y1="451.0" x2="557.0" y2="470.9" stroke="#3DDC97" stroke-width="2"/><rect x="549.2" y="455.2" width="15.6" height="12.5" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="583.0" y1="448.5" x2="583.0" y2="472.7" stroke="#F2635F" stroke-width="2"/><rect x="575.2" y="455.2" width="15.6" height="13.7" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="609.0" y1="432.9" x2="609.0" y2="479.1" stroke="#3DDC97" stroke-width="2"/><rect x="601.2" y="447.1" width="15.6" height="21.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="635.0" y1="429.8" x2="635.0" y2="451.1" stroke="#3DDC97" stroke-width="2"/><rect x="627.2" y="439.9" width="15.6" height="7.2" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="661.0" y1="422.3" x2="661.0" y2="464.9" stroke="#F2635F" stroke-width="2"/><rect x="653.2" y="439.9" width="15.6" height="22.6" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="687.0" y1="454.6" x2="687.0" y2="475.6" stroke="#F2635F" stroke-width="2"/><rect x="679.2" y="462.4" width="15.6" height="6.4" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="713.0" y1="448.4" x2="713.0" y2="470.5" stroke="#3DDC97" stroke-width="2"/><rect x="705.2" y="449.5" width="15.6" height="19.3" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="739.0" y1="428.5" x2="739.0" y2="453.9" stroke="#3DDC97" stroke-width="2"/><rect x="731.2" y="439.6" width="15.6" height="10.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="765.0" y1="424.6" x2="765.0" y2="450.5" stroke="#3DDC97" stroke-width="2"/><rect x="757.2" y="428.4" width="15.6" height="11.1" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="791.0" y1="400.0" x2="791.0" y2="432.1" stroke="#3DDC97" stroke-width="2"/><rect x="783.2" y="406.7" width="15.6" height="21.8" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="817.0" y1="402.2" x2="817.0" y2="436.2" stroke="#F2635F" stroke-width="2"/><rect x="809.2" y="406.7" width="15.6" height="23.6" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="843.0" y1="429.0" x2="843.0" y2="458.7" stroke="#F2635F" stroke-width="2"/><rect x="835.2" y="430.3" width="15.6" height="21.4" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="869.0" y1="440.4" x2="869.0" y2="469.9" stroke="#F2635F" stroke-width="2"/><rect x="861.2" y="451.6" width="15.6" height="14.4" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="895.0" y1="461.9" x2="895.0" y2="470.5" stroke="#3DDC97" stroke-width="2"/><rect x="887.2" y="464.2" width="15.6" height="2.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="921.0" y1="450.6" x2="921.0" y2="468.8" stroke="#3DDC97" stroke-width="2"/><rect x="913.2" y="458.6" width="15.6" height="5.6" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="947.0" y1="451.4" x2="947.0" y2="460.7" stroke="#F2635F" stroke-width="2"/><rect x="939.2" y="458.6" width="15.6" height="2.0" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="973.0" y1="453.9" x2="973.0" y2="479.1" stroke="#F2635F" stroke-width="2"/><rect x="965.2" y="460.5" width="15.6" height="8.4" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="999.0" y1="459.2" x2="999.0" y2="472.1" stroke="#F2635F" stroke-width="2"/><rect x="991.2" y="468.9" width="15.6" height="2.3" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="1025.0" y1="467.3" x2="1025.0" y2="481.0" stroke="#3DDC97" stroke-width="2"/><rect x="1017.2" y="469.3" width="15.6" height="2.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="1051.0" y1="460.6" x2="1051.0" y2="488.6" stroke="#F2635F" stroke-width="2"/><rect x="1043.2" y="469.3" width="15.6" height="10.4" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="1077.0" y1="475.4" x2="1077.0" y2="494.7" stroke="#F2635F" stroke-width="2"/><rect x="1069.2" y="479.8" width="15.6" height="7.1" rx="1.5" fill="#F2635F"/></g>
+<g><line x1="1103.0" y1="468.5" x2="1103.0" y2="487.8" stroke="#3DDC97" stroke-width="2"/><rect x="1095.2" y="470.9" width="15.6" height="15.9" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="1129.0" y1="460.9" x2="1129.0" y2="472.2" stroke="#3DDC97" stroke-width="2"/><rect x="1121.2" y="464.9" width="15.6" height="6.0" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="1155.0" y1="453.1" x2="1155.0" y2="464.9" stroke="#3DDC97" stroke-width="2"/><rect x="1147.2" y="457.1" width="15.6" height="7.8" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="1181.0" y1="438.6" x2="1181.0" y2="471.2" stroke="#3DDC97" stroke-width="2"/><rect x="1173.2" y="442.6" width="15.6" height="14.6" rx="1.5" fill="#3DDC97"/></g>
+<g><line x1="1207.0" y1="431.2" x2="1207.0" y2="445.2" stroke="#3DDC97" stroke-width="2"/><rect x="1199.2" y="434.1" width="15.6" height="8.4" rx="1.5" fill="#3DDC97"/></g>
+<g class="live"><line x1="1233.0" y1="424.0" x2="1233.0" y2="436.5" stroke="#3DDC97" stroke-width="2"/><rect x="1225.2" y="430.4" width="15.6" height="3.7" rx="1.5" fill="#3DDC97"/></g>
+</g>
+<path class="draw" d="M37.0 566.4 L63.0 566.5 L89.0 557.1 L115.0 543.7 L141.0 549.6 L167.0 553.9 L193.0 552.7 L219.0 555.3 L245.0 549.6 L271.0 531.6 L297.0 520.0 L323.0 521.2 L349.0 521.1 L375.0 511.8 L401.0 496.4 L427.0 480.4 L453.0 468.2 L479.0 465.4 L505.0 457.3 L531.0 446.2 L557.0 435.5 L583.0 436.1 L609.0 432.0 L635.0 417.5 L661.0 425.1 L687.0 439.6 L713.0 433.2 L739.0 418.6 L765.0 408.0 L791.0 391.5 L817.0 392.5 L843.0 415.0 L869.0 432.8 L895.0 439.1 L921.0 435.4 L947.0 433.6 L973.0 438.7 L999.0 444.0 L1025.0 444.3 L1051.0 448.6 L1077.0 457.3 L1103.0 452.9 L1129.0 441.9 L1155.0 435.0 L1181.0 423.9 L1207.0 412.4 L1233.0 406.3" fill="none" stroke="#5BC0CB" stroke-width="2.5" stroke-opacity="0.55" stroke-linejoin="round"/>
+  <rect width="760" height="640" rx="28" fill="url(#fade)"/>
+<text x="80" y="150" class="mono" font-size="18" fill="#5BC0CB" letter-spacing="3">FREQTRADE FORK  ·  HYPERLIQUID PERPS</text>
+<text x="74" y="246" class="sans" font-size="92" fill="#FFF8E7" font-weight="800" letter-spacing="-2">Freqtrade</text>
+<text x="74" y="338" class="sans" font-size="92" fill="#F7901E" font-weight="800" letter-spacing="-2">Ultimate</text>
+<text x="80" y="398" class="sans" font-size="28" fill="#FFF8E7" font-weight="500">The production-grade Freqtrade fork</text>
+<text x="80" y="436" class="sans" font-size="28" fill="#FFF8E7" font-weight="500">for algorithmic trading on Hyperliquid.</text>
+<rect x="80" y="474" width="167.4" height="36" rx="18.0" fill="#0E2C4E" stroke="#F7901E" stroke-width="1.5"/><text x="96.0" y="497.2" class="mono" font-size="15" fill="#FFF8E7">multi-bot fleet</text>
+<rect x="259.45" y="474" width="230.7" height="36" rx="18.0" fill="#0E2C4E" stroke="#5BC0CB" stroke-width="1.5"/><text x="275.4" y="497.2" class="mono" font-size="15" fill="#FFF8E7">walk-forward validated</text>
+<rect x="502.11" y="474" width="212.6" height="36" rx="18.0" fill="#0E2C4E" stroke="#3DDC97" stroke-width="1.5"/><text x="518.1" y="497.2" class="mono" font-size="15" fill="#FFF8E7">drop-in for upstream</text>
+<text x="80" y="580" class="mono" font-size="15" fill="#8FA6C4">GPLv3  ·  built on freqtrade/freqtrade  ·  by Freqtrade France</text>
+<path class="flow" d="M760 132 L968 300" stroke="#F7901E" stroke-width="3" fill="none" opacity="0.7"/>
+<path class="flow" d="M1188 128 L968 300" stroke="#F7901E" stroke-width="3" fill="none" opacity="0.7"/>
+<path class="flow" d="M770 486 L968 300" stroke="#F7901E" stroke-width="3" fill="none" opacity="0.7"/>
+<path class="flow" d="M1176 482 L968 300" stroke="#F7901E" stroke-width="3" fill="none" opacity="0.7"/>
+<circle class="spin" cx="968" cy="300" r="216" fill="none" stroke="#5BC0CB" stroke-width="2" stroke-dasharray="4 14" stroke-opacity="0.7"/>
+<g><use href="#avatar" transform="translate(772.0 104.0) scale(0.9800)"/></g>
+<g class="float1"><g><use href="#avatar" transform="translate(714.0 86.0) scale(0.2300)"/></g><rect x="728.9" y="186" width="62.1" height="26" rx="13" fill="#071A30" stroke="#24507F" stroke-width="1.5"/><text x="760" y="204" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">trend</text></g>
+<g class="float2"><g><use href="#avatar" transform="translate(1142.0 82.0) scale(0.2300)"/></g><rect x="1144.3" y="182" width="87.4" height="26" rx="13" fill="#071A30" stroke="#24507F" stroke-width="1.5"/><text x="1188" y="200" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">mean-rev</text></g>
+<g class="float3"><g><use href="#avatar" transform="translate(724.0 440.0) scale(0.2300)"/></g><rect x="747.4" y="540" width="45.3" height="26" rx="13" fill="#071A30" stroke="#24507F" stroke-width="1.5"/><text x="770" y="558" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">DCA</text></g>
+<g class="float4"><g><use href="#avatar" transform="translate(1130.0 436.0) scale(0.2300)"/></g><rect x="1144.9" y="536" width="62.1" height="26" rx="13" fill="#071A30" stroke="#24507F" stroke-width="1.5"/><text x="1176" y="554" class="mono" font-size="14" fill="#C3D2E6" text-anchor="middle">short</text></g>
+</svg>
