@@ -1,0 +1,27 @@
+{
+  "counters": {
+    "pairs": {
+      "glob": "user_data/data/hyperliquid/futures/*-1d-futures.feather"
+    },
+    "data_files": {
+      "glob": "user_data/data/hyperliquid/**/*.feather"
+    },
+    "funding_series": {
+      "glob": "user_data/data/hyperliquid/futures/*-funding_rate.feather"
+    },
+    "tip_files": {
+      "glob": ".claude-tips/*.md",
+      "exclude": [
+        ".claude-tips/README.md"
+      ]
+    }
+  },
+  "files": [
+    "README.md"
+  ],
+  "format": {
+    "data_files": {
+      "sep": ","
+    }
+  }
+}
