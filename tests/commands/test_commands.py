@@ -864,6 +864,40 @@ def test_get_ui_download_url(mocker):
     assert x == "http://download.zip"
 
 
+def test_get_ui_download_url_picks_the_ui_archive(mocker):
+    # GitHub lists assets by name: binaries and source maps may come before the UI archive.
+    response = MagicMock()
+    response.json = MagicMock(
+        return_value=[
+            {
+                "assets_url": "http://whatever.json",
+                "name": "v2.0.0",
+                "created_at": "2026-10-16T21:40:00Z",
+                "assets": [
+                    {
+                        "name": "frequi-gateway-aarch64-unknown-linux-musl",
+                        "browser_download_url": "http://gw-arm",
+                    },
+                    {
+                        "name": "frequi-ultimate-sourcemaps-v2.0.0.zip",
+                        "browser_download_url": "http://maps.zip",
+                    },
+                    {
+                        "name": "frequi-ultimate-ui-v2.0.0.zip",
+                        "browser_download_url": "http://ui.zip",
+                    },
+                    {"name": "SHA256SUMS", "browser_download_url": "http://sums"},
+                ],
+            },
+        ]
+    )
+    get_mock = mocker.patch("freqtrade.commands.deploy_ui.requests.get", return_value=response)
+    x, last_version = get_ui_download_url("v2.0.0", False)
+    assert get_mock.call_count == 1
+    assert last_version == "v2.0.0"
+    assert x == "http://ui.zip"
+
+
 def test_get_ui_download_url_direct(mocker):
     response = MagicMock()
     response.json = MagicMock(

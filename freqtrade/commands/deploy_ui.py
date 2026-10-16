@@ -67,6 +67,27 @@ def download_and_install_ui(dest_folder: Path, dl_url: str, version: str):
         f.write(version)
 
 
+def _ui_asset(assets: list[dict]) -> dict:
+    """
+    The UI archive among the assets of a release. GitHub lists assets by name, not by upload
+    order, so a release that also carries gateway binaries or source maps may list one of those
+    first. Pick the archive by its name, else the first asset as before.
+    """
+
+    def name(a: dict) -> str:
+        return a.get("name", "").lower()
+
+    archives = [
+        a
+        for a in assets
+        if name(a).endswith((".zip", ".tar.gz", ".tgz")) and "sourcemap" not in name(a)
+    ]
+    for a in archives:
+        if name(a).startswith("frequi-ultimate-ui-"):
+            return a
+    return archives[0] if archives else assets[0]
+
+
 def get_ui_download_url(version: str | None, prerelease: bool) -> tuple[str, str]:
     base_url = "https://api.github.com/repos/titouannwtt/frequi-ultimate/"
     # Get base UI Repo path
@@ -91,7 +112,7 @@ def get_ui_download_url(version: str | None, prerelease: bool) -> tuple[str, str
 
     dl_url = ""
     if assets and len(assets) > 0:
-        dl_url = assets[0]["browser_download_url"]
+        dl_url = _ui_asset(assets)["browser_download_url"]
 
     # URL not found - try assets url
     if not dl_url:
