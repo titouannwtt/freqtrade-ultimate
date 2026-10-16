@@ -2065,6 +2065,12 @@ class Daemon:
         try:
             budget = self._get_budget(exchange)
             tickers_weight = self._get_weight(exchange, "tickers")
+            # A HARD backoff sheds HIGH. A bot holding positions then gives up on the shared
+            # tickers and fetches the whole set itself at CRITICAL once its copy is 45 s old:
+            # twenty bots, twenty identical fetches, which keeps the exchange throttling us.
+            # One coalesced CRITICAL fetch here serves all of them for the cache TTL instead.
+            if priority <= TokenBucket.HIGH and budget.backoff_active:
+                priority = TokenBucket.CRITICAL
             logger.debug(
                 "tickers fetch starting for %s (weight=%.0f, priority=%d)",
                 cache_key,

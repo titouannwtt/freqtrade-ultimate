@@ -2524,6 +2524,74 @@ class TestDaemonTickersPriorityForwarding:
         assert priority == TokenBucket.NORMAL
 
 
+class TestDaemonTickersDuringBackoff:
+    """A backoff must not turn the shared tickers fetch into one fetch per bot."""
+
+    @staticmethod
+    def _daemon(tmp_path, backoff: bool):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        budget = d._get_budget("hyperliquid")
+        if backoff:
+            budget.trigger_backoff(2.0)
+        assert budget.backoff_active is backoff
+        budget.acquire = AsyncMock()
+
+        async def fetch_tickers(params):
+            await asyncio.sleep(0.05)
+            return {"BTC/USDC:USDC": {"last": 1.0}}
+
+        client = MagicMock()
+        client.fetch_tickers = AsyncMock(side_effect=fetch_tickers)
+        fetcher = MagicMock()
+        fetcher._ensure_client = AsyncMock(return_value=client)
+        d._get_fetcher = MagicMock(return_value=fetcher)
+        return d, budget, client
+
+    @staticmethod
+    def _req(priority):
+        return {
+            "op": "tickers",
+            "req_id": "r",
+            "exchange": "hyperliquid",
+            "trading_mode": "futures",
+            "market_type": "",
+            "priority": priority,
+        }
+
+    @pytest.mark.asyncio
+    async def test_bots_with_positions_share_one_critical_fetch(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import TokenBucket
+
+        d, budget, client = self._daemon(tmp_path, backoff=True)
+        resps = await asyncio.gather(
+            *(d._handle_tickers(self._req(TokenBucket.HIGH)) for _ in range(10))
+        )
+        assert all(r["ok"] for r in resps)
+        assert client.fetch_tickers.await_count == 1
+        budget.acquire.assert_awaited_once()
+        assert budget.acquire.await_args.kwargs["priority"] == TokenBucket.CRITICAL
+
+    @pytest.mark.asyncio
+    async def test_bots_without_positions_keep_their_priority(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import TokenBucket
+
+        d, budget, _ = self._daemon(tmp_path, backoff=True)
+        await d._handle_tickers(self._req(TokenBucket.NORMAL))
+        assert budget.acquire.await_args.kwargs["priority"] == TokenBucket.NORMAL
+
+    @pytest.mark.asyncio
+    async def test_no_escalation_outside_backoff(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import TokenBucket
+
+        d, budget, _ = self._daemon(tmp_path, backoff=False)
+        await d._handle_tickers(self._req(TokenBucket.HIGH))
+        assert budget.acquire.await_args.kwargs["priority"] == TokenBucket.HIGH
+
+
 # -------------------------------------------------------------------- client: get_tickers priority
 
 
