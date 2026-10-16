@@ -40,7 +40,7 @@ from freqtrade.enums import (
     State,
     TradingMode,
 )
-from freqtrade.exceptions import ExchangeError, PricingError
+from freqtrade.exceptions import ExchangeError, PricingError, TemporaryError
 from freqtrade.exchange import Exchange, timeframe_to_minutes, timeframe_to_msecs
 from freqtrade.exchange.exchange_utils import price_to_precision
 from freqtrade.ft_types import AnnotationType
@@ -744,9 +744,7 @@ class RPC:
             # Unreadable token means "assume it changed". Recomputing is never wrong.
             return (time.monotonic(),)
 
-    def _collect_open_trade_profits(
-        self, trades: Sequence["Trade"]
-    ) -> list[tuple[float, float]]:
+    def _collect_open_trade_profits(self, trades: Sequence["Trade"]) -> list[tuple[float, float]]:
         """(profit_abs, profit_ratio) per open trade, from live rates. Never cached."""
         out: list[tuple[float, float]] = []
         for trade in trades:
@@ -1170,10 +1168,15 @@ class RPC:
             )
         symbol: str
         pos: PositionWallet
+        # A shared wallet can hold dozens of positions, and every conversion goes through
+        # get_tickers with its own retries. Once the exchange throttles us (or the network
+        # fails), asking again for each remaining position multiplies the load by the number
+        # of positions and keeps a 429 storm alive: fall back to collateral for the rest.
+        rates_unavailable = False
         for symbol, pos in self._freqtrade.wallets.get_all_positions().items():
             est_stake = pos.collateral
             pos_base = self._freqtrade.exchange.get_pair_base_currency(symbol)
-            if pos.leverage and pos.position:
+            if pos.leverage and pos.position and not rates_unavailable:
                 try:
                     rate = self._freqtrade.exchange.get_conversion_rate(pos_base, stake_currency)
                     if rate:
@@ -1189,6 +1192,12 @@ class RPC:
                             est_stake = rate * pos.position - pos.collateral * (pos.leverage - 1)
                         else:
                             est_stake = pos.collateral * (1 + pos.leverage) - rate * pos.position
+                except TemporaryError as e:
+                    logger.warning(
+                        f"Error {e} getting rate for futures {symbol} / {pos_base}; "
+                        "skipping the remaining conversions of this balance request"
+                    )
+                    rates_unavailable = True
                 except (ExchangeError, PricingError) as e:
                     logger.warning(f"Error {e} getting rate for futures {symbol} / {pos_base}")
                     pass

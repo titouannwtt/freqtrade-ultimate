@@ -7,7 +7,12 @@ from numpy import isnan
 from sqlalchemy import select
 
 from freqtrade.enums import SignalDirection, State, TradingMode
-from freqtrade.exceptions import ExchangeError, InvalidOrderException, TemporaryError
+from freqtrade.exceptions import (
+    ExchangeError,
+    InvalidOrderException,
+    PricingError,
+    TemporaryError,
+)
 from freqtrade.persistence import Order, Trade
 from freqtrade.persistence.key_value_store import set_startup_time
 from freqtrade.rpc import RPC, RPCException
@@ -904,6 +909,92 @@ def test_rpc_balance_futures(default_conf_usdt, mocker):
     assert stake_pos["currency"] == "USDT"
     assert stake_pos["est_stake_bot"] == 990.0
     assert stake_pos["bot_owned"] == 990.0
+
+
+def test_rpc_balance_futures_stops_converting_when_throttled(default_conf_usdt, mocker):
+    """A throttled exchange must not be asked once per wallet position.
+
+    A shared wallet holds many positions and each conversion goes through get_tickers with
+    its own retries: after the first rate-limit error, the remaining positions fall back
+    to their collateral without another call.
+    """
+    from freqtrade.exceptions import DDosProtection
+    from freqtrade.wallets import PositionWallet, Wallet
+
+    conv = MagicMock(side_effect=DDosProtection("429 Too Many Requests"))
+    mocker.patch.multiple(
+        EXMS,
+        validate_trading_mode_and_margin_mode=MagicMock(),
+        get_balances=MagicMock(return_value={"USDT": {"free": 1000.0, "total": 1000.0}}),
+        get_tickers=MagicMock(return_value={}),
+        get_conversion_rate=conv,
+        get_pair_base_currency=MagicMock(side_effect=lambda pair: pair.split("/")[0]),
+    )
+    default_conf_usdt["dry_run"] = False
+    default_conf_usdt["trading_mode"] = "futures"
+    default_conf_usdt["margin_mode"] = "isolated"
+    freqtradebot = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    positions = {
+        f"C{i}/USDT:USDT": PositionWallet(
+            symbol=f"C{i}/USDT:USDT", position=1.0, leverage=2.0, collateral=10.0, side="long"
+        )
+        for i in range(40)
+    }
+    mocker.patch.multiple(
+        freqtradebot.wallets,
+        get_all_positions=MagicMock(return_value=positions),
+        get_all_balances=MagicMock(return_value={"USDT": Wallet("USDT", 1000.0, 1000.0, 0.0)}),
+    )
+
+    result = RPC(freqtradebot)._rpc_balance(
+        default_conf_usdt["stake_currency"], default_conf_usdt["fiat_display_currency"]
+    )
+
+    assert conv.call_count == 1
+    est = [c["est_stake"] for c in result["currencies"] if c["currency"] in positions]
+    assert est == [10.0] * 40
+
+
+def test_rpc_balance_futures_keeps_converting_after_a_pricing_error(default_conf_usdt, mocker):
+    """A coin without a price is skipped alone; the other positions are still converted."""
+    from freqtrade.wallets import PositionWallet, Wallet
+
+    def _rate(base, stake):
+        if base == "BAD":
+            raise PricingError("no market")
+        return 20.0
+
+    conv = MagicMock(side_effect=_rate)
+    mocker.patch.multiple(
+        EXMS,
+        validate_trading_mode_and_margin_mode=MagicMock(),
+        get_balances=MagicMock(return_value={"USDT": {"free": 1000.0, "total": 1000.0}}),
+        get_tickers=MagicMock(return_value={}),
+        get_conversion_rate=conv,
+        get_pair_base_currency=MagicMock(side_effect=lambda pair: pair.split("/")[0]),
+    )
+    default_conf_usdt["dry_run"] = False
+    default_conf_usdt["trading_mode"] = "futures"
+    default_conf_usdt["margin_mode"] = "isolated"
+    freqtradebot = get_patched_freqtradebot(mocker, default_conf_usdt)
+    positions = {
+        p: PositionWallet(symbol=p, position=1.0, leverage=2.0, collateral=10.0, side="long")
+        for p in ("BAD/USDT:USDT", "GOOD/USDT:USDT")
+    }
+    mocker.patch.multiple(
+        freqtradebot.wallets,
+        get_all_positions=MagicMock(return_value=positions),
+        get_all_balances=MagicMock(return_value={"USDT": Wallet("USDT", 1000.0, 1000.0, 0.0)}),
+    )
+
+    result = RPC(freqtradebot)._rpc_balance(
+        default_conf_usdt["stake_currency"], default_conf_usdt["fiat_display_currency"]
+    )
+
+    assert conv.call_count == 2
+    good = next(c for c in result["currencies"] if c["currency"] == "GOOD/USDT:USDT")
+    assert good["est_stake"] == 20.0 * 1.0 - 10.0 * (2.0 - 1)
 
 
 def test_rpc_start(mocker, default_conf) -> None:
