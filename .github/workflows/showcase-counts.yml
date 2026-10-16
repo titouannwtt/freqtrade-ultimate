@@ -1,0 +1,35 @@
+name: Showcase counters
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  counters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            /.showcase.json
+            /.github/scripts/
+            /README.md
+          sparse-checkout-cone-mode: false
+      - name: Update counters
+        run: python3 .github/scripts/showcase_counts.py sync .
+      - name: Commit if changed
+        run: |
+          if git diff --quiet; then
+            echo "Counters are up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: update counters"
+          git push

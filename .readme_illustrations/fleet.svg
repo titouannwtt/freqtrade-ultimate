@@ -73,7 +73,7 @@
 <text x="364" y="242" class="sans" font-size="16" fill="#C3D2E6">shared OHLCV candle cache</text>
 <line x1="364" y1="260" x2="616" y2="260" stroke="#24507F" stroke-width="1.5"/>
 <text x="364" y="292" class="sans" font-size="24" fill="#FFF8E7" font-weight="800">75 % fewer API calls</text>
-<text x="364" y="315" class="sans" font-size="15" fill="#8FA6C4">measured in production, 4 bots</text>
+<text x="364" y="315" class="sans" font-size="15" fill="#8FA6C4">measured in production, 4 bots</text><!-- showcase: ignore (dated measurement) -->
 <rect x="340" y="372" width="300" height="152" rx="20" fill="#0F3157" stroke="#F7901E" stroke-width="2"/>
 <text x="364" y="412" class="mono" font-size="22" fill="#FFB45E" font-weight="700">ftpairlists</text>
 <text x="364" y="438" class="sans" font-size="16" fill="#C3D2E6">shared pairlist computation</text>

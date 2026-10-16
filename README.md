@@ -24,7 +24,7 @@
 
 ## What is Freqtrade Ultimate?
 
-A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with **32+ features** not present upstream. It is a **drop-in superset of upstream freqtrade**: same `freqtrade` command, same configuration schema, same database format, so an existing bot moves over without losing anything.
+A maintained, opinionated fork of [Freqtrade](https://github.com/freqtrade/freqtrade) optimized for serious algorithmic trading on **Hyperliquid** perpetual futures, with [**a long list of features**](docs/FEATURES.md) not present upstream. It is a **drop-in superset of upstream freqtrade**: same `freqtrade` command, same configuration schema, same database format, so an existing bot moves over without losing anything.
 
 Maintained by [Freqtrade France](https://buymeacoffee.com/freqtrade_france). Licensed GPLv3, like upstream Freqtrade.
 
@@ -38,9 +38,9 @@ Maintained by [Freqtrade France](https://buymeacoffee.com/freqtrade_france). Lic
 | New to freqtrade | [Start fresh](#start-fresh) | [`./setup.sh -i`](#native-install-source--venv) | [`docker compose build`](#docker-1) |
 
 > [!NOTE]
-> **Heads-up on repository size.** Freqtrade Ultimate ships a bundle of historical Hyperliquid OHLCV data (397 pairs × 8 timeframes, reaching further back than Hyperliquid's own 5000-candle API limit). It is one of the reasons the fork exists, but it makes a full clone **~6.5 GB**.
+> **Heads-up on repository size.** Freqtrade Ultimate ships a bundle of historical Hyperliquid OHLCV data (<!-- count:pairs -->397<!-- /count --> pairs on every timeframe from 5m to 1w, reaching further back than Hyperliquid's own 5000-candle API limit). It is one of the reasons the fork exists, but it makes a full clone **~6.5 GB**.
 >
-> Every `git clone` below therefore uses `--filter=blob:none`, which fetches file contents on demand instead of every historical revision. Measured on a fresh clone: **~2 GB in under a minute**, with the complete working tree: all the code *and* the 3358 data files.
+> Every `git clone` below therefore uses `--filter=blob:none`, which fetches file contents on demand instead of every historical revision. Measured on a fresh clone: **~2 GB in under a minute**, with the complete working tree: all the code *and* the <!-- count:data_files -->3,358<!-- /count --> data files.
 >
 > Want the code without the data bundle? A sparse checkout gets you there in **~130 MB, in seconds**:
 >
@@ -220,7 +220,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 - **Liquidation detection** via user-fills monitoring (`liquidationMarkPx`).
 - **External close detection** (ADL or manual UI close) with `exit_reason="external_close"`.
 - **Resilient leverage / margin error handling** in DCA continues operation instead of crashing.
-- **Local Hyperliquid historical data bundle**: 3 350+ Feather files (397 pairs × 8 timeframes including crypto indices and TradFi perpetuals, plus 271 funding-rate series).
+- **Local Hyperliquid historical data bundle**: <!-- count:data_files -->3,358<!-- /count --> Feather files (<!-- count:pairs -->397<!-- /count --> pairs from 5m to 1w, including crypto indices and TradFi perpetuals, plus <!-- count:funding_series -->271<!-- /count --> funding-rate series).
 
 ### Position integrity (multi-bot / shared account)
 - **Provable order ownership**: every order carries a per-bot client order id, so a bot on a shared wallet can recover *its own* lost orders without ever claiming a sibling's.
@@ -247,7 +247,7 @@ A quick tour. Full inventory with implementation details lives in [**docs/FEATUR
 
 ### Developer experience
 - **Strategy Dev Backend**: reader, jobs runner, strategy editor APIs (consumed by [frequi-ultimate](https://github.com/titouannwtt/frequi-ultimate)).
-- **AI Copilot**: repository ships with [`CLAUDE.md`](CLAUDE.md) plus 15 tip files containing 199 trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
+- **AI Copilot**: repository ships with [`CLAUDE.md`](CLAUDE.md) plus <!-- count:tip_files -->15<!-- /count --> tip files of trading rules curated from Carver, Clenow, Chan, López de Prado, and the Freqtrade France community.
 - **Enhanced CLI help**: practical guidance, recommendations, and tradeoffs documented in every option.
 
 **Full feature list with deep technical details:** [docs/FEATURES.md](docs/FEATURES.md)
@@ -311,7 +311,7 @@ More widgets, popovers, and the embedded strategy editor are shown in the [FreqU
 
 Installation of the fork itself is covered above: [migrate from upstream](#migrate-from-upstream-freqtrade) or [start fresh](#start-fresh). This fork is a drop-in replacement: all upstream commands work unchanged, and the full [Freqtrade documentation](https://www.freqtrade.io/) applies. Fork-specific commands and flags are documented in [docs/FEATURES.md](docs/FEATURES.md).
 
-Then install the matching dashboard (50+ enhanced components, fleet comparison, market context):
+Then install the matching dashboard (enhanced components, fleet comparison, market context):
 
 ```bash
 freqtrade install-ui
