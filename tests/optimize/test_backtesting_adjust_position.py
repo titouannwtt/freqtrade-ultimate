@@ -11,6 +11,7 @@ from freqtrade.data import history
 from freqtrade.data.history import get_timerange
 from freqtrade.enums import ExitType
 from freqtrade.optimize.backtesting import Backtesting
+from freqtrade.strategy import stoploss_from_open
 from freqtrade.util.datetime_helpers import dt_utc
 from tests.conftest import EXMS, patch_exchange
 
@@ -226,3 +227,62 @@ def test_backtest_position_adjustment_detailed(default_conf, fee, mocker, levera
     backtesting.strategy.adjust_trade_position = MagicMock(return_value=-trade.stake_amount)
     trade = backtesting._check_adjust_trade_for_candle(trade, row_exit, current_time)
     assert trade.is_open is False
+
+
+def test_backtest_stoploss_after_fill_not_ratcheted_by_recalc(default_conf, fee, mocker) -> None:
+    """
+    custom_stoploss(after_fill=True) with stoploss_from_open must leave the stop at the same
+    distance from the new average as in live (recalc first, then after_fill), and not be
+    ratcheted up by a second recalc_trade_from_orders() after the fill.
+    """
+    default_conf["use_exit_signal"] = False
+    mocker.patch(f"{EXMS}.get_fee", fee)
+    mocker.patch(f"{EXMS}.get_min_pair_stake_amount", return_value=10)
+    mocker.patch(f"{EXMS}.get_max_pair_stake_amount", return_value=float("inf"))
+    mocker.patch("freqtrade.optimize.backtesting.Backtesting._run_funding_fees")
+    patch_exchange(mocker)
+    default_conf.update(
+        {"stake_amount": 100.0, "dry_run_wallet": 1000.0, "strategy": "StrategyTestV3"}
+    )
+    backtesting = Backtesting(default_conf)
+    backtesting._set_strategy(backtesting.strategylist[0])
+    strategy = backtesting.strategy
+    strategy.use_custom_stoploss = True
+    strategy._ft_stop_uses_after_fill = True
+
+    def custom_stoploss(pair, trade, current_time, current_rate, current_profit, after_fill, **kw):
+        if after_fill:
+            return stoploss_from_open(-0.35, current_profit, is_short=trade.is_short)
+        return None
+
+    strategy.custom_stoploss = custom_stoploss
+
+    def row(hour: int, price: float):
+        return [
+            pd.Timestamp(year=2020, month=1, day=1, hour=hour, minute=0),
+            price,  # Open
+            price * 1.01,  # High
+            price * 0.99,  # Low
+            price,  # Close
+            0,  # enter_long
+            0,  # exit_long
+            0,  # enter_short
+            0,  # exit_short
+            "",  # enter_tag
+            "",  # exit_tag
+        ]
+
+    pair = "XRP/USDT"
+    row_enter = row(4, 2.1)
+    trade = backtesting._enter_trade(pair, row=row_enter, direction="long")
+    assert trade
+
+    for hour, price in ((5, 1.9), (6, 1.7)):
+        r = row(hour, price)
+        strategy.adjust_trade_position = MagicMock(return_value=(100, "SafetyOrder"))
+        trade = backtesting._check_adjust_trade_for_candle(trade, r, r[0].to_pydatetime())
+        assert trade
+    assert len(trade.orders) == 3
+
+    expected = 0.65 * (1 + trade.fee_open) / (1 - trade.fee_close)
+    assert trade.stop_loss / trade.open_rate == pytest.approx(expected, abs=1e-6)

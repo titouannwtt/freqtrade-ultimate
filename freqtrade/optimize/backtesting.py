@@ -1291,8 +1291,11 @@ class Backtesting:
             )
             order._trade_bt = trade
             trade.orders.append(order)
-            self._try_close_open_order(order, trade, current_time, row)
-            trade.recalc_trade_from_orders()
+            if not self._try_close_open_order(order, trade, current_time, row):
+                trade.recalc_trade_from_orders()
+            # If the order filled, close_bt_order() already recalculated the trade and
+            # _call_adjust_stop() (after_fill) ran afterwards - as in live. A second recalc here
+            # would re-apply the stop pct computed at the fill price to the new average.
 
         return trade
 
