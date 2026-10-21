@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("ftcache.client")
 
+# Set while ``get_rate`` prices an ENTRY. Thread-local because the RPC threads also call
+# ``get_rate`` and must not inherit the trading loop's urgency.
+_ENTRY_PRICING = threading.local()
+
 
 class _LocalRateLimiter:
     """Simple per-bot rate limiter used when the daemon is unavailable.
@@ -1908,8 +1912,38 @@ class CachedExchangeMixin:
         # Metered in dry-run too: unlike order endpoints, dry bots hit the
         # REAL l2Book API for pricing and dry-order fill simulation.  The
         # priority floor downgrades dry bots to LOW so they yield to live.
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
+        #
+        # The book that prices an ENTRY is CRITICAL: at HIGH it queues behind the
+        # candle refreshes (up to 100 of them at every 5m close, and the 80% weight gate
+        # holds HIGH back) while the signal it prices is already minutes old, whereas at
+        # CRITICAL it is granted on the next token for a weight of 2.
+        entry = getattr(_ENTRY_PRICING, "active", False)
+        priority = OhlcvCacheClient.CRITICAL if entry else OhlcvCacheClient.HIGH
+        self._ftcache_acquire_sync(priority=priority, cost=2.0)
         return super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
+
+    def get_rate(
+        self,
+        pair: str,
+        refresh: bool,
+        side: str,
+        is_short: bool,
+        order_book: OrderBook | None = None,
+        ticker: Ticker | None = None,
+    ) -> float:
+        """Price a rate; an entry rate marks its order book fetch as CRITICAL."""
+        if side != "entry":
+            return super().get_rate(  # type: ignore[misc]
+                pair, refresh, side, is_short, order_book, ticker
+            )
+        previous = getattr(_ENTRY_PRICING, "active", False)
+        _ENTRY_PRICING.active = True
+        try:
+            return super().get_rate(  # type: ignore[misc]
+                pair, refresh, side, is_short, order_book, ticker
+            )
+        finally:
+            _ENTRY_PRICING.active = previous
 
     # -------------------------------------------------------------------- remaining REST calls
     # Every ccxt REST call must go through the daemon's rate limiter so that
@@ -2129,8 +2163,10 @@ class CachedExchangeMixin:
         pair: str | None = None,
         accept_fail: bool = False,
     ):
+        # Only ever called right before an order (``_lev_prep``): the order waits for this
+        # token, so it must not queue behind the candle refreshes (10 to 38 s measured).
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
         return super()._set_leverage(leverage, pair, accept_fail)  # type: ignore[misc]
 
     def set_margin_mode(
@@ -2140,8 +2176,11 @@ class CachedExchangeMixin:
         accept_fail: bool = False,
         params: dict | None = None,
     ):
+        # Same as ``_set_leverage``: on Hyperliquid this is the one leverage/margin action
+        # sent before every entry (``Hyperliquid._lev_prep``) and before the coordination
+        # pre-flight (``_coordination_apply_leverage``), both on the order's critical path.
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.LOW)
+            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
         return super().set_margin_mode(pair, margin_mode, accept_fail, params)  # type: ignore[misc]
 
     def _fetch_orders(
