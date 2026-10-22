@@ -3358,9 +3358,7 @@ class TestHotTimeframesDaemon:
             "hyperliquid", "futures", "BTC/USDC:USDC", "5m", "futures", self.TF_MS
         )
         first = last_candle_open_ms - (n - 1) * self.TF_MS
-        series.merge(
-            [[first + i * self.TF_MS, 1.0, 1.0, 1.0, 1.0, 1.0] for i in range(n)]
-        )
+        series.merge([[first + i * self.TF_MS, 1.0, 1.0, 1.0, 1.0, 1.0] for i in range(n)])
         return series
 
     def _req(self, hot: bool):
@@ -3661,6 +3659,7 @@ class TestHistoricDownloadBypassesDaemonCache:
 # -------------------------------------------------------------------- frozen partial candles in the daemon cache
 
 _HOUR = 3_600_000
+BASE = 494_000  # hours since epoch: 2026, so past the loader's 2017 sanity bound
 
 
 class TestPartialCandleTracking:
@@ -3680,7 +3679,10 @@ class TestPartialCandleTracking:
 
     def test_merge_flags_candle_received_before_close(self):
         s = self._series()
-        s.merge([[998 * _HOUR, 1, 1, 1, 1, 9], [999 * _HOUR, 1, 1, 1, 1, 9]], fetched_at_ms=999 * _HOUR + 60_000)
+        s.merge(
+            [[998 * _HOUR, 1, 1, 1, 1, 9], [999 * _HOUR, 1, 1, 1, 1, 9]],
+            fetched_at_ms=999 * _HOUR + 60_000,
+        )
         # 998 had closed, 999 was forming.
         assert s.partial_ts == {999 * _HOUR}
 
@@ -3726,11 +3728,19 @@ class TestPartialCandleTracking:
 
         store = CandleStore()
         s = store.get_or_create("hl", "futures", "BTC/USDC:USDC", "1h", "futures", _HOUR)
-        s.merge([[998 * _HOUR, 1, 1, 1, 1, 9], [999 * _HOUR, 1, 1, 1, 1, 9]], fetched_at_ms=999 * _HOUR + 60_000)
+        s.merge(
+            [[(BASE + 998) * _HOUR, 1, 1, 1, 1, 9], [(BASE + 999) * _HOUR, 1, 1, 1, 1, 9]],
+            fetched_at_ms=(BASE + 999) * _HOUR + 60_000,
+        )
         FeatherPersistence(tmp_path, store).flush_dirty()
         store2 = CandleStore()
         assert FeatherPersistence(tmp_path, store2).load_all() == 1
-        assert store2.all()[0].partial_ts == {999 * _HOUR}
+        assert store2.all()[0].partial_ts == {(BASE + 999) * _HOUR}
+        # the timestamps themselves, not only the markers
+        assert store2.all()[0].candles[:, 0].astype("int64").tolist() == [
+            (BASE + 998) * _HOUR,
+            (BASE + 999) * _HOUR,
+        ]
 
 
 class TestComputeGapsStale:
@@ -3760,7 +3770,11 @@ class TestComputeGapsStale:
 
         assert (
             compute_gaps(
-                950 * _HOUR, 1000 * _HOUR, 900 * _HOUR, 1000 * _HOUR, _HOUR,
+                950 * _HOUR,
+                1000 * _HOUR,
+                900 * _HOUR,
+                1000 * _HOUR,
+                _HOUR,
                 stale_ts=[920 * _HOUR],
             )  # fmt: skip
             == []
@@ -3890,7 +3904,9 @@ class TestLegacyScanInDaemon:
                 return [[since_ms + i * _H, 1, 2, 0.5, 1.5, 100.0] for i in range(limit)]
 
         d._get_fetcher = lambda ex, mode: _F()
-        m15 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "15m", "futures", 900_000)
+        m15 = d.store.get_or_create(
+            "hyperliquid", "futures", "BTC/USDC:USDC", "15m", "futures", 900_000
+        )
         t0 = (now_h - 30) * _H
         m15.merge([[t0 + i * 900_000, 1, 1, 1, 1, 25.0] for i in range(40 * 4)])
         h1 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
@@ -3918,7 +3934,7 @@ class TestLegacyScanInDaemon:
 
         store = CandleStore()
         s = store.get_or_create("hl", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
-        s.merge([[0, 1, 1, 1, 1, 1.0]])
+        s.merge([[BASE * _H, 1, 1, 1, 1, 1.0]])
         pers = FeatherPersistence(tmp_path, store)
         pers.flush_dirty()
         meta = pers._meta_file_for(s)
@@ -3992,3 +4008,150 @@ class TestSteadyStateNoExtraFetch:
         extra = asyncio.run(scenario())
         print("extra fetches in steady state:", extra)
         assert extra == 0
+
+
+# -------------------------------------------------------------------- persistence: timestamp unit
+
+
+class TestPersistenceTimestampUnit:
+    """Persisted feathers hold ms (pandas 3, the daemon's venv) or ns (pandas 2).
+
+    The loader used astype("int64") // 10**6, which is only right for ns: every ms
+    file loaded as 1970, so range_start sat in 1970 and no prefix gap was ever
+    refetched (warmups served truncated).
+    """
+
+    T0 = 494_444 * 3_600_000  # 2026-05, aligned to the hour
+    TF = 3_600_000
+
+    def _write(self, root, unit, rows_ms, tz="UTC"):
+        import pandas as pd
+
+        d = root / "hyperliquid" / "futures"
+        d.mkdir(parents=True, exist_ok=True)
+        dates = pd.to_datetime(rows_ms, unit="ms", utc=tz == "UTC").as_unit(unit)
+        pd.DataFrame(
+            {
+                "date": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                "volume": [float(i + 1) for i in range(len(rows_ms))],
+            }
+        ).to_feather(d / "BTC_USDC_USDC-1h.feather")  # fmt: skip
+        (d / "BTC_USDC_USDC-1h.meta.json").write_text(
+            '{"pair": "BTC/USDC:USDC", "candle_type": "futures", "partial_scanned": true}'
+        )
+        return d
+
+    def _load(self, root):
+        from freqtrade.ohlcv_cache.persistence import FeatherPersistence
+        from freqtrade.ohlcv_cache.store import CandleStore
+
+        store = CandleStore()
+        assert FeatherPersistence(root, store).load_all() == 1
+        return store.all()[0]
+
+    @pytest.mark.parametrize("unit", ["ms", "ns", "us"])
+    def test_load_keeps_the_real_timestamps(self, tmp_path, unit):
+        rows = [self.T0 + i * self.TF for i in range(5)]
+        self._write(tmp_path, unit, rows)
+        s = self._load(tmp_path)
+        assert s.candles[:, 0].astype("int64").tolist() == rows
+        assert s.range_start_ms == rows[0]
+        assert s.range_end_ms == rows[-1]
+
+    @pytest.mark.parametrize("unit", ["ms", "ns"])
+    def test_write_then_load_round_trips_and_writes_ms(self, tmp_path, unit):
+        import pyarrow.feather as pf
+
+        from freqtrade.ohlcv_cache.persistence import FeatherPersistence
+
+        rows = [self.T0 + i * self.TF for i in range(5)]
+        self._write(tmp_path, unit, rows)
+        s = self._load(tmp_path)
+        s.dirty = True
+        store = type("S", (), {"all": lambda self_: [s]})()
+        FeatherPersistence(tmp_path, store).flush_dirty()
+        path = tmp_path / "hyperliquid" / "futures" / "BTC_USDC_USDC-1h.feather"
+        assert str(pf.read_table(path).schema.field("date").type) == "timestamp[ms, tz=UTC]"
+        assert self._load(tmp_path).candles[:, 0].astype("int64").tolist() == rows
+
+    @pytest.mark.parametrize("unit", ["ms", "ns"])
+    def test_1970_rows_are_dropped_and_range_is_recomputed(self, tmp_path, unit, caplog):
+        real = [self.T0 + i * self.TF for i in range(3)]
+        polluted = [1_700_000 + i * 3_600 for i in range(50)]  # what the old loader wrote
+        self._write(tmp_path, unit, polluted + real)
+        s = self._load(tmp_path)
+        assert s.candles[:, 0].astype("int64").tolist() == real
+        assert s.range_start_ms == real[0]
+        assert s.dirty  # the cleaned series is rewritten at the next flush
+        assert "dropping 50 row(s)" in caplog.text
+
+    def test_polluted_series_gets_a_prefix_gap(self, tmp_path):
+        from freqtrade.ohlcv_cache.gaps import compute_gaps
+
+        real = [self.T0 + i * self.TF for i in range(3)]
+        self._write(tmp_path, "ms", [1_700_000 + i * 3_600 for i in range(50)] + real)
+        s = self._load(tmp_path)
+        end = real[-1] + self.TF
+        start = end - 100 * self.TF
+        gaps = compute_gaps(start, end, s.range_start_ms, s.range_end_ms, self.TF)
+        assert gaps and gaps[0].start_ms == start and gaps[0].end_ms == real[0]
+
+    def test_only_corrupt_rows_means_no_series(self, tmp_path):
+        from freqtrade.ohlcv_cache.persistence import FeatherPersistence
+        from freqtrade.ohlcv_cache.store import CandleStore
+
+        self._write(tmp_path, "ms", [1_700_000 + i * 3_600 for i in range(5)])
+        assert FeatherPersistence(tmp_path, CandleStore()).load_all() == 0
+
+
+class TestLegacyScanDetails:
+    def test_scan_that_finds_nothing_does_not_dirty_the_series(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        h1 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
+        h1.merge([[(BASE + i) * _H, 1, 1, 1, 1, 100.0] for i in range(10)])
+        h1.dirty = False
+        h1.partial_scanned = False
+        d._scan_legacy_partials(h1, (BASE + 100) * _H)
+        assert h1.partial_scanned and not h1.dirty and not h1.partial_ts
+
+    def test_store_indexes_finer_series_by_pair(self):
+        from freqtrade.ohlcv_cache.store import CandleStore
+
+        st = CandleStore()
+        a = st.get_or_create("hl", "futures", "A/USDC:USDC", "1h", "futures", _H)
+        m15 = st.get_or_create("hl", "futures", "A/USDC:USDC", "15m", "futures", 900_000)
+        st.get_or_create("hl", "futures", "B/USDC:USDC", "15m", "futures", 900_000)
+        st.get_or_create("hl", "futures", "A/USDC:USDC", "2h", "futures", 2 * _H)
+        assert st.finer_than(a) == [m15]
+
+    def test_refetch_window_end_is_passed_and_missing_candle_is_logged(self, tmp_path, caplog):
+        import logging
+
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        now_h = int(time.time() * 1000) // _H
+        seen = {}
+
+        class _F:
+            async def fetch_ohlcv(self, pair, timeframe, since_ms, limit, candle_type, **kw):
+                seen.update(kw)
+                return []  # the exchange does not return the marked candle
+
+        d._get_fetcher = lambda ex, mode: _F()
+        h1 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
+        h1.merge([[(now_h - 30 + i) * _H, 1, 1, 1, 1, 100.0] for i in range(30)])
+        frozen = (now_h - 10) * _H
+        h1.partial_ts.add(frozen)
+        req = {
+            "op": "fetch", "req_id": "r", "exchange": "hyperliquid", "trading_mode": "futures",
+            "pair": "BTC/USDC:USDC", "timeframe": "1h", "candle_type": "futures",
+            "since_ms": (now_h - 20) * _H, "limit": 20,
+        }  # fmt: skip
+        with caplog.at_level(logging.INFO, logger="ftcache.daemon"):
+            asyncio.run(d._handle_fetch(req))
+        assert seen["until_ms"] == frozen + _H  # exclusive end of the refetch window
+        assert "marked candle(s) not returned" in caplog.text
+        assert frozen not in h1.partial_ts  # cleared anyway: no refetch loop

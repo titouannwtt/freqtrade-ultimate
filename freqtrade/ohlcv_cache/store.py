@@ -202,6 +202,20 @@ class CandleStore:
 
     def __init__(self) -> None:
         self._series: dict[tuple[str, str, str, str, str], CandleSeries] = {}
+        # (exchange, trading_mode, pair, candle_type) -> series of that pair, any timeframe
+        self._by_pair: dict[tuple[str, str, str, str], list[CandleSeries]] = {}
+
+    def _index(self, s: CandleSeries) -> None:
+        group = self._by_pair.setdefault((s.exchange, s.trading_mode, s.pair, s.candle_type), [])
+        group[:] = [x for x in group if x.timeframe != s.timeframe]
+        group.append(s)
+
+    def finer_than(self, series: CandleSeries) -> list[CandleSeries]:
+        """Series of the same pair and candle type at a finer timeframe that divides it."""
+        group = self._by_pair.get(
+            (series.exchange, series.trading_mode, series.pair, series.candle_type), []
+        )
+        return [s for s in group if s.tf_ms < series.tf_ms and series.tf_ms % s.tf_ms == 0]
 
     @staticmethod
     def make_key(
@@ -234,6 +248,7 @@ class CandleStore:
                 tf_ms=tf_ms,
             )
             self._series[k] = s
+            self._index(s)
         return s
 
     def get(self, key: tuple) -> CandleSeries | None:
@@ -252,3 +267,4 @@ class CandleStore:
             series.candle_type,
         )
         self._series[k] = series
+        self._index(series)

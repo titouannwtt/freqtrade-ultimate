@@ -50,6 +50,24 @@ def _tf_to_ms(tf: str) -> int:
     )
 
 
+# No candle exists before this: anything earlier is a corrupt timestamp.
+_MIN_VALID_TS_MS = 1_483_228_800_000  # 2017-01-01 UTC
+
+
+def _dates_to_ms(dates: pd.Series) -> np.ndarray:
+    """Epoch milliseconds of a date column, whatever its storage unit.
+
+    pandas 2.x writes datetime64[ns], pandas 3 writes datetime64[ms]; reading both
+    through astype("int64") // 10**6 turns every ms file into 1970. The unit is
+    normalised explicitly instead.
+    """
+    if pd.api.types.is_datetime64_any_dtype(dates):
+        if getattr(dates.dt, "tz", None) is not None:
+            dates = dates.dt.tz_convert("UTC").dt.tz_localize(None)
+        return dates.to_numpy().astype("datetime64[ms]").astype("int64")
+    return dates.to_numpy(dtype=np.int64)
+
+
 def _pair_to_filename(pair: str) -> str:
     return pair.replace("/", "_").replace(":", "_")
 
@@ -137,11 +155,7 @@ class FeatherPersistence:
         if df.empty:
             return None
         # Convert back to np.ndarray [ts, o, h, l, c, v] with ts in ms.
-        dates = df["date"]
-        if pd.api.types.is_datetime64_any_dtype(dates):
-            ts = (dates.astype("int64") // 10**6).to_numpy(dtype=np.int64)
-        else:
-            ts = dates.to_numpy(dtype=np.int64)
+        ts = _dates_to_ms(df["date"])
         arr = np.column_stack(
             [
                 ts.astype(np.float64),
@@ -152,6 +166,24 @@ class FeatherPersistence:
                 df["volume"].to_numpy(dtype=np.float64),
             ]
         )
+
+        # Rows dated before the first possible candle come from the unit bug fixed
+        # here (ms values read as ns, i.e. 1970 timestamps): their real timestamps
+        # are lost. Drop them, so range_start is the first real candle and the
+        # prefix gap is refetched through the normal gap logic.
+        keep = ts >= _MIN_VALID_TS_MS
+        n_bad = int((~keep).sum())
+        if n_bad:
+            logger.warning(
+                "%s: dropping %d row(s) dated before 2017 (kept %d); the history will be refetched",
+                path.name,
+                n_bad,
+                int(keep.sum()),
+            )
+            if not keep.any():
+                return None
+            arr = arr[keep]
+        arr = arr[np.argsort(arr[:, 0], kind="stable")]
 
         series = CandleSeries(
             exchange=exchange,
@@ -166,7 +198,7 @@ class FeatherPersistence:
             partial_ts={int(t) for t in meta.get("partial_ts", [])},
             partial_scanned=bool(meta.get("partial_scanned", False)),
         )
-        series.dirty = False
+        series.dirty = n_bad > 0  # rewrite the file without the polluted rows
         return series
 
     # -------------- flush
@@ -200,7 +232,10 @@ class FeatherPersistence:
         arr = series.candles
         df = pd.DataFrame(
             {
-                "date": pd.to_datetime(arr[:, 0].astype(np.int64), unit="ms", utc=True),
+                # explicit ms unit: round-trips identically on pandas 2 and 3
+                "date": pd.to_datetime(arr[:, 0].astype(np.int64), unit="ms", utc=True).as_unit(
+                    "ms"
+                ),
                 "open": arr[:, 1],
                 "high": arr[:, 2],
                 "low": arr[:, 3],

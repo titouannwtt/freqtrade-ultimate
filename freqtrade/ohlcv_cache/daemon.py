@@ -49,7 +49,7 @@ from freqtrade.ohlcv_cache.gaps import Gap, chunk_gap, compute_gaps
 from freqtrade.ohlcv_cache.logger_setup import setup_daemon_logger
 from freqtrade.ohlcv_cache.persistence import FeatherPersistence
 from freqtrade.ohlcv_cache.protocol import PROTOCOL_VERSION, dumps, loads_request
-from freqtrade.ohlcv_cache.store import CandleSeries, CandleStore
+from freqtrade.ohlcv_cache.store import PARTIAL_GRACE_MS, CandleSeries, CandleStore
 
 
 logger = logging.getLogger("ftcache.daemon")
@@ -1414,6 +1414,35 @@ class Daemon:
             or "DDoSProtection" in msg
         )
 
+    @staticmethod
+    def _log_missing_marked(
+        series: CandleSeries, chunk: Gap, data: list, fetched_at_ms: int
+    ) -> None:
+        """Say so when a refetch did not return a candle that was marked partial.
+
+        The marker is cleared anyway (merge's `covered`) so it cannot loop; this only
+        makes the case visible, e.g. a delisted pair or a window the exchange trims.
+        """
+        if not series.partial_ts:
+            return
+        got = {int(r[0]) for r in data}
+        grace = PARTIAL_GRACE_MS + series.tf_ms
+        missing = [
+            t
+            for t in series.partial_ts
+            if chunk.start_ms <= t < chunk.end_ms and t + grace <= fetched_at_ms and t not in got
+        ]
+        if missing:
+            logger.info(
+                "refetch of %s %s [%d..%d): %d marked candle(s) not returned (first %d)",
+                series.pair,
+                series.timeframe,
+                chunk.start_ms,
+                chunk.end_ms,
+                len(missing),
+                min(missing),
+            )
+
     async def _fetch_chunk(
         self,
         series: CandleSeries,
@@ -1439,7 +1468,7 @@ class Daemon:
         fetched_at_ms = int(time.time() * 1000)
         # A refetch of a window that is entirely in the past must not be asked,
         # nor billed, as since..now.
-        until_ms = chunk.end_ms - 1 if chunk.end_ms <= fetched_at_ms else None
+        until_ms = chunk.end_ms if chunk.end_ms <= fetched_at_ms else None
         for attempt in range(max_retries + 1):
             try:
                 data = await fetcher.fetch_ohlcv(
@@ -1506,6 +1535,8 @@ class Daemon:
         # funding rates are never partial.
         track = series.candle_type != "funding_rate"
         covered = (chunk.start_ms, chunk.end_ms)
+        if track:
+            self._log_missing_marked(series, chunk, data, fetched_at_ms)
 
         if not data:
             if track:
@@ -1780,22 +1811,13 @@ class Daemon:
         offline tool has to race the daemon (which relaunches on demand).
         """
         series.partial_scanned = True
-        series.dirty = True
-        finer = [
-            s
-            for s in self.store.all()
-            if s.exchange == series.exchange
-            and s.trading_mode == series.trading_mode
-            and s.pair == series.pair
-            and s.candle_type == series.candle_type
-            and s.tf_ms < series.tf_ms
-            and series.tf_ms % s.tf_ms == 0
-        ]
+        finer = self.store.finer_than(series)
         if series.candle_type == "funding_rate":
             return
         found = detect_frozen(series, finer, now_ms)
         if found:
             series.partial_ts |= found
+            series.dirty = True  # persist the markers; nothing to write otherwise
             logger.info(
                 "legacy partial scan: %s %s flagged %d frozen candle(s) for refetch",
                 series.pair,

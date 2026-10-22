@@ -52,3 +52,66 @@ it is restarted, by anyone, for any reason. Nothing else has to be done in the d
    limiter (`legacy partial scan:` lines in `daemon.log`).
 4. `scripts/ftcache_flag_partials.py --root <copy of the persistence directory>` is a
    read-only estimate of what step 3 will find.
+
+## Persisted cache: timestamp unit bug (found in review, fixed with this change)
+
+`persistence._load_one` turned dates into ms with `astype("int64") // 10**6`, right only
+for nanosecond files. pandas 3 (the daemon's venv) writes millisecond files, so every
+such file loaded as 1970: `range_start_ms` sat in 1970, `compute_gaps` never created a
+prefix gap, and warmups/history were served truncated. Each restart then flushed the
+polluted state back to disk. Measured on a copy (2026-10-22): 1538 of 2482 persisted
+Hyperliquid series hold 4.13M rows dated 1970 and a handful of real rows.
+
+Fix: the unit is normalised explicitly (works on pandas 2.3.3 and 3.0.3), rows dated
+before 2017-01-01 are dropped at load with a warning (their real timestamps are lost),
+the range is recomputed from the clean rows so the prefix gap is refetched, and the
+writer always writes `timestamp[ms, tz=UTC]`.
+
+## Restart procedure
+
+Do not restart the daemon for anything else than a reason that justifies it; this one
+does (frozen candles served to bots, truncated histories). Restart ONCE.
+
+**Before**
+1. Merge the branch. Merging = deploying: the next relaunch (by anyone) runs the new code.
+2. Back up the persistence directory (the first flush rewrites cleaned files):
+   `cp -r ~/.freqtrade/ftcache/hyperliquid <backup dir>` (about 210 MB).
+3. Quiet window: equity/commodity markets closed (weekend), not during a 429 backoff
+   (`backoff=off` in the `STATS` line of `~/.freqtrade/ftcache/logs/daemon.log`).
+   Reconnection of the fleet (not the refetch) is the main cost: budget a long catch-up,
+   see your restart notes.
+
+**Cost of the history refetch** (estimate, `scripts/ftcache_restart_estimate.py` on a
+copy, request = 5000 candles, Hyperliquid weight: 20 per call + 1 per 60 candles,
+5000 candles per call; measured 2026-10-22):
+
+| Scope | Weight | At the full 1140/min budget |
+|---|---|---|
+| Series live-refreshed in the last 24 h (what bots ask for) | ~12 750 | ~11 min |
+| Static-whitelist bots' main + informative + funding series | ~28 700 (25 000 funding) | ~25 min |
+| Every persisted series (never reached: refetch is lazy) | ~392 000 | ~5.7 h |
+
+For comparison, restarting WITHOUT this loader fix makes all ~2190 millisecond files
+load as 1970: the whole cache is refetched.
+Baseline load before the restart: median 78 % of the 1140/min budget over 12 h (p90 82 %),
+so the refetch competes with the existing traffic; the figures above are a floor.
+
+**How it is paced.** The refetch is the prefix gap of a normal request, i.e. synchronous
+(not SWR), at the request's priority: live bot with `since_ms=None` HIGH, dry bots LOW,
+open-position pairs and bots in their init phase CRITICAL. The token bucket refills at
+19 weight/s (burst 150); non-critical grants wait while the last minute used more than
+80 % of the budget; strict priority with a starvation grant for lower bands, so LOW
+(dry) refreshes are delayed while HIGH/CRITICAL refetches run. A 429 triggers graduated
+backoff (NORMAL/LOW shed first). A client waiting more than 240 s gets `CacheTimedOut`
+and retries on its next cycle (it does not fall back to ccxt).
+
+**Restart**: `kill -TERM <daemon pid>`; the first bot request respawns it. Do not
+restart twice (each restart restarts the catch-up). Wait for a full bot cycle before
+concluding anything.
+
+**Check**
+- `daemon.log`: `dropping N row(s) dated before 2017` (expected for ~1538 series, once),
+  then `legacy partial scan: ... flagged N frozen candle(s)` lines as series are first read.
+- `STATS` line: `backoff=off`, `429s=` not moving, `w=` back under ~80 % after the catch-up,
+  `queue=` draining.
+- A bot's dataframe for a 1h/4h/1d pair has its full history again.
