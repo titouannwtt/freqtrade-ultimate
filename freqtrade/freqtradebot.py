@@ -66,6 +66,7 @@ from freqtrade.plugins.protectionmanager import ProtectionManager
 from freqtrade.position_audit import AuditLedger, safe_ledger_name
 from freqtrade.position_iso_guard import PositionIsoGuard
 from freqtrade.resolvers import ExchangeResolver, StrategyResolver
+from freqtrade.resting_exit import RestingExitManager, is_roi_tp
 from freqtrade.rpc import RPCManager
 from freqtrade.rpc.external_message_consumer import ExternalMessageConsumer
 from freqtrade.rpc.rpc_types import (
@@ -240,6 +241,9 @@ class FreqtradeBot(LoggingMixin):
             self._netting = NettingMetrics(self.config.get("bot_name", ""))
             # Asserts the exchange/book position arithmetic around every order.
             self._iso_guard = PositionIsoGuard(self.config, self.exchange, self._coordinator)
+            # Resting take-profit (`roi_tp`), inert unless the strategy implements
+            # `resting_exit_price`. See freqtrade/resting_exit.py.
+            self._resting_exit = RestingExitManager(self)
             # Per-bot append-only record of position-affecting events. Sharded by bot so
             # writes never contend, and kept out of the trade DB so corrections to the
             # working record cannot rewrite history. See freqtrade/position_audit/.
@@ -498,6 +502,8 @@ class FreqtradeBot(LoggingMixin):
             # First process current opened trades (positions)
             self.exit_positions(trades)
             Trade.commit()
+            # Place / re-price / withdraw the resting take-profit (strategy opt-in).
+            self._resting_exit.process()
         _cp("exits")
 
         # Check if we need to adjust our current positions before attempting to enter new trades.
@@ -1349,6 +1355,7 @@ class FreqtradeBot(LoggingMixin):
 
             # Cancel any stoploss orders still on the exchange
             trade = self.cancel_stoploss_on_exchange(trade)
+            self.cancel_leftover_orders_of_closed_trade(trade, reason="liquidation")
 
             # Close the trade at the liquidation price
             trade.exit_reason = ExitType.LIQUIDATION.value
@@ -3016,14 +3023,17 @@ class FreqtradeBot(LoggingMixin):
                 not_closed = order["status"] == "open" or fully_cancelled
 
                 if not_closed:
+                    # A resting take-profit has no timeout and is re-priced by
+                    # RestingExitManager only.
+                    resting_tp = is_roi_tp(open_order)
                     if fully_cancelled or (
-                        open_order
+                        not resting_tp
                         and self.strategy.ft_check_timed_out(trade, open_order, datetime.now(UTC))
                     ):
                         self.handle_cancel_order(
                             order, open_order, trade, constants.CANCEL_REASON["TIMEOUT"]
                         )
-                    else:
+                    elif not resting_tp:
                         self.replace_order(order, open_order, trade)
 
     def handle_cancel_order(
@@ -3220,6 +3230,36 @@ class FreqtradeBot(LoggingMixin):
 
                 elif order["side"] == trade.exit_side:
                     self.handle_cancel_exit(trade, order, open_order, reason)
+
+    def cancel_leftover_orders_of_closed_trade(
+        self, trade: Trade, reason: str = "trade closed"
+    ) -> None:
+        """
+        Cancel every non-stoploss order still open for a trade whose position is gone
+        (closed by a take-profit, a stop, a liquidation...). A reduce-only order left
+        resting could otherwise fill against the NEXT position on the same pair.
+        Does not go through update_trade_state: the trade is already closed.
+        """
+        for order in trade.open_orders:
+            try:
+                co = self.exchange.cancel_order_with_result(
+                    order.order_id, trade.pair, order.safe_remaining
+                )
+            except Exception:
+                logger.warning(
+                    f"Could not cancel leftover order {order.order_id} of closed {trade}.",
+                    exc_info=True,
+                )
+                continue
+            if (co.get("filled") or 0.0) > (order.filled or 0.0):
+                logger.warning(
+                    f"Leftover order {order.order_id} of closed {trade} filled "
+                    f"{co.get('filled')} before its cancellation: check the exchange position."
+                )
+            logger.info(f"Cancelled leftover order {order.order_id} of closed {trade}.")
+            order.ft_cancel_reason = reason
+            order.ft_is_open = False
+            order.status = co.get("status") or "canceled"
 
     def cancel_all_open_orders(self) -> None:
         """
@@ -3932,6 +3972,7 @@ class FreqtradeBot(LoggingMixin):
                 )
             if not trade.is_open:
                 self.cancel_stoploss_on_exchange(trade)
+                self.cancel_leftover_orders_of_closed_trade(trade)
             # Updating wallets when order is closed
             self.wallets.update()
         return trade
