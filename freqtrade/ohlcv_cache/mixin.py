@@ -13,6 +13,7 @@ Intercepts:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import threading
@@ -45,6 +46,17 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("ftcache.client")
+
+# Set while Exchange.get_historic_ohlcv() runs (download-data, FreqUI download,
+# plot of a history range). Those callers persist or plot candles for good, so
+# they must read the exchange itself: the daemon cache can hold a candle that
+# was fetched while it was still forming, and a historic (since_ms) request never
+# refreshes it (see CachedExchangeMixin.get_historic_ohlcv). A ContextVar is
+# inherited by the task run_until_complete() creates in the same thread, and is
+# invisible to the other requests handled concurrently.
+_FTCACHE_AUTHORITATIVE_FETCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ftcache_authoritative_fetch", default=False
+)
 
 
 class _LocalRateLimiter:
@@ -1383,6 +1395,25 @@ class CachedExchangeMixin:
         {CandleType.SPOT, CandleType.FUTURES, CandleType.MARK, CandleType.FUNDING_RATE}
     )
 
+    def get_historic_ohlcv(self, *args: Any, **kwargs: Any):
+        """Historic download that bypasses the daemon's candle cache.
+
+        Root cause of the stored partial candles (2026-04 onwards): the daemon
+        merges every fetch into its series, including the candle that is still
+        forming. For a historic request (since_ms set) compute_gaps() is called
+        with refresh_overlap_candles=0, so the cached tail is never refetched:
+        once a newer candle is appended, the forming one stays frozen in the
+        middle of the series and is served as if complete. download-data then
+        stores it, and its incremental start (after the last stored candle)
+        never rewrites it. Going straight to the exchange (rate-limited, LOW
+        priority, like backtest/hyperopt) restores the pre-daemon behaviour.
+        """
+        token = _FTCACHE_AUTHORITATIVE_FETCH.set(True)
+        try:
+            return super().get_historic_ohlcv(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            _FTCACHE_AUTHORITATIVE_FETCH.reset(token)
+
     async def _async_get_candle_history(
         self,
         pair: str,
@@ -1402,7 +1433,9 @@ class CachedExchangeMixin:
 
         # In offline mode (backtest/hyperopt), don't use daemon's OHLCV cache —
         # data is loaded from local files. But still rate-limit if ccxt is called.
-        if self._ftcache_rate_limit_only:
+        # Same for authoritative historic downloads (get_historic_ohlcv): the
+        # cache may hold a stale, never-refreshed forming candle.
+        if self._ftcache_rate_limit_only or _FTCACHE_AUTHORITATIVE_FETCH.get():
             client = self._ftcache_get_client()
             if client is not None:
                 deadline = time.monotonic() + self._OFFLINE_ACQUIRE_MAX_S
@@ -1441,7 +1474,7 @@ class CachedExchangeMixin:
                         now = time.monotonic()
                         if now - self._ftcache_last_wait_log_ts > self._WAIT_LOG_INTERVAL_S:
                             logger.info(
-                                "[backtest/hyperopt] OHLCV rate token for %s: "
+                                "[backtest/hyperopt/download] OHLCV rate token for %s: "
                                 "attempt %d, %.0fs remaining — live bots have priority",
                                 pair,
                                 attempt,

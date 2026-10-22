@@ -3519,3 +3519,113 @@ class TestReloadMarketsRefreshInterval:
         mixin._ftcache_acquire_sync.assert_called_once_with(
             priority=OhlcvCacheClient.HIGH, cost=20.0
         )
+
+
+# -------------------------------------------------------------------- historic download vs daemon cache
+
+
+class _FakeExchangeBase:
+    """Stands in for Exchange: direct (ccxt) fetch + the sync historic wrapper."""
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.direct_calls = 0
+
+    def ohlcv_candle_limit(self, timeframe, candle_type=None, since_ms=None):
+        return 100
+
+    async def _async_get_candle_history(self, pair, timeframe, candle_type, since_ms=None):
+        self.direct_calls += 1
+        # Fresh, complete candle straight from the exchange.
+        return pair, timeframe, candle_type, [[0, 1, 2, 0.5, 1.5, 32527.0]], True
+
+    async def _async_get_historic_ohlcv(self, pair, timeframe, since_ms, candle_type):
+        # Same shape as Exchange: one task per chunk, gathered.
+        res = await asyncio.gather(
+            *[self._async_get_candle_history(pair, timeframe, candle_type, since_ms)]
+        )
+        return res[0]
+
+    def get_historic_ohlcv(self, pair, timeframe, since_ms, candle_type):
+        return self.loop.run_until_complete(
+            self._async_get_historic_ohlcv(pair, timeframe, since_ms, candle_type)
+        )
+
+
+class _FakeCachedExchange(CachedExchangeMixin, _FakeExchangeBase):
+    pass
+
+
+class TestHistoricDownloadBypassesDaemonCache:
+    """Regression: download-data stored candles that were still forming.
+
+    The daemon serves a historic (since_ms) request from its series without ever
+    refetching the cached tail, so a candle cached while forming (volume 260
+    instead of 32527 for a BTC 1d) came back as if complete and was stored for
+    good. A historic download must read the exchange, not the shared cache.
+    """
+
+    def _make(self):
+        ex = _FakeCachedExchange()
+        client = AsyncMock(spec=OhlcvCacheClient)
+        client.acquire_rate_token = AsyncMock(return_value=None)
+        # What the daemon would serve: the frozen partial snapshot.
+        client.fetch = AsyncMock(
+            return_value=("BTC/USDC", "1d", CandleType.FUTURES, [[0, 1, 2, 0.5, 1.5, 260.6]], True)
+        )
+        ex._config = {"dry_run": True}
+        ex._ftcache_client = client
+        ex._ftcache_warned = False
+        ex._ftcache_open_pairs = frozenset()
+        ex._ftcache_init_complete = True
+        ex._ftcache_is_offline_mode = False
+        ex._ftcache_is_utility_mode = True
+        ex._ftcache_is_dry_run_mode = False
+        ex._ftcache_rate_limit_only = False
+        ex._ftcache_last_wait_log_ts = 0.0
+        ex._ftcache_stats = {}
+        return ex, client
+
+    def test_historic_download_reads_exchange_not_cache(self):
+        ex, client = self._make()
+        _, _, _, data, _ = ex.get_historic_ohlcv("BTC/USDC", "1d", 1_000, CandleType.FUTURES)
+        assert data[0][5] == 32527.0
+        assert ex.direct_calls == 1
+        client.fetch.assert_not_called()
+        # The fetch was still metered by the daemon's rate limiter (LOW priority).
+        client.acquire_rate_token.assert_awaited()
+        assert client.acquire_rate_token.await_args.kwargs["priority"] == OhlcvCacheClient.LOW
+
+    def test_live_refresh_still_uses_cache(self):
+        ex, client = self._make()
+        ex.loop.run_until_complete(
+            ex._async_get_candle_history("BTC/USDC", "1d", CandleType.FUTURES, None)
+        )
+        client.fetch.assert_awaited_once()
+        assert ex.direct_calls == 0
+
+    def test_bypass_flag_is_reset_after_download(self):
+        from freqtrade.ohlcv_cache.mixin import _FTCACHE_AUTHORITATIVE_FETCH
+
+        ex, client = self._make()
+        ex.get_historic_ohlcv("BTC/USDC", "1d", 1_000, CandleType.FUTURES)
+        assert _FTCACHE_AUTHORITATIVE_FETCH.get() is False
+        ex.loop.run_until_complete(
+            ex._async_get_candle_history("BTC/USDC", "1d", CandleType.FUTURES, None)
+        )
+        client.fetch.assert_awaited_once()
+
+    def test_bypass_flag_is_reset_when_download_raises(self):
+        from freqtrade.ohlcv_cache.mixin import _FTCACHE_AUTHORITATIVE_FETCH
+
+        ex, _ = self._make()
+        ex.direct_calls = 0
+
+        async def boom(*a, **k):
+            raise RuntimeError("exchange down")
+
+        ex._async_get_candle_history_direct = boom
+        ex._async_get_historic_ohlcv = boom
+        with pytest.raises(RuntimeError):
+            ex.get_historic_ohlcv("BTC/USDC", "1d", 1_000, CandleType.FUTURES)
+        assert _FTCACHE_AUTHORITATIVE_FETCH.get() is False
