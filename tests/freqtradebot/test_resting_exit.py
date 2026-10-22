@@ -745,3 +745,31 @@ def test_resting_exit_runs_as_trading_call(mocker, default_conf_usdt, book):
     assert not is_trading_call()
     bot._resting_exit.process()
     assert seen == [True]
+
+
+def test_tp_grows_to_the_full_position_once_the_wallet_catches_up_after_a_dca(
+    mocker, default_conf_usdt, book
+):
+    """Seen live (PAXG, 2026-10-22): after a DCA fill the cached wallet position was still the
+    old one, the TP was re-placed for half the position and stayed so."""
+    conf = deepcopy(default_conf_usdt)
+    conf["trading_mode"] = "futures"
+    conf["margin_mode"] = "isolated"
+    bot = _bot(mocker, conf, {"price": 2.1})
+    bot.exchange._ft_has["orders_are_account_scoped"] = True
+    trade = _open_trade()
+    trade.trading_mode = TradingMode.FUTURES
+    Trade.commit()
+    owned = mocker.patch.object(bot.wallets, "get_owned", return_value=trade.amount / 2)
+    bot._resting_exit.process()
+    assert book.created[-1]["amount"] == pytest.approx(trade.amount / 2)
+    for _ in range(3):  # wallet still stale: no churn
+        bot._resting_exit.process()
+    assert len(book.created) == 1
+    owned.return_value = trade.amount  # positions refreshed
+    bot._resting_exit.process()
+    assert len(book.created) == 2
+    assert book.created[-1]["amount"] == pytest.approx(trade.amount)
+    for _ in range(3):
+        bot._resting_exit.process()
+    assert len(book.created) == 2

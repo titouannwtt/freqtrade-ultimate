@@ -76,9 +76,6 @@ class RestingExitManager:
         self._bot = bot
         self._refusal_logged = False
         self._loop = 0
-        # order_id -> trade.amount when the TP was placed (the order itself may carry less:
-        # the exit amount is capped to the wallet position on account-scoped exchanges).
-        self._placed_for_amount: dict[str, float] = {}
         self._last_amount_replace: dict[int, int] = {}
         self._failure_warned_at: dict[int, float] = {}
 
@@ -158,11 +155,24 @@ class RestingExitManager:
         tick = self._bot.exchange.price_get_one_pip(trade.pair, price)
         return abs(tp.safe_placement_price - price) < tick / 2
 
+    def _exit_amount_now(self, trade: Trade) -> float:
+        """The amount an exit placed now would carry: trade.amount, capped (quietly) to the
+        wallet position on account-scoped exchanges, as `_clamp_exit_to_wallet_position`."""
+        amount = trade.amount
+        try:
+            if not self._bot.exchange.get_option("orders_are_account_scoped", False):
+                return amount
+            owned = abs(float(self._bot.wallets.get_owned(trade.pair, trade.base_currency) or 0))
+        except Exception:
+            return amount
+        return amount if owned <= 0 or owned >= amount else owned
+
     def _same_amount(self, trade: Trade, tp: Order) -> bool:
-        # Compare with trade.amount as it was when this TP was sent, not with the order's
-        # own amount (capped to the wallet position, it may legitimately be smaller).
-        placed_for = self._placed_for_amount.setdefault(tp.order_id, trade.amount)
-        return isclose(placed_for, trade.amount, rel_tol=1e-9)
+        # Compare the order with what an exit would carry NOW. Right after a DCA fill the
+        # wallet position can still be the old one (positions are cached), so the TP is first
+        # placed for the old amount; comparing with trade.amount at placement would then
+        # keep that half-size TP forever. A capped amount that stays capped does not churn.
+        return isclose(tp.safe_amount, self._exit_amount_now(trade), rel_tol=1e-6)
 
     # ------------------------------------------------------------------------------------
     def _process_trade(self, trade: Trade) -> None:
@@ -204,8 +214,6 @@ class RestingExitManager:
         order = self._bot.exchange.fetch_order(tp.order_id, trade.pair)
         cancelled = self._bot.handle_cancel_exit(trade, order, tp, CANCEL_REASON_ROI_TP)
         Trade.commit()
-        if not tp.ft_is_open:
-            self._placed_for_amount.pop(tp.order_id, None)
         return cancelled
 
     def _place(self, trade: Trade, price: float) -> bool:
@@ -217,8 +225,4 @@ class RestingExitManager:
             skip_custom_exit_price=True,
         )
         Trade.commit()
-        if placed:
-            tp = next((o for o in trade.open_orders if is_roi_tp(o)), None)
-            if tp is not None:
-                self._placed_for_amount[tp.order_id] = trade.amount
         return placed
