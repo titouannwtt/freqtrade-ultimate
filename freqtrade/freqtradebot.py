@@ -3753,6 +3753,10 @@ class FreqtradeBot(LoggingMixin):
         """
         Sends rpc notification when a sell occurred.
         """
+        # A resting take-profit is placed and re-priced several times per trade: only its
+        # fill is worth a notification, not the bookkeeping around it.
+        if not fill and is_roi_tp(order):
+            return
         # Use cached rates here - it was updated seconds ago.
         current_rate = (
             self.exchange.get_rate(trade.pair, side="exit", is_short=trade.is_short, refresh=False)
@@ -3818,6 +3822,9 @@ class FreqtradeBot(LoggingMixin):
         # reconciles many stale limit orders from simulated history and the resulting cancel /
         # replace cycles would flood the UI with noise (it's bookkeeping, not live signal).
         if trade.enter_tag and trade.enter_tag.startswith("[replay]"):
+            return
+        # Withdrawing or re-pricing a resting take-profit is bookkeeping, not an event.
+        if is_roi_tp(trade.select_order_by_order_id(order_id)):
             return
         if trade.exit_order_status == reason:
             return

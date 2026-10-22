@@ -487,3 +487,24 @@ def test_manager_skips_closed_trades(mocker, default_conf_usdt, book):
     Trade.commit()
     RestingExitManager(bot).process([trade])
     assert book.created == []
+
+
+def test_tp_bookkeeping_not_notified_only_fill(mocker, default_conf_usdt, book):
+    from freqtrade.enums import RPCMessageType
+
+    target = {"price": 2.1}
+    bot = _bot(mocker, default_conf_usdt, target)
+    send = mocker.patch.object(bot.rpc, "send_msg")
+    trade = _open_trade()
+    bot._resting_exit.process()
+    target["price"] = 2.05
+    bot._resting_exit.process()
+    sent = [c.args[0]["type"] for c in send.call_args_list]
+    assert RPCMessageType.EXIT not in sent
+    assert RPCMessageType.EXIT_CANCEL not in sent
+
+    book.fill(_tp(trade).order_id)
+    bot.manage_open_orders()
+    assert not trade.is_open
+    sent = [c.args[0]["type"] for c in send.call_args_list]
+    assert RPCMessageType.EXIT_FILL in sent
