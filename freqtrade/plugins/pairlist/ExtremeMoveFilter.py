@@ -15,6 +15,7 @@ regression R²), this filter catches short, violent moves regardless of how
 """
 
 import logging
+import time
 
 from pandas import DataFrame
 
@@ -22,6 +23,7 @@ from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
+from freqtrade.plugins.pairlist.swr_verdicts import StaleVerdictStore, swr_parameters
 from freqtrade.util import FtTTLCache
 
 
@@ -45,6 +47,21 @@ class ExtremeMoveFilter(IPairList):
         self._max_down_pct = self._pairlistconfig.get("max_down_pct", 0)
         self._refresh_period = self._pairlistconfig.get("refresh_period", 3600)
         self._def_candletype = self._config["candle_type_def"]
+
+        # Opt-in stale-while-revalidate, see swr_verdicts.py. Off: behaviour is unchanged.
+        self._swr: StaleVerdictStore | None = None
+        if self._pairlistconfig.get("stale_while_revalidate", False):
+            self._swr = StaleVerdictStore(
+                refresh_period=self._refresh_period,
+                max_per_cycle=self._pairlistconfig.get("max_recompute_per_cycle", 2),
+                quiet_after_close_s=self._pairlistconfig.get("quiet_after_close_s", 0),
+                jitter_pct=self._pairlistconfig.get("swr_jitter_pct", 0.2),
+            )
+            error = StaleVerdictStore.validate(
+                self._swr.max_per_cycle, self._swr.quiet_after_close_s, self._swr.jitter_pct
+            )
+            if error:
+                raise OperationalException(f"ExtremeMoveFilter: {error}")
 
         self._pair_cache: FtTTLCache = FtTTLCache(maxsize=1000, ttl=self._refresh_period)
 
@@ -129,12 +146,16 @@ class ExtremeMoveFilter(IPairList):
                 ),
             },
             **IPairList.refresh_period_parameter(),
+            **swr_parameters(),
         }
 
     def filter_pairlist(self, pairlist: list[str], tickers: Tickers) -> list[str]:
         """
         Filter pairlist - remove pairs with an extreme recent move.
         """
+        if self._swr is not None:
+            return self._filter_pairlist_swr(pairlist, self._swr)
+
         if self._shared_client:
             locally_uncached = [p for p in pairlist if p not in self._pair_cache]
             if locally_uncached:
@@ -179,6 +200,74 @@ class ExtremeMoveFilter(IPairList):
 
         return resulting_pairlist
 
+    def _filter_pairlist_swr(self, pairlist: list[str], swr: StaleVerdictStore) -> list[str]:
+        """
+        Stale-while-revalidate variant of filter_pairlist: serve the last verdict of each
+        pair and recompute only a bounded number of them per call (see swr_verdicts.py).
+        A pair without any verdict yet is removed until its verdict has been computed.
+        """
+        now = swr.now()
+        missing, due = swr.classify(pairlist, now)
+
+        if self._shared_client and (missing or due):
+            shared = self._shared_client.mget("ExtremeMoveFilter", self._params_hash, missing + due)
+            for p, val in shared.items():
+                if val is not None:
+                    # Entries written without a timestamp are assumed one period old.
+                    computed_at = val.get("ts", now - self._refresh_period)
+                    swr.adopt(p, val["exclude"], computed_at)
+            missing, due = swr.classify(pairlist, now)
+
+        to_compute = swr.select(missing, due, now)
+        if to_compute:
+            started = time.monotonic()
+            needed_pairs: ListPairsWithTimeframes = [
+                (p, "1d", self._def_candletype) for p in to_compute
+            ]
+            candles = self._exchange.refresh_ohlcv_with_cache(
+                needed_pairs, lookback_period=self._lookback_days
+            )
+            computed_at = swr.now()
+            newly_computed: dict[str, dict] = {}
+            for p in to_compute:
+                verdict = self._compute_move(p, candles.get((p, "1d", self._def_candletype), None))
+                if verdict is None:
+                    swr.fail(p, computed_at)
+                else:
+                    swr.put(p, bool(verdict), computed_at)
+                    newly_computed[p] = {"exclude": bool(verdict), "ts": computed_at}
+
+            if newly_computed and self._shared_client:
+                self._shared_client.mput(
+                    "ExtremeMoveFilter",
+                    self._params_hash,
+                    newly_computed,
+                    ttl=self._refresh_period,
+                )
+            elapsed = time.monotonic() - started
+            pending = len(missing) + len(due) - len(to_compute)
+            (logger.info if elapsed >= 1 or pending else logger.debug)(
+                f"ExtremeMoveFilter SWR: recomputed {len(to_compute)} pairs "
+                f"({len(missing)} missing, {len(due)} due) in {elapsed:.2f}s, "
+                f"{pending} still waiting."
+            )
+        swr.mark_warm(pairlist)
+
+        resulting_pairlist: list[str] = []
+        for p in pairlist:
+            should_exclude = swr.get(p)
+            if should_exclude is None:
+                if swr.is_blocked(p, swr.now()):
+                    self.log_once(f"Removed {p} from whitelist, no candles found.", logger.info)
+                else:
+                    self.log_once(
+                        f"Removed {p} from whitelist, move verdict not computed yet.",
+                        logger.info,
+                    )
+            elif not should_exclude:
+                resulting_pairlist.append(p)
+        return resulting_pairlist
+
     def _check_move(self, pair: str, candles: DataFrame | None) -> bool | None:
         """
         Check if a pair had an extreme move over the lookback.
@@ -189,13 +278,22 @@ class ExtremeMoveFilter(IPairList):
         if cached is not None:
             return cached
 
+        should_exclude = self._compute_move(pair, candles)
+        if should_exclude is not None:
+            self._pair_cache[pair] = should_exclude
+        return should_exclude
+
+    def _compute_move(self, pair: str, candles: DataFrame | None) -> bool | None:
+        """
+        Compute the verdict from the candles, without any cache.
+        Same return values as _check_move.
+        """
         if candles is None or candles.empty or len(candles) < 2:
             return None
 
         first_close = candles["close"].iloc[0]
         last_close = candles["close"].iloc[-1]
         if first_close <= 0:
-            self._pair_cache[pair] = False
             return False
 
         change_pct = (last_close / first_close - 1) * 100
@@ -218,5 +316,4 @@ class ExtremeMoveFilter(IPairList):
                 logger.info,
             )
 
-        self._pair_cache[pair] = should_exclude
         return should_exclude
