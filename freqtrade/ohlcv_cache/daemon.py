@@ -160,6 +160,7 @@ class TokenBucket:
         exchange: str = "",
         prime_reserve_pct: float = DEFAULT_PRIME_RESERVE_PCT,
         prime_cap_weight_per_min: float = DEFAULT_PRIME_CAP_WEIGHT_PER_MIN,
+        prime_global_cap_weight_per_min: float = 0.0,
     ) -> None:
         self.rate_per_s = rate_per_s
         self.burst = burst
@@ -190,6 +191,11 @@ class TokenBucket:
         self.prime_enabled = False
         self.prime_reserve_pct = float(prime_reserve_pct)
         self.prime_cap_weight_per_min = float(prime_cap_weight_per_min)
+        # Ceiling for ALL priority bots together; 0 = ``prime_reserve_pct`` x the weight
+        # budget, so what PRIME can take never exceeds the reserve it is entitled to.
+        self.prime_global_cap_weight_per_min = float(prime_global_cap_weight_per_min)
+        self._prime_global_window: deque[tuple[float, float]] = deque()
+        self.prime_global_demotions = 0
         self._prime_windows: dict[str, deque[tuple[float, float]]] = {}
         self.prime_weight_by_bot: dict[str, float] = {}
         self.prime_demotions = 0
@@ -365,12 +371,24 @@ class TokenBucket:
             return False
         return self.weight_used_last_min > self.weight_budget_per_min * self.gate_ratio
 
-    def resolve_prime(self, priority: int, cost: float, bot_id: str | None) -> int:
-        """Apply the per-bot PRIME cap: over it the request is demoted, never refused.
+    @property
+    def prime_global_cap(self) -> float:
+        """Weight per minute all priority bots may take together in the PRIME band."""
+        if self.prime_global_cap_weight_per_min > 0:
+            return self.prime_global_cap_weight_per_min
+        if self.weight_mode and self.weight_budget_per_min > 0:
+            return self.weight_budget_per_min * self.prime_reserve_pct
+        return 0.0  # flat mode: no weight, no global ceiling
 
-        The window counts weight at request time. A demoted request is served as CRITICAL
-        (still ahead of every other band, still outside the weight gate), so the cap bounds
-        what one runaway bot can take from the top band without ever delaying an order.
+    def resolve_prime(self, priority: int, cost: float, bot_id: str | None) -> int:
+        """Apply the PRIME caps: over either of them the request is demoted, never refused.
+
+        Two ceilings, both on the weight counted at request time over 60 s: the one of
+        the requesting bot (``prime_cap_weight_per_min``) and the one of all priority bots
+        together (``prime_global_cap``, inside the reserve). A demoted request is served
+        as CRITICAL (still ahead of every other band, still outside the weight gate), so
+        the caps bound what runaway bots can take from the top band without ever delaying
+        an order.
         """
         if priority >= self.CRITICAL:
             return priority
@@ -378,29 +396,63 @@ class TokenBucket:
         if not bot_id or self.prime_cap_weight_per_min <= 0:
             return priority
         now = time.monotonic()
-        window = self._prime_windows.setdefault(bot_id, deque())
         cutoff = now - 60.0
+        window = self._prime_windows.setdefault(bot_id, deque())
         while window and window[0][0] < cutoff:
             window.popleft()
         used = sum(c for _, c in window)
+        global_cap = self.prime_global_cap
+        gwindow = self._prime_global_window
+        while gwindow and gwindow[0][0] < cutoff:
+            gwindow.popleft()
+        global_used = sum(c for _, c in gwindow)
+        if global_cap > 0 and global_used + cost > global_cap:
+            self.prime_global_demotions += 1
+            self._demote(bot_id, now, "all priority bots", global_used, global_cap)
+            return self.CRITICAL
         if used + cost > self.prime_cap_weight_per_min:
-            self.prime_demotions += 1
-            self.prime_demotions_by_bot[bot_id] = self.prime_demotions_by_bot.get(bot_id, 0) + 1
-            last = self._prime_demotion_logged_at.get(bot_id, 0.0)
-            if now - last >= 30.0:
-                self._prime_demotion_logged_at[bot_id] = now
-                logger.warning(
-                    "PRIME cap: %s spent %.0f weight in 60s (cap %.0f) — demoting to CRITICAL "
-                    "(%d demotions so far)",
-                    bot_id,
-                    used,
-                    self.prime_cap_weight_per_min,
-                    self.prime_demotions_by_bot[bot_id],
-                )
+            self._demote(bot_id, now, bot_id, used, self.prime_cap_weight_per_min)
             return self.CRITICAL
         window.append((now, cost))
+        gwindow.append((now, cost))
         self.prime_weight_by_bot[bot_id] = self.prime_weight_by_bot.get(bot_id, 0.0) + cost
         return priority
+
+    def _demote(self, bot_id: str, now: float, who: str, used: float, cap: float) -> None:
+        self.prime_demotions += 1
+        self.prime_demotions_by_bot[bot_id] = self.prime_demotions_by_bot.get(bot_id, 0) + 1
+        last = self._prime_demotion_logged_at.get(bot_id, 0.0)
+        if now - last >= 30.0:
+            self._prime_demotion_logged_at[bot_id] = now
+            logger.warning(
+                "PRIME cap: %s spent %.0f weight in 60s (cap %.0f) — demoting %s to CRITICAL "
+                "(%d demotions so far)",
+                who,
+                used,
+                cap,
+                bot_id,
+                self.prime_demotions,
+            )
+
+    def _ceiling_wait(self, cost: float) -> float:
+        """Seconds until ``cost`` fits under 100 % of the weight budget (0 = it fits now).
+
+        The budget is the one the exchange enforces (here with its safety margin): a PRIME
+        or CRITICAL grant that would push the sliding window past it waits for the oldest
+        entries to leave the window instead of provoking the 429 it is meant to avoid.
+        """
+        if not (self.weight_mode and self.weight_budget_per_min > 0):
+            return 0.0
+        excess = self.weight_used_last_min + cost - self.weight_budget_per_min
+        if excess <= 0:
+            return 0.0
+        now = time.monotonic()
+        freed = 0.0
+        for ts, entry_cost in self._weight_window:
+            freed += entry_cost
+            if freed >= excess:
+                return max(0.0, ts + 60.0 - now)
+        return 60.0
 
     def _note_grant(self, priority: int, cost: float, requested_at: float) -> None:
         now = time.monotonic()
@@ -676,7 +728,11 @@ class TokenBucket:
                     self._refill()
                     if now - self._last_reap >= self._REAP_INTERVAL_S:
                         self._reap_dead_waiters()
-                    over_gate = (not in_backoff) and self._over_gate(self.HIGH)
+                    # Disarmed (no priority bot registered): the historical selection, with
+                    # the starvation share free to pick any lower band.
+                    over_gate = (
+                        self.prime_enabled and (not in_backoff) and self._over_gate(self.HIGH)
+                    )
                     selected = self._select_next(over_gate=over_gate)
                     if selected is not None:
                         index, entry = selected
@@ -686,7 +742,18 @@ class TokenBucket:
                         if entry[4].done():
                             self._remove_at(index)
                             continue
-                        if self.tokens >= cost:
+                        # PRIME (and, once a priority bot is registered, CRITICAL) are exempt
+                        # from the gate but not from the exchange's own ceiling: wait for the
+                        # window to decay (wakeable, like the fast path of ``acquire``).
+                        ceiling_wait = (
+                            self._ceiling_wait(cost)
+                            if entry[0] < self.CRITICAL
+                            or (entry[0] == self.CRITICAL and self.prime_enabled)
+                            else 0.0
+                        )
+                        if ceiling_wait > 0:
+                            pause = min(max(ceiling_wait, 0.05), 5.0)
+                        elif self.tokens >= cost:
                             self._remove_at(index)
                             if index == 0:
                                 self._grants_since_yield += 1
@@ -1340,9 +1407,15 @@ class Daemon:
         self._prime_cap_weight_per_min = float(
             global_cfg.get("prime_cap_weight_per_min", TokenBucket.DEFAULT_PRIME_CAP_WEIGHT_PER_MIN)
         )
+        self._prime_global_cap_weight_per_min = float(
+            global_cfg.get("prime_global_cap_weight_per_min", 0.0)
+        )
         self._prime_swr_max_stale_candles = int(global_cfg.get("prime_swr_max_stale_candles", 1))
-        self._prime_acquire_max_wait_s = float(global_cfg.get("prime_acquire_max_wait_s", 600.0))
-        self._prime_sync_fill_max_s = float(global_cfg.get("prime_sync_fill_max_s", 20.0))
+        self._prime_acquire_max_wait_s = float(global_cfg.get("prime_acquire_max_wait_s", 100.0))
+        self._prime_sync_fill_max_s = float(global_cfg.get("prime_sync_fill_max_s", 5.0))
+        self._prime_sync_fill_window_s = float(global_cfg.get("prime_sync_fill_window_s", 30.0))
+        # bot id -> monotonic time of its last synchronous fill (see ``_handle_fetch``)
+        self._prime_sync_fill_at: dict[str, float] = {}
         self._swr_inflight: set = set()  # series keys with a background refresh pending
         self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
         self._open_pos_memo: dict[str, tuple[float, set]] = {}  # exchange -> (ts, symbols)
@@ -1465,6 +1538,7 @@ class Daemon:
                 exchange=exchange,
                 prime_reserve_pct=self._prime_reserve_pct,
                 prime_cap_weight_per_min=self._prime_cap_weight_per_min,
+                prime_global_cap_weight_per_min=self._prime_global_cap_weight_per_min,
             )
             b.prime_enabled = self.registry.priority_count(exchange) > 0
             self.budgets[exchange] = b
@@ -1593,6 +1667,8 @@ class Daemon:
                     "gate_pct": round(bucket.gate_ratio * 100, 1),
                     "reserve_pct": round(bucket.prime_reserve_pct * 100, 1),
                     "cap_weight_per_min": bucket.prime_cap_weight_per_min,
+                    "global_cap_weight_per_min": bucket.prime_global_cap,
+                    "global_demotions": bucket.prime_global_demotions,
                     "demotions": bucket.prime_demotions,
                     "demotions_by_bot": dict(bucket.prime_demotions_by_bot),
                     "weight_by_bot": {
@@ -1844,9 +1920,11 @@ class Daemon:
         capital = float(req.get("capital", 0.0))
         # The candles of a priority bot are not PRIME (the budget cannot afford a hundred
         # REST candle reads ahead of the fleet's orders) but they lead THEIR band: the
-        # capital tie-break of the heap is made to rank them first.
+        # capital tie-break of the heap is made to rank them first. Not in CRITICAL or
+        # above: there the bonus would put a candle read ahead of other bots' orders and
+        # stops, which share that band and are ranked by capital.
         prime_bot = self._is_prime_bot(req, conn_id)
-        if prime_bot:
+        if prime_bot and priority > TokenBucket.CRITICAL:
             capital += self._PRIME_CAPITAL_BONUS
 
         series = self.store.get_or_create(
@@ -2028,20 +2106,32 @@ class Daemon:
             capital,
         )
         if prime_hot and had_any_cache:
-            # Too stale to serve (see above): fill synchronously, but never hold a priority
-            # bot's cycle longer than ``prime_sync_fill_max_s``. Past it the stale series is
-            # served and the fill finishes in the background.
+            # Too stale to serve (see above). The client sends its requests one after the
+            # other on one connection, so a synchronous wait stacks: twenty stale series at
+            # a few seconds each would hold the bot's cycle for minutes. Hence a budget per
+            # bot: ONE synchronous fill (at most ``prime_sync_fill_max_s``) per
+            # ``prime_sync_fill_window_s``; the other stale series are served stale and
+            # filled in the background, as for any bot.
             fill_task = asyncio.ensure_future(fill)
-            done, _ = await asyncio.wait({fill_task}, timeout=self._prime_sync_fill_max_s)
+            bot_key = self._bot_key(conn_id)
+            now_mono = time.monotonic()
+            last_sync = self._prime_sync_fill_at.get(bot_key)
+            if last_sync is not None and now_mono - last_sync < self._prime_sync_fill_window_s:
+                done: set = set()
+            else:
+                self._prime_sync_fill_at[bot_key] = now_mono
+                done, _ = await asyncio.wait({fill_task}, timeout=self._prime_sync_fill_max_s)
             if not done:
                 self._swr_tasks.add(fill_task)
                 fill_task.add_done_callback(self._swr_tasks.discard)
                 series.hits += 1
                 self.stats.cache_swr += 1
                 logger.info(
-                    "priority bot fill of %s %s still running after %.0fs — serving stale",
+                    "priority bot fill of %s %s not served synchronously (budget: one per "
+                    "%.0fs, at most %.0fs) — serving stale, filling in the background",
                     pair,
                     timeframe,
+                    self._prime_sync_fill_window_s,
                     self._prime_sync_fill_max_s,
                 )
                 return self._ok(req["req_id"], series, start_ms, end_ms, t0, served_from="stale")
@@ -2283,6 +2373,15 @@ class Daemon:
         cost = float(req.get("cost", default_weight))
         budget = self._get_budget(exchange)
         self.stats.acquire_total += 1
+        # Weight a priority bot spent without a token (its loop lock was busy for too long
+        # or the daemon was unreachable): booked now so the window the fleet is paced on
+        # includes it. Bounded: a bot cannot book more than one burst per request.
+        try:
+            reported = float(req.get("reported_weight") or 0.0)
+        except (TypeError, ValueError):
+            reported = 0.0
+        if reported > 0:
+            budget.record_external_weight(min(reported, budget.burst))
         # A PRIME request is never abandoned by the daemon on the 90 s fleet deadline: the
         # bot that sent it is trading. (The client still gives up after its own timeout.)
         max_wait = (

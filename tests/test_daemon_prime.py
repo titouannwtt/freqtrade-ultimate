@@ -201,13 +201,12 @@ def test_a_starvation_yield_cannot_leak_through_the_gate():
 # -------------------- (a) urgent wake
 
 
-@pytest.mark.parametrize("over_budget", [False, True], ids=["fast_path", "queued"])
-def test_prime_arriving_during_a_gate_wait_is_served_in_under_100ms(over_budget):
+def test_prime_arriving_during_a_gate_wait_is_served_in_under_100ms():
     """(a) The head is a gated HIGH asleep for >= 1 s; a PRIME must not wait for it."""
 
     async def scenario():
         b = _bucket(armed=True)
-        _fill_window(b, BUDGET * (1.02 if over_budget else 0.90))
+        _fill_window(b, BUDGET * 0.90)
         gated = asyncio.ensure_future(b.acquire(2.0, priority=TokenBucket.HIGH))
         await asyncio.sleep(0.15)  # the drain loop is now asleep on the gate
         assert b._drain_task is not None and not b._drain_task.done()
@@ -533,7 +532,10 @@ def test_defaults_ship_the_documented_prime_settings():
     assert GLOBAL_DEFAULTS["prime_reserve_pct"] == 0.25
     assert GLOBAL_DEFAULTS["prime_cap_weight_per_min"] == 150
     assert GLOBAL_DEFAULTS["prime_swr_max_stale_candles"] == 1
-    assert GLOBAL_DEFAULTS["prime_acquire_max_wait_s"] == 600
+    assert GLOBAL_DEFAULTS["prime_acquire_max_wait_s"] == 100
+    assert GLOBAL_DEFAULTS["prime_sync_fill_max_s"] == 5
+    assert GLOBAL_DEFAULTS["prime_sync_fill_window_s"] == 30
+    assert GLOBAL_DEFAULTS["prime_global_cap_weight_per_min"] == 0
     d = _daemon()
     b = d._get_budget("hyperliquid")
     assert b.prime_reserve_pct == 0.25 and b.prime_cap_weight_per_min == 150
@@ -808,5 +810,346 @@ def test_the_central_positions_fetch_is_booked_in_the_weight_window():
         d._shutdown_event.set()
         await asyncio.wait_for(task, timeout=2)
         assert bucket.weight_used_last_min > before
+
+    asyncio.run(scenario())
+
+
+# -------------------- independent review fixes
+
+
+def _tight_window(b: TokenBucket, weight: float, first_leaves_in: float = 0.3) -> None:
+    """A window at ``weight`` whose ten entries leave it one after the other, 0.1 s apart."""
+    now = time.monotonic()
+    for i in range(10):
+        b._weight_window.append((now - 60.0 + first_leaves_in + i * 0.1, weight / 10))
+    b._weight_used_last_min = weight
+
+
+def test_prime_and_critical_never_push_the_window_past_the_budget():
+    """Review 2: the drain loop granted PRIME and CRITICAL with the window already full
+    (a repro reached 1420/1140). They now wait for the oldest entries to leave."""
+
+    async def scenario():
+        b = _bucket(armed=True)
+        _tight_window(b, BUDGET)  # 100 % used
+        peak = 0.0
+        started = time.monotonic()
+        first_grant_after = None
+        for i in range(20):
+            band = TokenBucket.PRIME if i % 2 == 0 else TokenBucket.CRITICAL
+            kw = {"bot_id": "multi"} if band == TokenBucket.PRIME else {}
+            await asyncio.wait_for(b.acquire(2.0, priority=band, **kw), timeout=10)
+            if first_grant_after is None:
+                first_grant_after = time.monotonic() - started
+            peak = max(peak, b.weight_used_last_min)
+        await _stop(b)
+        return peak, first_grant_after
+
+    peak, first_grant_after = asyncio.run(scenario())
+    assert peak <= BUDGET + 1e-6, f"window reached {peak:.0f}/{BUDGET}"
+    assert first_grant_after >= 0.25, "the first grant waited for the window to decay"
+
+
+def test_the_ceiling_wait_does_not_hold_the_bucket_lock():
+    async def scenario():
+        b = _bucket(armed=True)
+        _tight_window(b, BUDGET, first_leaves_in=1.5)
+        task = asyncio.ensure_future(b.acquire(2.0, priority=TokenBucket.PRIME, bot_id="multi"))
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        assert not b._lock.locked(), "the pause happens outside the lock"
+        await asyncio.wait_for(task, timeout=5)
+        await _stop(b)
+
+    asyncio.run(scenario())
+
+
+def test_without_a_priority_bot_critical_is_not_held_by_the_ceiling():
+    """Review 10: disarmed, the bucket behaves as it always did (CRITICAL passes)."""
+
+    async def scenario():
+        b = _bucket(armed=False)
+        _tight_window(b, BUDGET, first_leaves_in=5.0)
+        started = time.monotonic()
+        await asyncio.wait_for(b.acquire(2.0, priority=TokenBucket.CRITICAL), timeout=2)
+        assert time.monotonic() - started < 0.5
+        await _stop(b)
+
+    asyncio.run(scenario())
+
+
+def test_the_ceiling_wait_computation():
+    b = _bucket(armed=True)
+    assert b._ceiling_wait(10.0) == 0.0
+    _tight_window(b, BUDGET, first_leaves_in=0.5)
+    assert b._ceiling_wait(1.0) == pytest.approx(0.5, abs=0.1)  # first entry frees 114
+    assert b._ceiling_wait(200.0) == pytest.approx(0.6, abs=0.1)  # needs two entries
+    flat = TokenBucket(rate_per_s=5.0, burst=10.0, exchange="x")
+    assert flat._ceiling_wait(1000.0) == 0.0, "no weight mode, no ceiling"
+
+
+def _differential_order(bucket_cls) -> list[str]:
+    """Order in which a CRITICAL flood and two NORMAL waiters are served over the gate."""
+
+    async def scenario():
+        b = bucket_cls(
+            rate_per_s=19.0,
+            burst=150.0,
+            weight_mode=True,
+            weight_budget_per_min=BUDGET,
+            exchange="hyperliquid",
+        )
+        b._POST_BACKOFF_MAX_BURST = 0  # no 2 s spacing: the order is what is compared
+        _fill_window(b, BUDGET * 0.85)  # above the 80 % gate, below the ceiling
+        order: list[str] = []
+
+        def tag(name):
+            return lambda fut: None if fut.cancelled() else order.append(name)
+
+        waiters = []
+        for i in range(8):
+            fut = _enqueue(b, TokenBucket.CRITICAL, capital=100.0 - i)
+            fut.add_done_callback(tag(f"C{i}"))
+            waiters.append(fut)
+        for i in range(2):
+            fut = _enqueue(b, TokenBucket.NORMAL, capital=50.0 - i)
+            fut.add_done_callback(tag(f"N{i}"))
+            waiters.append(fut)
+        b._ensure_drain()
+        await asyncio.sleep(1.5)
+        for fut in waiters:
+            fut.cancel()
+        await _stop(b)
+        return order
+
+    return asyncio.run(scenario())
+
+
+def test_the_disarmed_bucket_selects_exactly_like_the_daemon_of_today():
+    """Review 10: ``over_gate`` must only apply once a priority bot arms the bucket. The
+    starvation share of the daemon in production reaches a NORMAL waiter even above the
+    gate; the new daemon must do the same while it has no priority bot."""
+    from tests.ftcache_sim import load_legacy_daemon_module
+
+    legacy = load_legacy_daemon_module()
+    if legacy is None:
+        pytest.skip("pre-PRIME daemon.py not readable from git in this checkout")
+    expected = _differential_order(legacy.TokenBucket)
+    assert "N0" in expected and expected.index("N0") < len(expected) - 1, (
+        "the scenario really exercises the starvation share over the gate",
+        expected,
+    )
+    assert _differential_order(TokenBucket) == expected
+
+
+def test_an_armed_bucket_does_not_leak_a_non_urgent_waiter_over_the_gate():
+    order = _differential_order_armed()
+    assert "N0" not in order and "N1" not in order
+
+
+def _differential_order_armed() -> list[str]:
+    async def scenario():
+        b = _bucket(armed=True)
+        b._POST_BACKOFF_MAX_BURST = 0
+        _fill_window(b, BUDGET * 0.85)
+        order: list[str] = []
+        waiters = []
+        for i in range(8):
+            fut = _enqueue(b, TokenBucket.CRITICAL, capital=100.0 - i)
+            fut.add_done_callback(lambda f, n=f"C{i}": None if f.cancelled() else order.append(n))
+            waiters.append(fut)
+        fut = _enqueue(b, TokenBucket.NORMAL)
+        fut.add_done_callback(lambda f: None if f.cancelled() else order.append("N0"))
+        waiters.append(fut)
+        b._ensure_drain()
+        await asyncio.sleep(1.5)
+        for fut in waiters:
+            fut.cancel()
+        await _stop(b)
+        return order
+
+    return asyncio.run(scenario())
+
+
+def test_all_priority_bots_together_stay_inside_the_reserve():
+    """Review 9: three bots under their own cap could still take 3 x 150 = 450 of the
+    285 the reserve is worth. A global ceiling demotes the excess to CRITICAL."""
+
+    async def scenario():
+        b = _bucket(armed=True, prime_cap_weight_per_min=150.0)
+        assert b.prime_global_cap == pytest.approx(BUDGET * 0.25)
+        for bot in ("a", "b", "c"):
+            for _ in range(7):  # 140 each, under the per-bot cap of 150
+                await asyncio.wait_for(
+                    b.acquire(20.0, priority=TokenBucket.PRIME, bot_id=bot), timeout=2
+                )
+        await _stop(b)
+        return b
+
+    b = asyncio.run(scenario())
+    assert b.weight_by_band[TokenBucket.PRIME] <= BUDGET * 0.25
+    assert b.prime_global_demotions >= 1 and b.prime_demotions >= b.prime_global_demotions
+    assert b.grants_by_band[TokenBucket.PRIME] + b.grants_by_band[TokenBucket.CRITICAL] == 21, (
+        "demoted, never refused"
+    )
+
+
+def test_the_global_prime_ceiling_is_configurable_and_slides():
+    async def scenario():
+        b = _bucket(armed=True, prime_global_cap_weight_per_min=60.0)
+        assert b.prime_global_cap == 60.0
+        for _ in range(3):
+            await b.acquire(20.0, priority=TokenBucket.PRIME, bot_id="a")
+        assert b.prime_global_demotions == 0
+        await b.acquire(20.0, priority=TokenBucket.PRIME, bot_id="b")
+        assert b.prime_global_demotions == 1
+        b._prime_global_window = type(b._prime_global_window)(
+            (ts - 120.0, c) for ts, c in b._prime_global_window
+        )
+        await b.acquire(20.0, priority=TokenBucket.PRIME, bot_id="b")
+        assert b.prime_global_demotions == 1
+        await _stop(b)
+
+    asyncio.run(scenario())
+
+
+def test_the_global_ceiling_reaches_the_bucket_from_the_daemon_config_and_the_stats():
+    async def scenario():
+        d = _daemon(prime_global_cap_weight_per_min=90)
+        _register(d, 1, "multi", priority_bot=True)
+        assert d._get_budget("hyperliquid").prime_global_cap_weight_per_min == 90
+        stats = await d._dispatch({"op": "stats", "req_id": "s"}, 0)
+        assert stats["prime"]["global_cap_weight_per_min"] == 90
+        assert stats["prime"]["global_demotions"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_the_candles_of_a_priority_bot_get_no_bonus_in_critical():
+    """Review 4: at CRITICAL the bonus put a candle read ahead of other bots' orders."""
+
+    async def scenario():
+        d = _daemon()
+        calls: list = []
+        d._get_fetcher = lambda ex, tm: _RecordingFetcher(calls)
+        _register(d, 1, "multi", priority_bot=True)
+        await d._handle_fetch(_fetch_req(pair="A/USDC:USDC", priority=0), conn_id=1)
+        await d._handle_fetch(_fetch_req(pair="B/USDC:USDC", priority=1), conn_id=1)
+        by_pair = {c["pair"]: c for c in calls}
+        assert by_pair["A/USDC:USDC"]["priority"] == TokenBucket.CRITICAL
+        assert by_pair["A/USDC:USDC"]["capital"] == 100.0, "no bonus in CRITICAL"
+        assert by_pair["B/USDC:USDC"]["capital"] > 1e8, "the bonus stays below CRITICAL"
+
+    asyncio.run(scenario())
+
+
+def _seed_series(d: Daemon, pair: str, offset: int) -> None:
+    tf = 15 * 60_000
+    series = d.store.get_or_create("hyperliquid", "futures", pair, "15m", "futures", tf)
+    forming = (int(time.time() * 1000) // tf) * tf
+    end = forming - offset * tf
+    rows = [[end - i * tf, 1, 1, 1, 1, 1] for i in range(40, -1, -1)]
+    series.merge(rows, fetched_at_ms=int(time.time() * 1000), covered=(rows[0][0], end + tf))
+
+
+def test_a_priority_bot_gets_one_synchronous_fill_per_window_not_one_per_series():
+    """Review 5: the client sends its requests one after the other; twenty stale series at a
+    few seconds each held the bot's cycle for minutes."""
+
+    async def scenario():
+        d = _daemon(prime_sync_fill_max_s=2.0, prime_sync_fill_window_s=30.0)
+        d._get_fetcher = lambda ex, tm: _Ticking(0.3)
+        _register(d, 1, "multi", priority_bot=True)
+        _register(d, 2, "other-prime", priority_bot=True)
+        pairs = [f"P{i}/USDC:USDC" for i in range(4)]
+        for pair in pairs:
+            _seed_series(d, pair, 1)
+        started = time.monotonic()
+        first = await d._handle_fetch(_fetch_req(pair=pairs[0], hot=True), conn_id=1)
+        first_took = time.monotonic() - started
+        assert first["served_from"] in {"partial", "fetch"}, "the one synchronous fill"
+        assert first_took >= 0.25
+        started = time.monotonic()
+        rest = [await d._handle_fetch(_fetch_req(pair=p, hot=True), conn_id=1) for p in pairs[1:]]
+        assert time.monotonic() - started < 0.25, "the others do not stack their waits"
+        assert [r["served_from"] for r in rest] == ["stale"] * 3
+        # another bot has its own budget
+        other = await d._handle_fetch(_fetch_req(pair=pairs[1], hot=True), conn_id=2)
+        assert other["served_from"] in {"partial", "fetch"}
+        # the window passes: the first bot gets a synchronous fill again
+        d._prime_sync_fill_at["multi"] -= 31.0
+        again = await d._handle_fetch(_fetch_req(pair=pairs[2], hot=True), conn_id=1)
+        assert again["served_from"] in {"partial", "fetch", "cache"}
+        await asyncio.gather(*list(d._swr_tasks), return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_stale_series_served_after_the_budget_are_still_filled_in_the_background():
+    async def scenario():
+        calls: list = []
+        d = _daemon(prime_sync_fill_window_s=30.0)
+        d._get_fetcher = lambda ex, tm: _RecordingFetcher(calls)
+        _register(d, 1, "multi", priority_bot=True)
+        d._prime_sync_fill_at["multi"] = time.monotonic()  # budget already spent
+        _seed_series(d, "Z/USDC:USDC", 1)
+        resp = await d._handle_fetch(_fetch_req(pair="Z/USDC:USDC", hot=True), conn_id=1)
+        assert resp["served_from"] == "stale"
+        await asyncio.gather(*list(d._swr_tasks), return_exceptions=True)
+        assert [c["pair"] for c in calls] == ["Z/USDC:USDC"], "the fill still happens"
+
+    asyncio.run(scenario())
+
+
+def test_the_prime_deadline_of_the_daemon_is_under_the_client_timeout():
+    """Review 6: the daemon waited 600 s for a request the client abandoned after 120 s,
+    then granted (and counted) it for nobody, at the head of the PRIME band."""
+    from freqtrade.ohlcv_cache.mixin import CachedExchangeMixin
+
+    d = _daemon()
+    assert d._prime_acquire_max_wait_s < CachedExchangeMixin._ACQUIRE_TIMEOUT_S
+    assert d._prime_acquire_max_wait_s >= CachedExchangeMixin._ACQUIRE_TIMEOUT_S - 60
+
+
+def test_an_abandoned_prime_request_leaves_the_queue_and_is_not_counted():
+    async def scenario():
+        d = _daemon()
+        d._prime_acquire_max_wait_s = 0.3
+        _register(d, 1, "multi", priority_bot=True)
+        bucket = d._get_budget("hyperliquid")
+        _tight_window(bucket, BUDGET, first_leaves_in=1.2)  # full for 1.2 s
+        before = bucket.weight_used_last_min
+        resp = await d._handle_acquire(
+            {"op": "acquire", "req_id": "p", "exchange": "hyperliquid", "priority": -1, "cost": 4},
+            conn_id=1,
+        )
+        assert resp["ok"] is False and resp["throttled"] is True
+        await asyncio.sleep(2.5)  # the window decays: the dead request must not be served now
+        assert not any(not w[4].done() for w in bucket._waiters), "nothing left waiting"
+        assert bucket.grants_by_band.get(TokenBucket.PRIME, 0) == 0
+        assert bucket.weight_used_last_min <= before, "the abandoned request is not booked"
+        await _stop(bucket)
+
+    asyncio.run(scenario())
+
+
+def test_reported_weight_is_booked_with_the_next_acquire():
+    """Review 3: weight a priority bot spent without a token (loop lock busy) is reported."""
+
+    async def scenario():
+        d = _daemon()
+        _register(d, 1, "multi", priority_bot=True)
+        bucket = d._get_budget("hyperliquid")
+        req = {"op": "acquire", "req_id": "a", "exchange": "hyperliquid", "priority": -1}
+        await d._handle_acquire({**req, "cost": 2}, conn_id=1)
+        base = bucket.weight_used_last_min
+        await d._handle_acquire({**req, "cost": 2, "reported_weight": 9.0}, conn_id=1)
+        assert bucket.weight_used_last_min == pytest.approx(base + 2 + 9.0, abs=0.5)
+        await d._handle_acquire({**req, "cost": 2, "reported_weight": "garbage"}, conn_id=1)
+        await d._handle_acquire({**req, "cost": 2, "reported_weight": -5}, conn_id=1)
+        assert bucket.weight_used_last_min == pytest.approx(base + 2 + 9.0 + 4, abs=0.5)
+        await d._handle_acquire({**req, "cost": 2, "reported_weight": 1e6}, conn_id=1)
+        assert bucket.weight_used_last_min <= base + 2 + 9.0 + 4 + 2 + bucket.burst + 0.5
+        await _stop(bucket)
 
     asyncio.run(scenario())
