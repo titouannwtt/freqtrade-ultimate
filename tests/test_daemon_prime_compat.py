@@ -260,3 +260,32 @@ def test_the_old_daemon_has_no_prime_block_in_its_stats_and_the_client_copes(leg
     stats = asyncio.run(scenario())
     assert stats["ok"] is True
     assert "prime" not in stats
+
+
+def test_identity_set_after_the_first_connection_still_registers(new_daemon):
+    """Real bot order: the exchange connects during its init, FreqtradeBot sets the identity
+    afterwards. The bot must register on its next request, not only after a reconnect."""
+
+    async def scenario():
+        client = OhlcvCacheClient(
+            new_daemon.socket_path,
+            timeout_s=10.0,
+            exchange_id="hyperliquid",
+            trading_mode="futures",
+            priority_bot=True,
+        )
+        await client.fetch("BTC/USDC:USDC", "15m", "futures", None, 5)  # connected, anonymous
+        before = new_daemon.daemon.budgets["hyperliquid"].prime_enabled
+        client.set_bot_identity(
+            {"bot_id": "multi", "exchange": "hyperliquid", "dry_run": False, "pid": 1}
+        )
+        await client.acquire_rate_token(priority=OhlcvCacheClient.PRIME, cost=2.0)
+        after = new_daemon.daemon.budgets["hyperliquid"].prime_enabled
+        registered = client._registered
+        await client.close()
+        return before, after, registered
+
+    before, after, registered = asyncio.run(scenario())
+    assert before is False
+    assert registered is True
+    assert after is True

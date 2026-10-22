@@ -111,6 +111,7 @@ class OhlcvCacheClient:
         self._respawn_cfg: dict | None = respawn_cfg
         self._bot_identity: dict | None = None
         self._registered = False
+        self._register_attempt_at = float("-inf")
         self.fleet_size = 0
         self._last_state: str = ""
         self._last_pairs_count: int = 0
@@ -136,6 +137,15 @@ class OhlcvCacheClient:
 
     async def _ensure_connected(self) -> None:
         if self._writer is not None and not self._writer.is_closing():
+            # The exchange connects during its own init, before FreqtradeBot sets the bot
+            # identity: without this the bot only registered after a reconnect (daemon
+            # restart), so fleet staggering and the PRIME reserve ignored fresh bots.
+            if (
+                not self._registered
+                and self._bot_identity
+                and time.monotonic() - self._register_attempt_at >= 60.0
+            ):
+                await self._auto_register()
             return
         self._registered = False
         try:
@@ -184,6 +194,7 @@ class OhlcvCacheClient:
     async def _auto_register(self) -> None:
         if self._registered or not self._bot_identity:
             return
+        self._register_attempt_at = time.monotonic()
         try:
             payload = {
                 "op": "register",
