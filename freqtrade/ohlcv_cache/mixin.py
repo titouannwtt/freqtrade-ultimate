@@ -1408,7 +1408,9 @@ class CachedExchangeMixin:
                             "loop lock still busy after %.1fs for a %s call — booking its "
                             "weight (%.0f) in the local limiter and going ahead",
                             waited,
-                            _PRIORITY_LABELS.get(priority, priority),
+                            _PRIORITY_LABELS.get(priority, str(priority))
+                            if priority is not None
+                            else "?",
                             cost,
                         )
                         self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)

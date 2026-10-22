@@ -2475,7 +2475,9 @@ class Daemon:
                 tickers_weight,
                 priority,
             )
-            extra = {"bot_id": self._bot_key(conn_id)} if priority < TokenBucket.CRITICAL else {}
+            extra: dict[str, Any] = (
+                {"bot_id": self._bot_key(conn_id)} if priority < TokenBucket.CRITICAL else {}
+            )
             await budget.acquire(tickers_weight, priority=priority, **extra)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
