@@ -10,7 +10,8 @@ call, oldest verdict first.
 
 Rules (the filter rules themselves are not touched, only WHEN a verdict is computed):
 
-- First call (cold start): everything missing is computed at once, unbounded, as without SWR.
+- Cold start: everything missing is computed at once, unbounded and without failure back-off,
+  as without SWR, until every pair has a verdict (or COLD_MAX_CALLS calls have passed).
 - Afterwards, a pair with no verdict yet ("missing", e.g. a new pair, or one whose verdict is
   older than `MAX_AGE_FACTOR` x refresh_period) is NOT ALLOWED (the filter removes it) until
   its verdict has been computed. Missing pairs are computed before expired ones.
@@ -33,6 +34,13 @@ logger = logging.getLogger(__name__)
 MAX_AGE_FACTOR = 2.0
 # Delay before a pair whose recompute failed (no candles) is tried again.
 RETRY_AFTER_FAILURE_S = 300
+# A due verdict older than this many refresh periods is urgent: it is about to stop being
+# served, so it is recomputed even beyond `max_per_cycle` (up to URGENT_BUDGET_FACTOR x).
+URGENT_AGE_FACTOR = 1.5
+URGENT_BUDGET_FACTOR = 4
+# The cold start (unbounded, no failure back-off) ends when every pair has a verdict, or after
+# this many calls so that a pair that never gets candles cannot keep the store cold forever.
+COLD_MAX_CALLS = 5
 # Candle close grid used by `quiet_after_close_s`.
 QUIET_GRID_S = 15 * 60
 
@@ -86,17 +94,21 @@ class StaleVerdictStore:
         max_per_cycle: int = 2,
         quiet_after_close_s: float = 0,
         jitter_pct: float = 0.2,
-        timer=time.time,
+        timer=None,
     ) -> None:
         self.refresh_period = refresh_period
         self.max_per_cycle = max_per_cycle
         self.quiet_after_close_s = quiet_after_close_s
         self.jitter_pct = jitter_pct
+        # Resolved at call time when None: a timer captured at import would freeze the clock
+        # of whoever imported the module first (e.g. the replay runner's frozen time).
         self._timer = timer
         self.max_age = MAX_AGE_FACTOR * refresh_period
         self._verdicts: dict[str, tuple[bool, float]] = {}
         self._retry_at: dict[str, float] = {}
         self.warm = False
+        self._cold_calls = 0
+        self._urgent_warned_at = 0.0
 
     @staticmethod
     def validate(max_per_cycle, quiet_after_close_s, jitter_pct) -> str | None:
@@ -112,7 +124,7 @@ class StaleVerdictStore:
         return None
 
     def now(self) -> float:
-        return self._timer()
+        return self._timer() if self._timer is not None else time.time()
 
     def jitter(self, pair: str) -> float:
         """Deterministic (process independent) fraction in [0, jitter_pct) for a pair."""
@@ -146,8 +158,12 @@ class StaleVerdictStore:
         return True
 
     def fail(self, pair: str, now: float) -> None:
-        """A recompute found no data: keep the old verdict, back off before retrying."""
-        self._retry_at[pair] = now + RETRY_AFTER_FAILURE_S
+        """A recompute found no data: keep the old verdict, back off before retrying.
+
+        No back-off during the cold start: the pair is retried on the next call, as without SWR.
+        """
+        if self.warm:
+            self._retry_at[pair] = now + RETRY_AFTER_FAILURE_S
 
     def classify(self, pairlist: list[str], now: float) -> tuple[list[str], list[str]]:
         """
@@ -172,8 +188,11 @@ class StaleVerdictStore:
         return missing, [pair for _, pair in due]
 
     def mark_warm(self, pairlist: list[str]) -> None:
-        """End of the cold start: from the next call on, computations are bounded."""
-        if pairlist:
+        """End the cold start once every pair has a verdict (or after COLD_MAX_CALLS calls)."""
+        if self.warm or not pairlist:
+            return
+        self._cold_calls += 1
+        if self._cold_calls >= COLD_MAX_CALLS or all(pair in self._verdicts for pair in pairlist):
             self.warm = True
 
     def in_quiet_window(self, now: float) -> bool:
@@ -185,4 +204,17 @@ class StaleVerdictStore:
             return missing + due
         if self.in_quiet_window(now):
             return []
-        return (missing + due)[: self.max_per_cycle]
+        budget = self.max_per_cycle
+        urgent_age = URGENT_AGE_FACTOR * self.refresh_period
+        urgent = sum(1 for pair in due if now - self._verdicts[pair][1] > urgent_age)
+        if urgent:
+            budget = min(
+                max(budget, len(missing) + urgent), URGENT_BUDGET_FACTOR * self.max_per_cycle
+            )
+            if now - self._urgent_warned_at >= 3600:
+                self._urgent_warned_at = now
+                logger.warning(
+                    f"SWR verdicts falling behind: {urgent} verdict(s) older than "
+                    f"{URGENT_AGE_FACTOR} refresh periods, recomputing {budget} pairs this call."
+                )
+        return (missing + due)[:budget]

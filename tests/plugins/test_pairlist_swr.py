@@ -489,3 +489,63 @@ def test_swr_store_hard_limits():
     assert store.get("A") is True  # served although due
     assert store.classify(["A"], PERIOD * MAX_AGE_FACTOR + 1) == (["A"], [])
     assert store.get("A") is None  # no longer served
+
+
+def test_swr_store_cold_start_until_all_verdicts():
+    clock = {"t": 1_000_000.0}
+    store = StaleVerdictStore(PERIOD, max_per_cycle=2, jitter_pct=0, timer=lambda: clock["t"])
+    pairs = [f"P{i}/USDC:USDC" for i in range(10)]
+    now = store.now()
+    # cold call where only 3 pairs got candles: failures are not backed off, still cold
+    for p in pairs[:3]:
+        store.put(p, False, now)
+    for p in pairs[3:]:
+        store.fail(p, now)
+    store.mark_warm(pairs)
+    assert not store.warm
+    missing, due = store.classify(pairs, now + 60)
+    assert missing == pairs[3:]
+    assert store.select(missing, due, now + 60) == pairs[3:]  # unbounded while cold
+    for p in pairs[3:]:
+        store.put(p, False, now + 60)
+    store.mark_warm(pairs)
+    assert store.warm
+
+
+def test_swr_store_cold_start_ends_after_max_calls():
+    from freqtrade.plugins.pairlist.swr_verdicts import COLD_MAX_CALLS
+
+    store = StaleVerdictStore(PERIOD, max_per_cycle=2, jitter_pct=0)
+    for _ in range(COLD_MAX_CALLS - 1):
+        store.mark_warm(["NEVER/USDC:USDC"])
+    assert not store.warm
+    store.mark_warm(["NEVER/USDC:USDC"])
+    assert store.warm
+
+
+def test_swr_store_urgent_verdicts_raise_budget(caplog):
+    from freqtrade.plugins.pairlist.swr_verdicts import URGENT_AGE_FACTOR, URGENT_BUDGET_FACTOR
+
+    store = StaleVerdictStore(PERIOD, max_per_cycle=2, jitter_pct=0)
+    store.warm = True
+    now = 2_000_000.0
+    pairs = [f"P{i}/USDC:USDC" for i in range(20)]
+    for p in pairs:
+        store.put(p, False, now - (URGENT_AGE_FACTOR * PERIOD + 10))
+    missing, due = store.classify(pairs, now)
+    picked = store.select(missing, due, now)
+    assert len(picked) == URGENT_BUDGET_FACTOR * 2
+    assert "falling behind" in caplog.text
+    # not urgent: back to the normal bound
+    store2 = StaleVerdictStore(PERIOD, max_per_cycle=2, jitter_pct=0)
+    store2.warm = True
+    for p in pairs:
+        store2.put(p, False, now - PERIOD - 10)
+    missing, due = store2.classify(pairs, now)
+    assert len(store2.select(missing, due, now)) == 2
+
+
+def test_swr_store_timer_resolved_at_call(mocker):
+    store = StaleVerdictStore(PERIOD)
+    mocker.patch("freqtrade.plugins.pairlist.swr_verdicts.time.time", return_value=42.0)
+    assert store.now() == 42.0
