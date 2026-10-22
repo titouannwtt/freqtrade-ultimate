@@ -132,6 +132,8 @@ class TokenBucket:
     # Share of the weight budget the non-urgent bands (HIGH, NORMAL, LOW) must leave free
     # once a priority bot is connected. Before that the historical gate (80 %) stays.
     DEFAULT_PRIME_RESERVE_PCT = 0.25
+    # Minimum gap between two PRIME grants while a 429 backoff is active.
+    PRIME_BACKOFF_SPACING_S = 0.5
     LEGACY_GATE_RATIO = 0.80
     # Weight one bot may spend in the PRIME band per minute before it is demoted.
     DEFAULT_PRIME_CAP_WEIGHT_PER_MIN = 150.0
@@ -773,9 +775,16 @@ class TokenBucket:
                             if in_backoff or served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
                                 spacing = max(spacing, 2.0)
                             # The spacing smooths the fleet's traffic. The token bucket still
-                            # bounds a PRIME flow, so it is not made to wait for it.
+                            # bounds a PRIME flow, so it is not made to wait for it, EXCEPT
+                            # during a 429 backoff: the exchange is already refusing the IP,
+                            # and unspaced PRIME retries (seen live 22/10 23:11: 36 order-book
+                            # 429s in a minute from one bot) only extend the storm. PRIME stays
+                            # first in line, at most one grant per PRIME_BACKOFF_SPACING_S.
                             # (``_pause(0)`` still yields to the event loop.)
-                            pause = 0.0 if entry[0] < self.CRITICAL else spacing
+                            if entry[0] < self.CRITICAL:
+                                pause = self.PRIME_BACKOFF_SPACING_S if in_backoff else 0.0
+                            else:
+                                pause = spacing
                         else:
                             effective_rate = self._effective_rate()
                             needed = entry[3] - self.tokens

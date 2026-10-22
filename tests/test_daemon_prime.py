@@ -1218,7 +1218,9 @@ def test_disarmed_critical_requests_keep_the_two_second_spacing_in_a_backoff():
     assert asyncio.run(scenario()) >= 3.5
 
 
-def test_prime_still_skips_the_spacing_in_a_backoff():
+def test_prime_is_spaced_lightly_in_a_backoff():
+    """In a 429 backoff PRIME keeps the head of the line but is spaced 0.5 s (not the fleet's
+    2 s): unspaced PRIME retries hammered the exchange while it refused the IP (22/10)."""
     async def scenario():
         b = _bucket(armed=True)
         b.trigger_backoff(2.0)
@@ -1233,7 +1235,9 @@ def test_prime_still_skips_the_spacing_in_a_backoff():
         await _stop(b)
         return elapsed
 
-    assert asyncio.run(scenario()) < 2.0
+    elapsed = asyncio.run(scenario())
+    # 5 grants, 4 gaps of 0.5 s: about 2 s; the fleet spacing would be 8 s
+    assert 1.8 <= elapsed < 3.5
 
 
 class _FullFetcher:
