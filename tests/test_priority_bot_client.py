@@ -305,7 +305,7 @@ class TestContextualCalls:
         assert fake.calls == [(PRIME, 2.0)]
 
     @pytest.mark.parametrize(
-        "side,expected_other", [("entry", CRITICAL), ("exit", HIGH)], ids=["entry", "exit"]
+        "side,expected_other", [("entry", HIGH), ("exit", HIGH)], ids=["entry", "exit"]
     )
     def test_priced_book_of_a_regular_bot(self, side, expected_other):
         ex, fake = _exchange(priority_bot=False)
@@ -324,7 +324,7 @@ class TestContextualCalls:
         which reads the book directly, not through ``get_rate`` (review point 3)."""
         regular, fake = _exchange(priority_bot=False)
         regular.get_rates("BTC/USDC", True, False)
-        assert _bands(fake) == [CRITICAL], "an entry book, like a first entry"
+        assert _bands(fake) == [HIGH], "CRITICAL for an entry book is for priority bots only"
 
         prime, fake = _exchange(priority_bot=True)
         with trading_context.trading_call():
@@ -337,6 +337,12 @@ class TestContextualCalls:
         fake.calls.clear()
         ex.fetch_l2_order_book("BTC/USDC", 20)
         assert _bands(fake) == [HIGH]
+
+    def test_the_entry_book_is_critical_for_a_priority_bot_outside_a_trading_call(self):
+        ex, fake = _exchange(priority_bot=True)
+        ex.get_rate("BTC/USDC", True, "entry", False)
+        ex.get_rates("BTC/USDC", True, False)
+        assert _bands(fake) == [CRITICAL, CRITICAL]
 
     def test_an_exit_priced_inside_get_rates_is_not_marked_as_an_entry(self):
         """When only the exit side reads the book it must not inherit the entry flag."""
@@ -500,6 +506,33 @@ class TestUrgentCallsNeverLeaveUncounted:
         ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
         assert fake.reported == [5.0], "not reported twice"
 
+    @pytest.mark.parametrize(
+        "exc", [CacheRateLimited("shed"), CacheTimedOut("t")], ids=["shed", "timed_out"]
+    )
+    def test_reported_weight_is_not_sent_twice_when_the_daemon_answered_anyway(self, exc):
+        """The daemon books ``reported_weight`` on arrival, before the token wait."""
+        ex, fake = _exchange(priority_bot=True)
+        ex._LOOP_LOCK_TIMEOUT_S = 0.05
+        ex._loop_lock.acquire()
+        try:
+            ex._ftcache_acquire_sync(priority=PRIME, cost=4.0)  # skipped: 4 unreported
+        finally:
+            ex._loop_lock.release()
+        fake.fail_with = exc
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)  # carries the 4, daemon answers
+        fake.fail_with = None
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
+        assert fake.reported == [4.0], "reported once only"
+
+    def test_reported_weight_is_kept_when_the_daemon_is_unreachable(self):
+        ex, fake = _exchange(priority_bot=True)
+        mixin_mod._UNREPORTED.value = 4.0
+        fake.fail_with = CacheUnavailable("down")
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
+        fake.fail_with = None
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
+        assert fake.reported == [4.0, 4.0], "the first never reached the daemon"
+
     def test_the_lock_wait_of_a_prime_call_ends_as_soon_as_the_lock_frees(self):
         ex, fake = _exchange(priority_bot=True)
         ex._loop_lock.acquire()
@@ -600,22 +633,44 @@ class TestRefusedTokensAreBookedByTheCallersThatGoAheadAnyway:
         assert ex._ftcache_local_limiter is None
 
     def test_a_stale_book_is_not_reused(self):
-        from freqtrade.ohlcv_cache import mixin
-
         ex, fake = _exchange(priority_bot=True)
-        ex.fetch_l2_order_book("BTC/USDC", 20)
-        ts, depth, book = ex._ftcache_book_cache["BTC/USDC"]
-        ex._ftcache_book_cache["BTC/USDC"] = (ts - mixin._BOOK_REUSE_MAX_AGE_S - 1, depth, book)
-        fake.fail_with = CacheRateLimited("shed")
-        ex.fetch_l2_order_book("BTC/USDC", 20)
+        mixin_mod._ENTRY_PRICING.active = True  # an entry book: CRITICAL, booked when refused
+        try:
+            ex.fetch_l2_order_book("BTC/USDC", 20)
+            ts, depth, book = ex._ftcache_book_cache["BTC/USDC"]
+            ex._ftcache_book_cache["BTC/USDC"] = (
+                ts - mixin_mod._BOOK_REUSE_MAX_AGE_S - 1,
+                depth,
+                book,
+            )
+            fake.fail_with = CacheRateLimited("shed")
+            ex.fetch_l2_order_book("BTC/USDC", 20)
+        finally:
+            mixin_mod._ENTRY_PRICING.active = False
         assert ex._ftcache_local_limiter is not None
 
     def test_a_shallow_book_does_not_stand_in_for_a_deeper_one(self):
         ex, fake = _exchange(priority_bot=True)
-        ex.fetch_l2_order_book("BTC/USDC", 5)
-        fake.fail_with = CacheRateLimited("shed")
-        ex.fetch_l2_order_book("BTC/USDC", 50)
+        mixin_mod._ENTRY_PRICING.active = True
+        try:
+            ex.fetch_l2_order_book("BTC/USDC", 5)
+            fake.fail_with = CacheRateLimited("shed")
+            ex.fetch_l2_order_book("BTC/USDC", 50)
+        finally:
+            mixin_mod._ENTRY_PRICING.active = False
         assert ex._ftcache_local_limiter is not None
+
+    def test_a_refused_high_read_of_a_priority_bot_is_never_booked_in_the_sleeping_limiter(self):
+        """A HIGH read outside a trading call would sleep up to 30 s in the local limiter."""
+        ex, fake = _exchange(priority_bot=True)
+        fake.fail_with = CacheRateLimited("shed")
+        limiter = ex._ftcache_get_local_limiter()
+        limiter.acquire(cost=limiter._budget * 10, priority=CRITICAL)  # budget exhausted
+        started = time.monotonic()
+        ex.fetch_l2_order_book("BTC/USDC", 20)  # HIGH, refused, local budget exhausted
+        ex.fetch_order("o1", "BTC/USDC")  # HIGH too
+        assert time.monotonic() - started < 1.0
+        assert len(ex._ftcache_local_limiter._window) == 1, "nothing more booked"
 
     def test_hard_backoff_makes_a_priority_bot_reuse_a_recent_book(self):
         ex, fake = _exchange(priority_bot=True)

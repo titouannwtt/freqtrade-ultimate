@@ -581,7 +581,10 @@ class TokenBucket:
         self._counter += 1
         heapq.heappush(self._waiters, entry)
         self._ensure_drain()
-        if priority < self.HIGH:
+        # The drain loop's pacing sleeps are cut short by PRIME, and by CRITICAL only once a
+        # priority bot is registered: without one, a CRITICAL flood must keep being spaced
+        # (2 s during and after a 429 backoff) exactly as before.
+        if priority < self.CRITICAL or (priority == self.CRITICAL and self.prime_enabled):
             self._urgent.set()
         await future
 
@@ -666,7 +669,7 @@ class TokenBucket:
     _POST_BACKOFF_MAX_BURST = 5
 
     async def _pause(self, seconds: float) -> None:
-        """Sleep, but wake at once when a PRIME or CRITICAL request is queued.
+        """Sleep, but wake at once when an urgent request is queued (PRIME; CRITICAL once armed).
 
         Always called OUTSIDE ``self._lock``: the drain loop used to sleep while holding
         it (weight-gate waits of up to 15 s, 2 s of spacing after a grant), and the fast
@@ -2034,24 +2037,29 @@ class Daemon:
         # Dry bots tolerate more staleness: they piggyback on the cache the live
         # bots keep warm and should almost never spend fetch budget themselves.
         stale_candles = self._swr_dry_max_stale_candles if is_dry else self._swr_max_stale_candles
+        fleet_serve_cap_ms = max(stale_candles * tf_ms, self._swr_min_stale_ms)
         # A priority bot's hot series is served at most one closed candle late.
         prime_hot = prime_bot and is_hot
         if prime_hot:
             stale_candles = min(stale_candles, self._prime_swr_max_stale_candles)
         serve_cap_ms = max(stale_candles * tf_ms, self._swr_min_stale_ms)
-        if (
-            is_live
-            and self._swr_enabled
-            and had_any_cache
-            and series.range_start_ms is not None
-            and series.range_start_ms <= start_ms
-            and series.range_end_ms is not None
-            and series.range_end_ms >= end_ms - self._swr_max_missing_tail_candles * tf_ms
-            # Freshness from the DATA itself (populated on disk-load too). Serve
-            # stale up to serve_cap; beyond it fetch synchronously so we never
-            # serve ancient candles.
-            and series.range_end_ms >= now_wall_ms - serve_cap_ms
-        ):
+
+        def _within_swr(cap_ms: int) -> bool:
+            return bool(
+                is_live
+                and self._swr_enabled
+                and had_any_cache
+                and series.range_start_ms is not None
+                and series.range_start_ms <= start_ms
+                and series.range_end_ms is not None
+                and series.range_end_ms >= end_ms - self._swr_max_missing_tail_candles * tf_ms
+                # Freshness from the DATA itself (populated on disk-load too). Serve
+                # stale up to the cap; beyond it fetch synchronously so we never
+                # serve ancient candles.
+                and series.range_end_ms >= now_wall_ms - cap_ms
+            )
+
+        if _within_swr(serve_cap_ms):
             # Only LIVE bots drive background refreshes: the dry bots (majority of
             # the fleet) piggyback on the cache the live bots keep warm, so they
             # stop consuming the scarce IP fetch budget entirely. Refreshes for
@@ -2105,8 +2113,14 @@ class Daemon:
             priority,
             capital,
         )
-        if prime_hot and had_any_cache:
-            # Too stale to serve (see above). The client sends its requests one after the
+        if prime_hot and had_any_cache and _within_swr(fleet_serve_cap_ms):
+            # Too stale for a priority bot, but still inside what ANY bot would be served
+            # stale (the fleet's SWR envelope): only there can the bot be given the stale
+            # series and a background fill. Outside it (older than the fleet cap, or
+            # fewer candles cached than requested) it waits for its fill like every bot:
+            # a priority bot must never get less data than a normal one.
+            #
+            # The client sends its requests one after the
             # other on one connection, so a synchronous wait stacks: twenty stale series at
             # a few seconds each would hold the bot's cycle for minutes. Hence a budget per
             # bot: ONE synchronous fill (at most ``prime_sync_fill_max_s``) per

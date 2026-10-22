@@ -1153,3 +1153,170 @@ def test_reported_weight_is_booked_with_the_next_acquire():
         await _stop(bucket)
 
     asyncio.run(scenario())
+
+
+# -------------------- second review
+
+
+def _plain_bucket() -> TokenBucket:
+    return TokenBucket(
+        rate_per_s=19.0,
+        burst=150.0,
+        weight_mode=True,
+        weight_budget_per_min=BUDGET,
+        exchange="hyperliquid",
+    )
+
+
+def test_a_critical_request_does_not_wake_the_pacing_sleep_without_a_priority_bot():
+    """Review A: without a priority bot a CRITICAL flood skipped the 2 s spacing of the
+    drain loop (8 grants in 0.44 s during a 429 backoff, one per 2 s on main)."""
+
+    async def flag_after_enqueue(bucket, priority, **kw) -> bool:
+        bucket._ensure_drain = lambda: None  # no drain loop to clear the flag under us
+        bucket._urgent.clear()
+        task = asyncio.ensure_future(bucket.acquire(1.0, priority=priority, **kw))
+        bucket.tokens = 0.0
+        await asyncio.sleep(0.05)
+        flag = bucket._urgent.is_set()
+        task.cancel()
+        return flag
+
+    async def scenario():
+        plain = _plain_bucket()
+        assert plain.prime_enabled is False
+        plain.tokens = 0.0
+        critical = await flag_after_enqueue(plain, TokenBucket.CRITICAL)
+        prime = await flag_after_enqueue(_plain_bucket(), TokenBucket.PRIME, bot_id="x")
+        armed = await flag_after_enqueue(_bucket(armed=True), TokenBucket.CRITICAL)
+        high = await flag_after_enqueue(_bucket(armed=True), TokenBucket.HIGH)
+        return critical, prime, armed, high
+
+    critical, prime, armed, high = asyncio.run(scenario())
+    assert critical is False, "CRITICAL does not cut the pacing short when disarmed"
+    assert prime is True
+    assert armed is True, "once armed, CRITICAL is urgent too"
+    assert high is False
+
+
+def test_disarmed_critical_requests_keep_the_two_second_spacing_in_a_backoff():
+    async def scenario():
+        b = _plain_bucket()
+        b.trigger_backoff(2.0)
+        b.tokens = 150.0
+        started = time.monotonic()
+        tasks = []
+        for _ in range(3):  # arrivals while the loop sleeps its spacing: what woke it
+            tasks.append(asyncio.ensure_future(b.acquire(1.0, priority=TokenBucket.CRITICAL)))
+            await asyncio.sleep(0.05)
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=15)
+        elapsed = time.monotonic() - started
+        await _stop(b)
+        return elapsed
+
+    # 3 grants, the first two gaps spaced 2 s: >= 4 s; the bug made it ~0.2 s
+    assert asyncio.run(scenario()) >= 3.5
+
+
+def test_prime_still_skips_the_spacing_in_a_backoff():
+    async def scenario():
+        b = _bucket(armed=True)
+        b.trigger_backoff(2.0)
+        b.tokens = 150.0
+        started = time.monotonic()
+        tasks = [
+            asyncio.ensure_future(b.acquire(1.0, priority=TokenBucket.PRIME, bot_id="m"))
+            for _ in range(5)
+        ]
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=15)
+        elapsed = time.monotonic() - started
+        await _stop(b)
+        return elapsed
+
+    assert asyncio.run(scenario()) < 2.0
+
+
+class _FullFetcher:
+    """Answers any range with candles up to the forming one (what the exchange returns)."""
+
+    def __init__(self, delay=0.0):
+        self.delay = delay
+
+    async def fetch_ohlcv(self, pair, timeframe, since_ms, limit, candle_type, **kw):
+        await asyncio.sleep(self.delay)
+        tf = 15 * 60_000
+        end = (int(time.time() * 1000) // tf) * tf
+        return [[end - i * tf, 1, 1, 1, 1, 1] for i in range(limit, -1, -1)]
+
+
+def _seed_n(d: Daemon, pair: str, offset: int, n: int) -> None:
+    tf = 15 * 60_000
+    series = d.store.get_or_create("hyperliquid", "futures", pair, "15m", "futures", tf)
+    forming = (int(time.time() * 1000) // tf) * tf
+    end = forming - offset * tf
+    rows = [[end - i * tf, 1, 1, 1, 1, 1] for i in range(n, -1, -1)]
+    series.merge(rows, fetched_at_ms=int(time.time() * 1000), covered=(rows[0][0], end + tf))
+
+
+def test_the_sync_fill_budget_never_gives_a_priority_bot_less_than_a_fleet_bot():
+    """Review B: with the budget spent, a series 20 candles behind (beyond the fleet SWR cap)
+    came back stale with a priority bot while any other bot waited for its fill."""
+
+    async def scenario():
+        d = _daemon()
+        d._get_fetcher = lambda ex, tm: _FullFetcher()
+        _register(d, 1, "multi", priority_bot=True)
+        d._prime_sync_fill_at["multi"] = time.monotonic()  # the budget is spent
+        _seed_n(d, "A/USDC:USDC", 20, 40)
+        resp = await d._handle_fetch(_fetch_req(pair="A/USDC:USDC", hot=True), conn_id=1)
+        await asyncio.gather(*list(d._swr_tasks), return_exceptions=True)
+        return resp
+
+    resp = asyncio.run(scenario())
+    assert resp["served_from"] in {"partial", "fetch"}, "refilled synchronously, like any bot"
+
+
+def test_a_history_longer_than_the_cache_is_never_truncated_for_a_priority_bot():
+    async def scenario():
+        d = _daemon()
+        d._get_fetcher = lambda ex, tm: _FullFetcher()
+        _register(d, 1, "multi", priority_bot=True)
+        d._prime_sync_fill_at["multi"] = time.monotonic()
+        _seed_n(d, "B/USDC:USDC", 0, 40)  # 41 candles cached, 300 requested
+        resp = await d._handle_fetch(_fetch_req(pair="B/USDC:USDC", limit=300, hot=True), conn_id=1)
+        await asyncio.gather(*list(d._swr_tasks), return_exceptions=True)
+        return resp
+
+    resp = asyncio.run(scenario())
+    assert resp["served_from"] in {"partial", "fetch"}
+
+
+def test_outside_the_fleet_envelope_the_wait_is_not_cut_at_the_sync_fill_bound():
+    async def scenario():
+        d = _daemon(prime_sync_fill_max_s=0.1)
+        d._get_fetcher = lambda ex, tm: _FullFetcher(delay=0.4)
+        _register(d, 1, "multi", priority_bot=True)
+        _seed_n(d, "C/USDC:USDC", 20, 40)  # beyond the fleet cap: a fleet bot waits 0.4 s
+        started = time.monotonic()
+        resp = await d._handle_fetch(_fetch_req(pair="C/USDC:USDC", hot=True), conn_id=1)
+        return resp, time.monotonic() - started
+
+    resp, took = asyncio.run(scenario())
+    assert resp["served_from"] in {"partial", "fetch"} and took >= 0.35
+
+
+def test_inside_the_fleet_envelope_the_budget_still_protects_the_cycle():
+    async def scenario():
+        d = _daemon(prime_sync_fill_max_s=0.1)
+        d._get_fetcher = lambda ex, tm: _FullFetcher(delay=0.5)
+        _register(d, 1, "multi", priority_bot=True)
+        _seed_n(d, "D/USDC:USDC", 1, 40)  # one period late: inside the fleet's 8 candles
+        started = time.monotonic()
+        resp = await d._handle_fetch(_fetch_req(pair="D/USDC:USDC", hot=True), conn_id=1)
+        took = time.monotonic() - started
+        for task in list(d._swr_tasks):
+            task.cancel()
+        return resp, took
+
+    resp, took = asyncio.run(scenario())
+    assert resp["served_from"] == "stale" and took < 0.4
