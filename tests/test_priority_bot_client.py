@@ -34,6 +34,7 @@ import pytest
 from freqtrade.enums import MarginMode
 from freqtrade.exceptions import TemporaryError
 from freqtrade.exchange.common import _reacquire_rate_token, retrier
+from freqtrade.ohlcv_cache import mixin as mixin_mod
 from freqtrade.ohlcv_cache import trading_context
 from freqtrade.ohlcv_cache.client import (
     CacheRateLimited,
@@ -121,10 +122,13 @@ class _FakeClient:
 
     def __init__(self):
         self.calls: list[tuple[int | None, float]] = []
+        self.reported: list[float] = []
         self.fail_with: Exception | None = None
 
-    async def acquire_rate_token(self, priority=None, cost=1.0):
+    async def acquire_rate_token(self, priority=None, cost=1.0, reported_weight=0.0):
         self.calls.append((priority, cost))
+        if reported_weight:
+            self.reported.append(reported_weight)
         if self.fail_with is not None:
             raise self.fail_with
 
@@ -155,6 +159,7 @@ def _clean_thread_state():
     from freqtrade.ohlcv_cache import mixin
 
     mixin._LAST_ACQUIRE.value = None
+    mixin._UNREPORTED.value = 0.0
     yield
     trading_context._stack().clear()
 
@@ -235,7 +240,9 @@ class TestIntrinsicTradingCalls:
     """Orders, stops, leverage, margin: nothing but trading sends them."""
 
     @pytest.mark.parametrize(
-        "priority_bot,expected", [(True, PRIME), (False, CRITICAL)], ids=["priority", "other"]
+        "priority_bot,expected",
+        [(True, [PRIME] * 4), (False, [CRITICAL, CRITICAL, NORMAL, LOW])],
+        ids=["priority", "other"],
     )
     @pytest.mark.parametrize("in_context", [False, True], ids=["bare", "in_trading_call"])
     def test_order_class_calls(self, priority_bot, expected, in_context):
@@ -246,17 +253,18 @@ class TestIntrinsicTradingCalls:
             ex.cancel_order("o1", "BTC/USDC")
             ex._set_leverage(3.0, "BTC/USDC")
             ex.set_margin_mode("BTC/USDC", MarginMode.ISOLATED)
-        assert _bands(fake) == [expected] * 4
+        # another bot keeps the bands it always had: orders CRITICAL, leverage NORMAL, margin LOW
+        assert _bands(fake) == expected
 
     def test_create_stoploss_and_its_margin_preflight_are_both_prime(self):
         ex, fake = _exchange(priority_bot=True)
         ex.create_stoploss("BTC/USDC", 1.0, 90.0, {}, "sell", 1.0)
         assert _bands(fake) == [PRIME, PRIME]
 
-    def test_create_stoploss_of_another_bot_stays_critical(self):
+    def test_create_stoploss_of_another_bot_keeps_its_bands(self):
         ex, fake = _exchange(priority_bot=False)
         ex.create_stoploss("BTC/USDC", 1.0, 90.0, {}, "sell", 1.0)
-        assert _bands(fake) == [CRITICAL, CRITICAL]
+        assert _bands(fake) == [CRITICAL, LOW]
 
     @pytest.mark.parametrize("priority_bot", [True, False])
     def test_dry_run_takes_no_token(self, priority_bot):
@@ -455,11 +463,10 @@ class TestLocalLimiterLetsPrimeThrough:
 
 
 class TestUrgentCallsNeverLeaveUncounted:
-    def test_critical_waits_long_for_the_loop_lock_then_books_locally(self):
-        """Review point 1: after 5 s an order went out with no token at all."""
+    def test_a_prime_call_waits_the_normal_bound_for_the_loop_lock_then_books_locally(self):
+        """After the bound an order goes out with its weight booked locally (not 30 s later)."""
         ex, fake = _exchange(priority_bot=True)
-        ex._LOOP_LOCK_TIMEOUT_URGENT_S = 0.3
-        ex._LOOP_LOCK_TIMEOUT_S = 0.01
+        ex._LOOP_LOCK_TIMEOUT_S = 0.3
         ex._loop_lock.acquire()  # a candle batch holds the loop
         try:
             started = time.monotonic()
@@ -468,13 +475,33 @@ class TestUrgentCallsNeverLeaveUncounted:
         finally:
             ex._loop_lock.release()
         assert granted is True
-        assert 0.25 <= waited < 1.5, "waits the urgent timeout, not the 5 s one"
+        assert 0.25 <= waited < 1.5
         assert fake.calls == []
         assert ex._ftcache_local_limiter._window[-1][1] == 2.0, "booked locally"
 
-    def test_the_loop_lock_wait_of_an_urgent_call_ends_as_soon_as_the_lock_frees(self):
+    def test_the_lock_bound_of_a_prime_call_is_the_regular_five_seconds(self):
+        """Regression: PRIME used to wait 30 s (``_LOOP_LOCK_TIMEOUT_URGENT_S``) for the lock."""
+        assert CachedExchangeMixin._LOOP_LOCK_TIMEOUT_S <= 5.0
+        assert not hasattr(CachedExchangeMixin, "_LOOP_LOCK_TIMEOUT_URGENT_S")
+
+    def test_weight_booked_without_a_token_is_reported_with_the_next_acquire(self):
         ex, fake = _exchange(priority_bot=True)
-        ex._LOOP_LOCK_TIMEOUT_URGENT_S = 5.0
+        ex._LOOP_LOCK_TIMEOUT_S = 0.05
+        ex._loop_lock.acquire()
+        try:
+            ex._ftcache_acquire_sync(priority=PRIME, cost=2.0)
+            ex._ftcache_acquire_sync(priority=PRIME, cost=3.0)
+        finally:
+            ex._loop_lock.release()
+        assert fake.calls == [] and fake.reported == []
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
+        assert fake.calls == [(PRIME, 1.0)]
+        assert fake.reported == [5.0], "both skipped tokens, once"
+        ex._ftcache_acquire_sync(priority=PRIME, cost=1.0)
+        assert fake.reported == [5.0], "not reported twice"
+
+    def test_the_lock_wait_of_a_prime_call_ends_as_soon_as_the_lock_frees(self):
+        ex, fake = _exchange(priority_bot=True)
         ex._loop_lock.acquire()
         threading.Timer(0.2, ex._loop_lock.release).start()
         started = time.monotonic()
@@ -482,9 +509,20 @@ class TestUrgentCallsNeverLeaveUncounted:
         assert time.monotonic() - started < 1.5
         assert _bands(fake) == [PRIME]
 
+    def test_a_critical_call_of_a_regular_bot_keeps_the_historical_lock_handling(self):
+        """CRITICAL is not PRIME: no local booking, the historical answer after the bound."""
+        ex, _ = _exchange()
+        ex._LOOP_LOCK_TIMEOUT_S = 0.05
+        ex._loop_lock.acquire()
+        try:
+            assert ex._ftcache_acquire_sync(priority=CRITICAL, cost=1.0) is True
+        finally:
+            ex._loop_lock.release()
+        assert ex._ftcache_local_limiter is None, "not booked: as before"
+        assert mixin_mod._UNREPORTED.value == 0.0
+
     def test_a_non_urgent_call_still_gives_up_after_the_short_timeout(self):
         ex, _ = _exchange()
-        ex._LOOP_LOCK_TIMEOUT_URGENT_S = 5.0
         ex._LOOP_LOCK_TIMEOUT_S = 0.1
         ex._loop_lock.acquire()
         try:
@@ -515,16 +553,45 @@ class TestUrgentCallsNeverLeaveUncounted:
 
 
 class TestRefusedTokensAreBookedByTheCallersThatGoAheadAnyway:
-    """Review point 5: fetch_l2_order_book, _set_leverage and set_margin_mode ignored a False."""
+    """Review point 5: fetch_l2_order_book, _set_leverage and set_margin_mode ignored a False.
 
-    def test_book_read_after_a_refusal_is_booked_locally(self):
-        ex, fake = _exchange()
+    Only for a priority bot: any other bot keeps what it always did (the call goes out, no
+    local booking, so no new local-limiter sleep for it).
+    """
+
+    def test_book_read_after_a_refusal_is_booked_locally_by_a_priority_bot(self):
+        ex, fake = _exchange(priority_bot=True)
         fake.fail_with = CacheRateLimited("shed")
-        ex.fetch_l2_order_book("BTC/USDC", 20)  # HIGH: refused, then goes ahead
+        with trading_context.trading_call():
+            ex.fetch_l2_order_book("BTC/USDC", 20)  # PRIME: refused, then goes ahead
         assert ex._ftcache_local_limiter._window[-1][1] == 2.0
 
-    def test_book_read_after_a_refusal_prefers_a_fresh_book(self):
+    def test_book_read_after_a_refusal_is_left_alone_for_a_regular_bot(self):
         ex, fake = _exchange()
+        fake.fail_with = CacheRateLimited("shed")
+        ex.fetch_l2_order_book("BTC/USDC", 20)
+        assert ex._ftcache_local_limiter is None, "no booking, hence no local sleep"
+        assert ex._ftcache_book_cache is None, "nothing remembered either"
+
+    def test_a_regular_bot_never_reuses_a_book(self):
+        ex, fake = _exchange()
+        ex.fetch_l2_order_book("BTC/USDC", 20)
+        fake.fail_with = CacheRateLimited("shed")
+        fake.calls.clear()
+        calls = []
+        base_read = _FakeBase.fetch_l2_order_book
+        _FakeBase.fetch_l2_order_book = lambda self, pair, limit=100: (
+            calls.append(pair) or base_read(self, pair, limit)
+        )
+        try:
+            ex.fetch_l2_order_book("BTC/USDC", 20)
+        finally:
+            _FakeBase.fetch_l2_order_book = base_read
+        assert calls == ["BTC/USDC"], "the read goes out, as it always did"
+
+    def test_book_read_after_a_refusal_prefers_a_fresh_book_for_a_priority_bot(self):
+        """A read outside a trading call (HIGH) is refusable; the fresh book stands in."""
+        ex, fake = _exchange(priority_bot=True)
         first = ex.fetch_l2_order_book("BTC/USDC", 20)
         fake.fail_with = CacheRateLimited("shed")
         fake.calls.clear()
@@ -535,7 +602,7 @@ class TestRefusedTokensAreBookedByTheCallersThatGoAheadAnyway:
     def test_a_stale_book_is_not_reused(self):
         from freqtrade.ohlcv_cache import mixin
 
-        ex, fake = _exchange()
+        ex, fake = _exchange(priority_bot=True)
         ex.fetch_l2_order_book("BTC/USDC", 20)
         ts, depth, book = ex._ftcache_book_cache["BTC/USDC"]
         ex._ftcache_book_cache["BTC/USDC"] = (ts - mixin._BOOK_REUSE_MAX_AGE_S - 1, depth, book)
@@ -544,7 +611,7 @@ class TestRefusedTokensAreBookedByTheCallersThatGoAheadAnyway:
         assert ex._ftcache_local_limiter is not None
 
     def test_a_shallow_book_does_not_stand_in_for_a_deeper_one(self):
-        ex, fake = _exchange()
+        ex, fake = _exchange(priority_bot=True)
         ex.fetch_l2_order_book("BTC/USDC", 5)
         fake.fail_with = CacheRateLimited("shed")
         ex.fetch_l2_order_book("BTC/USDC", 50)
@@ -570,15 +637,23 @@ class TestRefusedTokensAreBookedByTheCallersThatGoAheadAnyway:
         assert _bands(fake) == [HIGH]
 
     @pytest.mark.parametrize("name", ["_set_leverage", "set_margin_mode"])
-    def test_leverage_and_margin_calls_are_booked_when_the_token_is_refused(self, name):
-        ex, _ = _exchange()
+    def test_leverage_and_margin_calls_are_booked_by_a_priority_bot_when_refused(self, name):
+        ex, _ = _exchange(priority_bot=True)
         ex._ftcache_acquire_sync = MagicMock(return_value=False)
         args = (3.0, "BTC/USDC") if name == "_set_leverage" else ("BTC/USDC", MarginMode.ISOLATED)
         getattr(ex, name)(*args)
         assert ex._ftcache_local_limiter._window[-1][1] == 1.0
 
-    def test_a_granted_token_is_not_booked_twice(self):
+    @pytest.mark.parametrize("name", ["_set_leverage", "set_margin_mode"])
+    def test_leverage_and_margin_calls_of_a_regular_bot_are_not_booked_when_refused(self, name):
         ex, _ = _exchange()
+        ex._ftcache_acquire_sync = MagicMock(return_value=False)
+        args = (3.0, "BTC/USDC") if name == "_set_leverage" else ("BTC/USDC", MarginMode.ISOLATED)
+        getattr(ex, name)(*args)
+        assert ex._ftcache_local_limiter is None
+
+    def test_a_granted_token_is_not_booked_twice(self):
+        ex, _ = _exchange(priority_bot=True)
         ex._ftcache_acquire_sync = MagicMock(return_value=True)
         ex._set_leverage(3.0, "BTC/USDC")
         assert ex._ftcache_local_limiter is None
@@ -619,17 +694,39 @@ def _flaky(priority_bot: bool) -> tuple[_FlakyExchange, _FakeClient]:
 
 
 class TestRetriesKeepTheirPriority:
-    """Review point 2: ``_reacquire_rate_token`` re-acquired a default HIGH weight-1 token."""
+    """Review point 2: ``_reacquire_rate_token`` re-acquired a default HIGH weight-1 token.
+
+    Only a trading call of a priority bot hands its band to the retry.
+    """
 
     def test_a_retried_order_of_a_priority_bot_stays_prime(self):
         ex, fake = _flaky(priority_bot=True)
-        ex.create_order(pair="BTC/USDC")
+        with trading_context.trading_call():
+            ex.create_order(pair="BTC/USDC")
         assert fake.calls == [(PRIME, 1.0), (PRIME, 1.0)]
 
-    def test_a_retried_order_of_a_regular_bot_stays_critical(self):
-        ex, fake = _flaky(priority_bot=False)
+    def test_a_retried_order_outside_a_trading_call_does_not_inherit_prime(self):
+        """Regression: a 120 s memory let any retry inherit the last band of the thread."""
+        ex, fake = _flaky(priority_bot=True)
         ex.create_order(pair="BTC/USDC")
-        assert fake.calls == [(CRITICAL, 1.0), (CRITICAL, 1.0)]
+        assert fake.calls[0] == (PRIME, 1.0)
+        assert fake.calls[1][0] != PRIME, "the retry is the historical default"
+
+    def test_a_retried_order_of_a_regular_bot_is_the_historical_default(self):
+        ex, fake = _flaky(priority_bot=False)
+        with trading_context.trading_call():
+            ex.create_order(pair="BTC/USDC")
+        assert fake.calls[0] == (CRITICAL, 1.0)
+        assert fake.calls[1] == (None, 1.0), "the historical re-acquisition: default band"
+
+    def test_a_retry_in_a_notification_never_inherits_the_trading_call_band(self):
+        ex, fake = _flaky(priority_bot=True)
+        with trading_context.trading_call():
+            ex.create_order(pair="BTC/USDC")  # records PRIME
+            with trading_context.notification_call():
+                ex.failures = 1
+                ex.fetch_l2_order_book("BTC/USDC", 20)
+        assert PRIME not in [p for p, _ in fake.calls[2:]]
 
     def test_a_retried_book_keeps_its_band_and_its_weight(self):
         ex, fake = _flaky(priority_bot=True)
@@ -637,29 +734,38 @@ class TestRetriesKeepTheirPriority:
             ex.fetch_l2_order_book("BTC/USDC", 20)
         assert fake.calls == [(PRIME, 2.0), (PRIME, 2.0)]
 
-    def test_a_retried_plain_book_keeps_high_and_a_cost_of_two(self):
+    def test_a_retried_plain_book_keeps_the_default_for_a_regular_bot(self):
         ex, fake = _flaky(priority_bot=False)
         ex.fetch_l2_order_book("BTC/USDC", 20)
-        assert fake.calls == [(HIGH, 2.0), (HIGH, 2.0)]
+        assert fake.calls[0] == (HIGH, 2.0)
+        assert fake.calls[1] == (None, 1.0), "the historical re-acquisition: default, weight 1"
 
     def test_each_attempt_tracks_the_last_call_made_on_the_thread(self):
         ex, fake = _flaky(priority_bot=True)
         ex.failures = 0
-        ex.create_order(pair="x")
         with trading_context.trading_call():
+            ex.create_order(pair="x")
             ex.fetch_l2_order_book("x", 20)
-        ex.failures = 1
-        ex.create_order(pair="x")
+            ex.failures = 1
+            ex.create_order(pair="x")
         assert fake.calls[-2:] == [(PRIME, 1.0), (PRIME, 1.0)]
 
     def test_memory_expires(self):
         from freqtrade.ohlcv_cache import mixin
 
         ex, _ = _flaky(priority_bot=True)
-        ex.create_order(pair="x")
-        assert CachedExchangeMixin.ftcache_last_acquire() == (PRIME, 1.0)
-        prio, cost, ts = mixin._LAST_ACQUIRE.value
-        mixin._LAST_ACQUIRE.value = (prio, cost, ts - 1000)
+        with trading_context.trading_call():
+            ex.create_order(pair="x")
+            assert CachedExchangeMixin.ftcache_last_acquire() == (PRIME, 1.0)
+            prio, cost, ts = mixin._LAST_ACQUIRE.value
+            mixin._LAST_ACQUIRE.value = (prio, cost, ts - 1000)
+            assert CachedExchangeMixin.ftcache_last_acquire() is None
+
+    def test_the_memory_is_only_readable_inside_the_trading_call(self):
+        ex, _ = _flaky(priority_bot=True)
+        with trading_context.trading_call():
+            ex.create_order(pair="x")
+            assert CachedExchangeMixin.ftcache_last_acquire() == (PRIME, 1.0)
         assert CachedExchangeMixin.ftcache_last_acquire() is None
 
     def test_without_memory_the_retry_falls_back_to_the_historical_default(self):
@@ -675,11 +781,17 @@ class TestRetriesKeepTheirPriority:
 
     def test_memory_is_per_thread(self):
         ex, _ = _flaky(priority_bot=True)
-        ex.create_order(pair="x")
         seen = []
-        t = threading.Thread(target=lambda: seen.append(CachedExchangeMixin.ftcache_last_acquire()))
-        t.start()
-        t.join()
+
+        def other_thread():
+            with trading_context.trading_call():
+                seen.append(CachedExchangeMixin.ftcache_last_acquire())
+
+        with trading_context.trading_call():
+            ex.create_order(pair="x")
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join()
         assert seen == [None]
 
 
@@ -777,6 +889,19 @@ class TestWireFormat:
         assert acquire["priority"] == PRIME and acquire["prime"] is True and acquire["cost"] == 2.0
         for op in ("tickers", "fetch"):
             assert next(p for p in payloads if p["op"] == op)["prime"] is True
+
+    def test_reported_weight_travels_only_when_there_is_some(self, tmp_path):
+        async def scenario():
+            async with _Recorder(str(tmp_path / "d.sock")) as d:
+                c = _client(d.path, priority_bot=True)
+                await c.acquire_rate_token(priority=PRIME, cost=2.0)
+                await c.acquire_rate_token(priority=PRIME, cost=2.0, reported_weight=7.0)
+                await c.close()
+                return [p for p in d.payloads if p["op"] == "acquire"]
+
+        plain, reporting = asyncio.run(scenario())
+        assert "reported_weight" not in plain
+        assert reporting["reported_weight"] == 7.0
 
     def test_a_regular_client_never_sends_prime_or_the_flag(self, tmp_path):
         async def scenario():

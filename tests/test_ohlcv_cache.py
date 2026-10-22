@@ -685,22 +685,22 @@ class TestInterceptorPriorities:
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.LOW)
 
-    def test_set_leverage_critical(self):
-        """Right before an order: it must not queue behind the candle refreshes."""
+    def test_set_leverage_keeps_its_normal_band_for_a_regular_bot(self):
+        """Only a priority bot (PRIME) promotes it; every other bot keeps NORMAL."""
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin._set_leverage(mixin, 3.0, "BTC/USDC")
         except (AttributeError, TypeError):
             pass
-        mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.CRITICAL)
+        mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.NORMAL)
 
-    def test_set_margin_mode_critical(self):
+    def test_set_margin_mode_keeps_its_low_band_for_a_regular_bot(self):
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin.set_margin_mode(mixin, "BTC/USDC", MarginMode.CROSS)
         except (AttributeError, TypeError):
             pass
-        mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.CRITICAL)
+        mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.LOW)
 
     def test_fetch_orders_normal(self):
         mixin = self._make_interceptor_mixin()

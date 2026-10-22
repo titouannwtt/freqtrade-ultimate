@@ -428,6 +428,7 @@ class OhlcvCacheClient:
         self,
         priority: int | None = None,
         cost: float = 1.0,
+        reported_weight: float = 0.0,
     ) -> None:
         """Acquire a rate token from the daemon's centralized TokenBucket.
 
@@ -443,6 +444,10 @@ class OhlcvCacheClient:
             "capital": self.capital,
             "cost": cost,
         }
+        if reported_weight > 0:
+            # Weight this bot spent without a token since its last acquire. A daemon that
+            # predates the field ignores it.
+            req["reported_weight"] = reported_weight
         resp = await self._send_and_receive(req)
         if not resp.get("ok"):
             if resp.get("throttled"):
