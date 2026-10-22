@@ -127,6 +127,25 @@ GLOBAL_DEFAULTS: dict = {
     "swr_max_missing_tail_candles": 4,
     # Floor on the stale-serve window so tiny timeframes still get useful slack.
     "swr_min_stale_ms": 60000,
+    # --- Priority bots (`shared_ohlcv_cache.priority_bot`, per-BOT) ---
+    # A live bot flagged `priority_bot: true` sends its trading calls (orders, stops,
+    # books, order follow-up) in the PRIME band, above CRITICAL. Daemon side, only while
+    # at least one such bot is registered:
+    #   * the non-urgent bands (HIGH/NORMAL/LOW) stop at `1 - prime_reserve_pct` of the
+    #     weight budget (75 %, instead of the historical 80 %), so the reserve is free
+    #     for the orders of the bots that trade;
+    #   * one bot's PRIME grants are capped at `prime_cap_weight_per_min`; over it the
+    #     request is DEMOTED to CRITICAL, never refused;
+    #   * a PRIME request is not abandoned by the daemon before `prime_acquire_max_wait_s`
+    #     (600 s; the fleet's deadline is `acquire_max_wait_s`, 90 s);
+    #   * the hot series of a priority bot are served at most `prime_swr_max_stale_candles`
+    #     closed candles late, and a synchronous refill never holds its cycle more than
+    #     `prime_sync_fill_max_s`.
+    "prime_reserve_pct": 0.25,
+    "prime_cap_weight_per_min": 150,
+    "prime_swr_max_stale_candles": 1,
+    "prime_acquire_max_wait_s": 600,
+    "prime_sync_fill_max_s": 20,
     # --- Hot timeframes (per-BOT, not read here) ---
     # `shared_ohlcv_cache.hot_timeframes: ["5m"]` in a LIVE bot's config declares
     # the timeframe it trades on. It is consumed client-side

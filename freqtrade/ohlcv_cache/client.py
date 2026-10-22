@@ -61,6 +61,12 @@ _CLIENT_SINGLETONS: dict[str, OhlcvCacheClient] = {}
 
 class OhlcvCacheClient:
     # Priority constants — mirrors TokenBucket in daemon.py
+    #
+    # PRIME sits above CRITICAL and is reserved for the trading calls of a bot flagged
+    # ``shared_ohlcv_cache.priority_bot``. A daemon that predates the band still serves a
+    # negative priority ahead of CRITICAL and outside its weight gate, so a client that
+    # sends PRIME works against an old daemon; an old client simply never sends it.
+    PRIME = -1
     CRITICAL = 0
     HIGH = 1
     NORMAL = 2
@@ -76,6 +82,7 @@ class OhlcvCacheClient:
         dry_run: bool = False,
         capital: float = 0.0,
         hot_timeframes: list[str] | None = None,
+        priority_bot: bool = False,
     ) -> None:
         # Timeframes this bot declares as "hot": the ones it actually trades on,
         # where a candle arriving one period late is a missed entry or exit.
@@ -85,6 +92,9 @@ class OhlcvCacheClient:
         # window on the candle boundary instead of letting it free-run.
         # Live bots only — a dry bot never drives a refresh anyway.
         self.hot_timeframes: frozenset[str] = frozenset(() if dry_run else (hot_timeframes or ()))
+        # A priority bot is announced at registration and tags every request with
+        # ``prime``. Never for a dry-run process: its LOW floor is not negotiable.
+        self.priority_bot: bool = bool(priority_bot) and not dry_run
         self.socket_path = socket_path
         self.timeout_s = timeout_s
         self.exchange_id = exchange_id
@@ -179,6 +189,7 @@ class OhlcvCacheClient:
                 "op": "register",
                 "req_id": uuid.uuid4().hex,
                 **self._bot_identity,
+                "priority_bot": self.priority_bot,
             }
             if self._writer is None or self._reader is None:
                 return
@@ -197,6 +208,10 @@ class OhlcvCacheClient:
                     self.fleet_size = int(resp.get("fleet_size", 0) or 0)
                     self.hold_off_s = float(resp.get("hold_off_s", 0))
                     self.hold_off_reason = resp.get("hold_off_reason", "")
+                    if self.priority_bot and self.hold_off_s:
+                        # A daemon that predates priority bots still stagger-holds them.
+                        self.hold_off_s = 0.0
+                        self.hold_off_reason = "priority bot (no admission hold-off)"
                     logger.info(
                         "registered with fleet orchestrator "
                         "(fleet_size=%d hold_off=%.0fs reason=%s)",
@@ -269,6 +284,8 @@ class OhlcvCacheClient:
     # ---------------- request/response
 
     async def _send_and_receive(self, payload: dict) -> dict:
+        if self.priority_bot:
+            payload.setdefault("prime", True)
         async with self._lock:
             await self._ensure_connected()
             if self._writer is None or self._reader is None:
@@ -746,6 +763,7 @@ class OhlcvCacheClient:
             dry_run=dry_run,
             capital=capital,
             hot_timeframes=cache_cfg.get("hot_timeframes") or [],
+            priority_bot=bool(cache_cfg.get("priority_bot", False)),
         )
         _CLIENT_SINGLETONS[key] = client
         logger.info("client configured for %s/%s via %s", exchange_id, trading_mode, socket_path)

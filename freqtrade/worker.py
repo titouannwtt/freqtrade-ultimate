@@ -77,6 +77,9 @@ class Worker:
             tf_secs = timeframe_to_seconds(self._config.get("timeframe") or "15m")
             spread = min(max(tf_secs * 0.3, 30.0), 120.0)  # 30..120s
             self._candle_jitter_s = 5.0 + (hash_val % 1000) / 1000.0 * spread
+        elif (self._config.get("shared_ohlcv_cache") or {}).get("priority_bot", False):
+            # A priority bot reacts at the candle boundary; the stagger exists to protect it.
+            self._candle_jitter_s = 0.0
         else:
             self._candle_jitter_s = (hash_val % 50) / 10.0  # 0.0 to 4.9s
         logger.info(

@@ -100,6 +100,10 @@ class TokenBucket:
     """Async token-bucket rate limiter with priority queue and adaptive back-off.
 
     Priority levels (lower = higher priority):
+       -1 = PRIME     (trading calls of a ``priority_bot``: orders, stops, books, order
+                       follow-up. Above CRITICAL, never abandoned, outside the weight gate
+                       and the post-grant spacing; capped per bot, over the cap the request
+                       is DEMOTED to CRITICAL, never refused)
         0 = CRITICAL  (order placement, exits — NEVER shed)
         1 = HIGH      (fetch_order, fetch_positions for open trades)
         2 = NORMAL    (tickers, balances, markets)
@@ -119,10 +123,18 @@ class TokenBucket:
     letting it depend on a gap in the higher band's arrivals.
     """
 
+    PRIME = -1
     CRITICAL = 0
     HIGH = 1
     NORMAL = 2
     LOW = 3
+
+    # Share of the weight budget the non-urgent bands (HIGH, NORMAL, LOW) must leave free
+    # once a priority bot is connected. Before that the historical gate (80 %) stays.
+    DEFAULT_PRIME_RESERVE_PCT = 0.25
+    LEGACY_GATE_RATIO = 0.80
+    # Weight one bot may spend in the PRIME band per minute before it is demoted.
+    DEFAULT_PRIME_CAP_WEIGHT_PER_MIN = 150.0
 
     # Graduated backoff levels: (duration_s, shed_threshold, rate_factor, label)
     # shed_threshold: requests at or above this priority are shed
@@ -146,6 +158,8 @@ class TokenBucket:
         weight_mode: bool = False,
         weight_budget_per_min: int = 0,
         exchange: str = "",
+        prime_reserve_pct: float = DEFAULT_PRIME_RESERVE_PCT,
+        prime_cap_weight_per_min: float = DEFAULT_PRIME_CAP_WEIGHT_PER_MIN,
     ) -> None:
         self.rate_per_s = rate_per_s
         self.burst = burst
@@ -166,6 +180,24 @@ class TokenBucket:
         self._waiters: list[tuple[int, float, int, float, asyncio.Future]] = []
         self._counter = 0
         self._drain_task: asyncio.Task | None = None
+        # Set whenever a PRIME or CRITICAL request is queued: the drain loop sleeps on it
+        # (outside its lock) so an urgent arrival never waits out a pacing or gate sleep.
+        self._urgent = asyncio.Event()
+        # PRIME: reserve, per-bot cap, and the statistics that show whether they work.
+        # ``prime_enabled`` is flipped by the daemon while at least one live priority bot
+        # is registered; until then the bucket keeps its historical 80 % gate, so a fleet
+        # without priority bots behaves exactly as before.
+        self.prime_enabled = False
+        self.prime_reserve_pct = float(prime_reserve_pct)
+        self.prime_cap_weight_per_min = float(prime_cap_weight_per_min)
+        self._prime_windows: dict[str, deque[tuple[float, float]]] = {}
+        self.prime_weight_by_bot: dict[str, float] = {}
+        self.prime_demotions = 0
+        self.prime_demotions_by_bot: dict[str, int] = {}
+        self._prime_demotion_logged_at: dict[str, float] = {}
+        self.grants_by_band: dict[int, int] = {}
+        self.weight_by_band: dict[int, float] = {}
+        self._wait_samples: dict[int, deque[tuple[float, float]]] = {}
         # Anti-starvation / heap hygiene (see _select_next, _reap_dead_waiters)
         self.starvation_grant_interval = self._STARVATION_GRANT_INTERVAL
         self._grants_since_yield = 0
@@ -316,11 +348,99 @@ class TokenBucket:
             self._weight_used_last_min -= old_cost
         return max(0.0, self._weight_used_last_min)
 
+    # ------------------------------------------------------------------ PRIME bookkeeping
+
+    @property
+    def gate_ratio(self) -> float:
+        """Fraction of the weight budget the non-urgent bands may fill."""
+        if self.prime_enabled:
+            return max(0.0, 1.0 - self.prime_reserve_pct)
+        return self.LEGACY_GATE_RATIO
+
+    def _over_gate(self, priority: int) -> bool:
+        """Whether a request of this band must wait for the weight window to decay."""
+        if priority <= self.CRITICAL:
+            return False
+        if not (self.weight_mode and self.weight_budget_per_min > 0):
+            return False
+        return self.weight_used_last_min > self.weight_budget_per_min * self.gate_ratio
+
+    def resolve_prime(self, priority: int, cost: float, bot_id: str | None) -> int:
+        """Apply the per-bot PRIME cap: over it the request is demoted, never refused.
+
+        The window counts weight at request time. A demoted request is served as CRITICAL
+        (still ahead of every other band, still outside the weight gate), so the cap bounds
+        what one runaway bot can take from the top band without ever delaying an order.
+        """
+        if priority >= self.CRITICAL:
+            return priority
+        priority = self.PRIME  # no band above PRIME
+        if not bot_id or self.prime_cap_weight_per_min <= 0:
+            return priority
+        now = time.monotonic()
+        window = self._prime_windows.setdefault(bot_id, deque())
+        cutoff = now - 60.0
+        while window and window[0][0] < cutoff:
+            window.popleft()
+        used = sum(c for _, c in window)
+        if used + cost > self.prime_cap_weight_per_min:
+            self.prime_demotions += 1
+            self.prime_demotions_by_bot[bot_id] = self.prime_demotions_by_bot.get(bot_id, 0) + 1
+            last = self._prime_demotion_logged_at.get(bot_id, 0.0)
+            if now - last >= 30.0:
+                self._prime_demotion_logged_at[bot_id] = now
+                logger.warning(
+                    "PRIME cap: %s spent %.0f weight in 60s (cap %.0f) — demoting to CRITICAL "
+                    "(%d demotions so far)",
+                    bot_id,
+                    used,
+                    self.prime_cap_weight_per_min,
+                    self.prime_demotions_by_bot[bot_id],
+                )
+            return self.CRITICAL
+        window.append((now, cost))
+        self.prime_weight_by_bot[bot_id] = self.prime_weight_by_bot.get(bot_id, 0.0) + cost
+        return priority
+
+    def _note_grant(self, priority: int, cost: float, requested_at: float) -> None:
+        now = time.monotonic()
+        self.grants_by_band[priority] = self.grants_by_band.get(priority, 0) + 1
+        self.weight_by_band[priority] = self.weight_by_band.get(priority, 0.0) + cost
+        samples = self._wait_samples.setdefault(priority, deque(maxlen=4096))
+        samples.append((now, now - requested_at))
+
+    _BAND_NAMES = {-1: "prime", 0: "critical", 1: "high", 2: "normal", 3: "low"}
+
+    def band_stats(self, window_s: float = 600.0) -> dict[str, dict[str, float]]:
+        """Grants, weight and wait percentiles (ms) per band over the last ``window_s``."""
+        cutoff = time.monotonic() - window_s
+        out: dict[str, dict[str, float]] = {}
+        for prio, name in self._BAND_NAMES.items():
+            waits = sorted(w for ts, w in self._wait_samples.get(prio, ()) if ts >= cutoff)
+            entry: dict[str, float] = {
+                "grants_total": float(self.grants_by_band.get(prio, 0)),
+                "weight_total": round(self.weight_by_band.get(prio, 0.0), 1),
+                "window_grants": float(len(waits)),
+            }
+            if waits:
+                entry["wait_p50_ms"] = round(waits[len(waits) // 2] * 1000, 1)
+                p95 = waits[min(len(waits) - 1, int(len(waits) * 0.95))]
+                entry["wait_p95_ms"] = round(p95 * 1000, 1)
+                entry["wait_max_ms"] = round(waits[-1] * 1000, 1)
+            out[name] = entry
+        return out
+
+    def record_external_weight(self, cost: float) -> None:
+        """Book weight spent outside the bucket (the daemon's own positions fetch)."""
+        if cost > 0:
+            self._record_weight(cost)
+
     async def acquire(
         self,
         cost: float = 1.0,
         priority: int = 2,
         capital: float = 0.0,
+        bot_id: str | None = None,
     ) -> None:
         # Invariant: a cost above burst can never be granted (tokens are
         # capped at burst), which deadlocks the whole queue behind it.
@@ -331,6 +451,8 @@ class TokenBucket:
                 self.burst,
             )
             cost = self.burst
+        requested_at = time.monotonic()
+        priority = self.resolve_prime(priority, cost, bot_id)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "acquire request: cost=%.1f priority=%d capital=%.0f "
@@ -361,14 +483,9 @@ class TokenBucket:
                     self._current_backoff_label,
                     self.backoff_remaining_s,
                 )
-            loop = asyncio.get_running_loop()
-            future: asyncio.Future = loop.create_future()
-            entry = (priority, -capital, self._counter, cost, future)
-            self._counter += 1
-            heapq.heappush(self._waiters, entry)
-            self._ensure_drain()
-            await future
+            await self._enqueue(priority, capital, cost)
             self._record_weight(cost)
+            self._note_grant(priority, cost, requested_at)
             return
 
         async with self._lock:
@@ -377,27 +494,44 @@ class TokenBucket:
             # budget not exceeded.  Without the weight check, a fresh daemon
             # (full bucket, empty weight window) hands out all tokens at once
             # and causes a 429 burst.
-            if not self._waiters and self.tokens >= cost:
+            #
+            # A PRIME request does not queue behind a waiting lower band: it outranks
+            # every waiter, so when a token is there it is simply granted.
+            head_priority = self._waiters[0][0] if self._waiters else None
+            may_pass = head_priority is None or (
+                priority < self.CRITICAL and priority < head_priority
+            )
+            if may_pass and self.tokens >= cost:
                 if self.weight_mode and self.weight_budget_per_min > 0:
-                    if self.weight_used_last_min + cost > self.weight_budget_per_min:
-                        # Budget exhausted — fall through to queue/drain
-                        pass
-                    else:
+                    over_budget = self.weight_used_last_min + cost > self.weight_budget_per_min
+                    # The reserve is held back from the non-urgent bands on the fast path
+                    # too, otherwise an empty queue would let them spend it.
+                    gated = self.prime_enabled and self._over_gate(priority)
+                    if not over_budget and not gated:
                         self.tokens -= cost
                         self._record_weight(cost)
+                        self._note_grant(priority, cost, requested_at)
                         return
                 else:
                     self.tokens -= cost
                     self._record_weight(cost)
+                    self._note_grant(priority, cost, requested_at)
                     return
+        await self._enqueue(priority, capital, cost)
+        self._record_weight(cost)
+        self._note_grant(priority, cost, requested_at)
+
+    async def _enqueue(self, priority: int, capital: float, cost: float) -> None:
+        """Queue a request and wait for the drain loop to grant it."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         entry = (priority, -capital, self._counter, cost, future)
         self._counter += 1
         heapq.heappush(self._waiters, entry)
         self._ensure_drain()
+        if priority < self.HIGH:
+            self._urgent.set()
         await future
-        self._record_weight(cost)
 
     # Grants served from the head of the heap before one grant is handed to
     # the most starved lower band, when the higher band has enough standing
@@ -436,12 +570,18 @@ class TokenBucket:
             self.reaped_count += dropped
         return dropped
 
-    def _select_next(self) -> tuple[int, tuple[int, float, int, float, asyncio.Future]] | None:
+    def _select_next(
+        self, over_gate: bool = False
+    ) -> tuple[int, tuple[int, float, int, float, asyncio.Future]] | None:
         """Pick the next waiter to serve, as ``(heap_index, entry)``.
 
         Normally the head.  Every ``starvation_grant_interval`` head grants,
         the best live waiter of the most starved lower band is chosen instead
         so strict priority cannot translate into indefinite postponement.
+
+        ``over_gate``: the weight window is above the gate, so a non-urgent waiter
+        (HIGH, NORMAL, LOW) must not be picked, not even as the starvation share of a
+        PRIME or CRITICAL head, or the reserve would leak one grant in six.
         """
         if not self._waiters:
             return None
@@ -450,6 +590,8 @@ class TokenBucket:
             best_i = -1
             for i, w in enumerate(self._waiters):
                 if w[0] <= head_priority or w[4].done():
+                    continue
+                if over_gate and w[0] > self.CRITICAL:
                     continue
                 if best_i < 0 or w[:3] < self._waiters[best_i][:3]:
                     best_i = i
@@ -471,12 +613,33 @@ class TokenBucket:
 
     _POST_BACKOFF_MAX_BURST = 5
 
+    async def _pause(self, seconds: float) -> None:
+        """Sleep, but wake at once when a PRIME or CRITICAL request is queued.
+
+        Always called OUTSIDE ``self._lock``: the drain loop used to sleep while holding
+        it (weight-gate waits of up to 15 s, 2 s of spacing after a grant), and the fast
+        path of ``acquire`` and the positions cache miss need that same lock, so an order
+        arriving meanwhile could neither be granted nor even enqueued until the sleep ended.
+        """
+        if seconds <= 0:
+            await asyncio.sleep(0)
+            return
+        try:
+            await asyncio.wait_for(self._urgent.wait(), timeout=seconds)
+        except TimeoutError:
+            pass
+
     async def _drain_loop(self) -> None:
         served_since_backoff = 0
         while self._waiters:
+            pause = 0.0
             async with self._lock:
+                # Decisions below see every waiter queued so far; one queued after this
+                # point sets the event again and ends the pause.
+                self._urgent.clear()
                 now = time.monotonic()
                 in_backoff = now < self._backoff_until
+                gated = False
 
                 if not in_backoff:
                     self._clear_backoff_state()
@@ -490,62 +653,67 @@ class TokenBucket:
                                 "back-off relaxed to %.1fx",
                                 self._backoff_factor,
                             )
-                    if self.weight_mode and self.weight_budget_per_min > 0:
-                        next_priority = self._waiters[0][0] if self._waiters else 99
-                        if next_priority > 0:
-                            used = self.weight_used_last_min
-                            headroom = self.weight_budget_per_min * 0.80
-                            if used > headroom:
-                                wait_for_decay = max(
-                                    1.0, (used - headroom) / max(self._effective_rate(), 0.1)
-                                )
-                                wait_for_decay = min(wait_for_decay, 15.0)
-                                if served_since_backoff == 0:
-                                    logger.info(
-                                        "post-backoff weight gate: %.0f/%.0f used "
-                                        "(headroom=%.0f%%), waiting %.1fs for decay",
-                                        used,
-                                        self.weight_budget_per_min,
-                                        headroom / self.weight_budget_per_min * 100,
-                                        wait_for_decay,
-                                    )
-                                await asyncio.sleep(wait_for_decay)
-                                continue
+                    next_priority = self._waiters[0][0] if self._waiters else 99
+                    if self._over_gate(next_priority):
+                        used = self.weight_used_last_min
+                        headroom = self.weight_budget_per_min * self.gate_ratio
+                        pause = min(
+                            max(1.0, (used - headroom) / max(self._effective_rate(), 0.1)),
+                            15.0,
+                        )
+                        if served_since_backoff == 0:
+                            logger.info(
+                                "post-backoff weight gate: %.0f/%.0f used "
+                                "(headroom=%.0f%%), waiting %.1fs for decay",
+                                used,
+                                self.weight_budget_per_min,
+                                headroom / self.weight_budget_per_min * 100,
+                                pause,
+                            )
+                        gated = True
 
-                self._refill()
-                if now - self._last_reap >= self._REAP_INTERVAL_S:
-                    self._reap_dead_waiters()
-                selected = self._select_next()
-                if selected is not None:
-                    index, entry = selected
-                    cost = entry[3]
-                    # Drop waiters whose client already gave up (shed deadline reached):
-                    # spending tokens on them starves the callers still waiting.
-                    if entry[4].done():
-                        self._remove_at(index)
-                        continue
-                    if self.tokens >= cost:
-                        self._remove_at(index)
-                        if index == 0:
-                            self._grants_since_yield += 1
+                if not gated:
+                    self._refill()
+                    if now - self._last_reap >= self._REAP_INTERVAL_S:
+                        self._reap_dead_waiters()
+                    over_gate = (not in_backoff) and self._over_gate(self.HIGH)
+                    selected = self._select_next(over_gate=over_gate)
+                    if selected is not None:
+                        index, entry = selected
+                        cost = entry[3]
+                        # Drop waiters whose client already gave up (shed deadline reached):
+                        # spending tokens on them starves the callers still waiting.
+                        if entry[4].done():
+                            self._remove_at(index)
+                            continue
+                        if self.tokens >= cost:
+                            self._remove_at(index)
+                            if index == 0:
+                                self._grants_since_yield += 1
+                            else:
+                                self._grants_since_yield = 0
+                                self.starvation_yields += 1
+                            self.tokens -= cost
+                            future = entry[4]
+                            if not future.done():
+                                future.set_result(None)
+                            served_since_backoff += 1
+                            effective_rate = self._effective_rate()
+                            spacing = 1.0 / max(effective_rate, 0.1)
+                            if in_backoff or served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
+                                spacing = max(spacing, 2.0)
+                            # The spacing smooths the fleet's traffic. The token bucket still
+                            # bounds a PRIME flow, so it is not made to wait for it.
+                            # (``_pause(0)`` still yields to the event loop.)
+                            pause = 0.0 if entry[0] < self.CRITICAL else spacing
                         else:
-                            self._grants_since_yield = 0
-                            self.starvation_yields += 1
-                        self.tokens -= cost
-                        future = entry[4]
-                        if not future.done():
-                            future.set_result(None)
-                        served_since_backoff += 1
-                        effective_rate = self._effective_rate()
-                        spacing = 1.0 / max(effective_rate, 0.1)
-                        if in_backoff or served_since_backoff <= self._POST_BACKOFF_MAX_BURST:
-                            spacing = max(spacing, 2.0)
-                        await asyncio.sleep(spacing)
+                            effective_rate = self._effective_rate()
+                            needed = entry[3] - self.tokens
+                            pause = needed / max(effective_rate, 0.001)
+                    else:
                         continue
-                effective_rate = self._effective_rate()
-                needed = (self._waiters[0][3] - self.tokens) if self._waiters else 1.0
-                wait = needed / max(effective_rate, 0.001)
-            await asyncio.sleep(wait)
+            # Sleeping happens here, outside the lock.
+            await self._pause(pause)
 
     def trigger_backoff(
         self,
@@ -815,6 +983,8 @@ class DaemonStats:
     positions_puts: int = 0
     positions_gets: int = 0
     positions_cache_hits: int = 0
+    # PRIME requests from a connection not entitled to the band (served as CRITICAL)
+    prime_ineligible: int = 0
     # Connection churn tracking
     total_connects: int = 0
     total_disconnects: int = 0
@@ -918,6 +1088,8 @@ class BotEntry:
     last_heartbeat: float
     state: str
     connection_id: int
+    # Live bot that asked for the PRIME band (never True for a dry-run bot).
+    priority_bot: bool = False
 
 
 class BotRegistry:
@@ -927,6 +1099,7 @@ class BotRegistry:
 
     def register(self, bot_id: str, info: dict, conn_id: int) -> BotEntry:
         now = time.monotonic()
+        dry_run = bool(info.get("dry_run", False))
         entry = BotEntry(
             bot_id=bot_id,
             config_file=info.get("config_file", ""),
@@ -935,13 +1108,14 @@ class BotRegistry:
             strategy=info.get("strategy", ""),
             timeframe=info.get("timeframe", ""),
             pairs_count=info.get("pairs_count", 0),
-            dry_run=info.get("dry_run", False),
+            dry_run=dry_run,
             api_port=info.get("api_port", 0),
             pid=info.get("pid", 0),
             connected_at=now,
             last_heartbeat=now,
             state=info.get("state", "initializing"),
             connection_id=conn_id,
+            priority_bot=bool(info.get("priority_bot", False)) and not dry_run,
         )
         old = self._bots.get(bot_id)
         if old is not None:
@@ -956,6 +1130,22 @@ class BotRegistry:
         bot_id = self._conn_to_bot.get(conn_id)
         entry = self._bots.get(bot_id) if bot_id else None
         return bool(entry.dry_run) if entry else False
+
+    def is_priority(self, conn_id: int) -> bool:
+        """Whether the bot on this connection registered as a live priority bot."""
+        bot_id = self._conn_to_bot.get(conn_id)
+        entry = self._bots.get(bot_id) if bot_id else None
+        return bool(entry.priority_bot) if entry else False
+
+    def bot_id_of(self, conn_id: int) -> str | None:
+        return self._conn_to_bot.get(conn_id)
+
+    def priority_count(self, exchange: str | None = None) -> int:
+        return sum(
+            1
+            for b in self._bots.values()
+            if b.priority_bot and (exchange is None or b.exchange == exchange)
+        )
 
     def heartbeat(self, conn_id: int) -> None:
         bot_id = self._conn_to_bot.get(conn_id)
@@ -1007,6 +1197,7 @@ class BotRegistry:
                     "timeframe": entry.timeframe,
                     "pairs_count": entry.pairs_count,
                     "dry_run": entry.dry_run,
+                    "priority_bot": entry.priority_bot,
                     "api_port": entry.api_port,
                     "pid": entry.pid,
                     "state": state,
@@ -1142,6 +1333,16 @@ class Daemon:
         self._swr_dry_max_stale_candles = int(global_cfg.get("swr_dry_max_stale_candles", 20))
         self._swr_max_missing_tail_candles = int(global_cfg.get("swr_max_missing_tail_candles", 4))
         self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
+        # Priority bots (``shared_ohlcv_cache.priority_bot``): see TokenBucket.PRIME.
+        self._prime_reserve_pct = float(
+            global_cfg.get("prime_reserve_pct", TokenBucket.DEFAULT_PRIME_RESERVE_PCT)
+        )
+        self._prime_cap_weight_per_min = float(
+            global_cfg.get("prime_cap_weight_per_min", TokenBucket.DEFAULT_PRIME_CAP_WEIGHT_PER_MIN)
+        )
+        self._prime_swr_max_stale_candles = int(global_cfg.get("prime_swr_max_stale_candles", 1))
+        self._prime_acquire_max_wait_s = float(global_cfg.get("prime_acquire_max_wait_s", 600.0))
+        self._prime_sync_fill_max_s = float(global_cfg.get("prime_sync_fill_max_s", 20.0))
         self._swr_inflight: set = set()  # series keys with a background refresh pending
         self._swr_tasks: set = set()  # strong refs so background tasks aren't GC'd
         self._open_pos_memo: dict[str, tuple[float, set]] = {}  # exchange -> (ts, symbols)
@@ -1262,9 +1463,52 @@ class Daemon:
                 weight_mode=ex_cfg.get("weight_mode", False),
                 weight_budget_per_min=int(ex_cfg.get("weight_budget_per_min", 0)),
                 exchange=exchange,
+                prime_reserve_pct=self._prime_reserve_pct,
+                prime_cap_weight_per_min=self._prime_cap_weight_per_min,
             )
+            b.prime_enabled = self.registry.priority_count(exchange) > 0
             self.budgets[exchange] = b
         return b
+
+    def _sync_prime_state(self) -> None:
+        """Arm (or disarm) the PRIME reserve of each bucket from the live priority bots.
+
+        With no priority bot connected the buckets keep their historical 80 % gate, so the
+        feature is inert until a bot asks for it and reverts when the last one leaves.
+        """
+        for exchange, bucket in self.budgets.items():
+            enabled = self.registry.priority_count(exchange) > 0
+            if enabled != bucket.prime_enabled:
+                bucket.prime_enabled = enabled
+                logger.info(
+                    "PRIME reserve %s for %s (gate %.0f%% of the weight budget)",
+                    "armed" if enabled else "disarmed",
+                    exchange,
+                    bucket.gate_ratio * 100,
+                )
+
+    def _bot_key(self, conn_id: int) -> str:
+        return self.registry.bot_id_of(conn_id) or f"conn{conn_id}"
+
+    def _is_prime_bot(self, req: dict, conn_id: int) -> bool:
+        """Whether this request comes from a live bot entitled to the PRIME band."""
+        if self.registry.is_dry(conn_id):
+            return False
+        return self.registry.is_priority(conn_id) or bool(req.get("prime"))
+
+    def _resolve_priority(self, req: dict, conn_id: int, default: int) -> int:
+        """Requested band, with PRIME granted only to a live priority bot.
+
+        A dry-run bot, or a connection that never said it is a priority bot, is served as
+        CRITICAL when it asks for PRIME: still ahead of the fleet, never refused.
+        """
+        priority = int(req.get("priority", default))
+        if priority >= TokenBucket.CRITICAL:
+            return priority
+        if self._is_prime_bot(req, conn_id):
+            return TokenBucket.PRIME
+        self.stats.prime_ineligible += 1
+        return TokenBucket.CRITICAL
 
     @property
     def _ratelimit_state_path(self) -> str:
@@ -1323,11 +1567,11 @@ class Daemon:
         for exchange, bucket in self.budgets.items():
             now = time.monotonic()
             backoff_remaining = max(0.0, bucket._backoff_until - now)
-            q_depths = {"critical": 0, "high": 0, "normal": 0, "low": 0}
+            q_depths = {"prime": 0, "critical": 0, "high": 0, "normal": 0, "low": 0}
             # Waiters abandoned by their client are swept on a timer, so the raw
             # depth over-reports what is really waiting between two sweeps.
-            q_live = {"critical": 0, "high": 0, "normal": 0, "low": 0}
-            prio_names = {0: "critical", 1: "high", 2: "normal", 3: "low"}
+            q_live = {"prime": 0, "critical": 0, "high": 0, "normal": 0, "low": 0}
+            prio_names = {-1: "prime", 0: "critical", 1: "high", 2: "normal", 3: "low"}
             for waiter in bucket._waiters:
                 prio_name = prio_names.get(waiter[0], "low")
                 q_depths[prio_name] += 1
@@ -1343,6 +1587,18 @@ class Daemon:
                 "backoff_remaining_s": round(backoff_remaining, 1),
                 "queue_depths": q_depths,
                 "queue_live_depths": q_live,
+                "bands": bucket.band_stats(),
+                "prime": {
+                    "armed": bucket.prime_enabled,
+                    "gate_pct": round(bucket.gate_ratio * 100, 1),
+                    "reserve_pct": round(bucket.prime_reserve_pct * 100, 1),
+                    "cap_weight_per_min": bucket.prime_cap_weight_per_min,
+                    "demotions": bucket.prime_demotions,
+                    "demotions_by_bot": dict(bucket.prime_demotions_by_bot),
+                    "weight_by_bot": {
+                        k: round(v, 1) for k, v in bucket.prime_weight_by_bot.items()
+                    },
+                },
                 "starvation_yields": bucket.starvation_yields,
                 "starvation_grant_interval": bucket.starvation_grant_interval,
                 "reaped_count": bucket.reaped_count,
@@ -1569,6 +1825,10 @@ class Daemon:
         # Trim if we've grown past the cap
         series.trim_to(self._max_candles_per_series)
 
+    # Added to the capital of a priority bot's candle requests so that, inside a band, they
+    # sort ahead of the fleet's (the heap key is ``(priority, -capital, counter)``).
+    _PRIME_CAPITAL_BONUS = 1e9
+
     async def _handle_fetch(self, req: dict, conn_id: int = 0) -> dict:
         t0 = time.monotonic()
         self.stats.requests_total += 1
@@ -1580,8 +1840,14 @@ class Daemon:
         since_ms = req.get("since_ms")
         limit = int(req.get("limit") or 500)
         tf_ms = tf_to_ms(timeframe)
-        priority = int(req.get("priority", TokenBucket.NORMAL))
+        priority = self._resolve_priority(req, conn_id, TokenBucket.NORMAL)
         capital = float(req.get("capital", 0.0))
+        # The candles of a priority bot are not PRIME (the budget cannot afford a hundred
+        # REST candle reads ahead of the fleet's orders) but they lead THEIR band: the
+        # capital tie-break of the heap is made to rank them first.
+        prime_bot = self._is_prime_bot(req, conn_id)
+        if prime_bot:
+            capital += self._PRIME_CAPITAL_BONUS
 
         series = self.store.get_or_create(
             exchange,
@@ -1690,6 +1956,10 @@ class Daemon:
         # Dry bots tolerate more staleness: they piggyback on the cache the live
         # bots keep warm and should almost never spend fetch budget themselves.
         stale_candles = self._swr_dry_max_stale_candles if is_dry else self._swr_max_stale_candles
+        # A priority bot's hot series is served at most one closed candle late.
+        prime_hot = prime_bot and is_hot
+        if prime_hot:
+            stale_candles = min(stale_candles, self._prime_swr_max_stale_candles)
         serve_cap_ms = max(stale_candles * tf_ms, self._swr_min_stale_ms)
         if (
             is_live
@@ -1744,7 +2014,7 @@ class Daemon:
             self.stats.cache_swr += 1
             return self._ok(req["req_id"], series, start_ms, end_ms, t0, served_from="stale")
 
-        errors, shed_errors = await self._fill_chunks(
+        fill = self._fill_chunks(
             series,
             exchange,
             trading_mode,
@@ -1757,6 +2027,27 @@ class Daemon:
             priority,
             capital,
         )
+        if prime_hot and had_any_cache:
+            # Too stale to serve (see above): fill synchronously, but never hold a priority
+            # bot's cycle longer than ``prime_sync_fill_max_s``. Past it the stale series is
+            # served and the fill finishes in the background.
+            fill_task = asyncio.ensure_future(fill)
+            done, _ = await asyncio.wait({fill_task}, timeout=self._prime_sync_fill_max_s)
+            if not done:
+                self._swr_tasks.add(fill_task)
+                fill_task.add_done_callback(self._swr_tasks.discard)
+                series.hits += 1
+                self.stats.cache_swr += 1
+                logger.info(
+                    "priority bot fill of %s %s still running after %.0fs — serving stale",
+                    pair,
+                    timeframe,
+                    self._prime_sync_fill_max_s,
+                )
+                return self._ok(req["req_id"], series, start_ms, end_ms, t0, served_from="stale")
+            errors, shed_errors = fill_task.result()
+        else:
+            errors, shed_errors = await fill
 
         if is_live and errors == 0:
             series.last_live_refresh_wall_ms = int(time.time() * 1000)
@@ -1975,7 +2266,7 @@ class Daemon:
 
     # --------- centralized rate limiter: acquire
 
-    async def _handle_acquire(self, req: dict) -> dict:
+    async def _handle_acquire(self, req: dict, conn_id: int = 0) -> dict:
         """Acquire a rate token from the exchange's TokenBucket.
 
         Bots call this before any non-OHLCV REST call (create_order, etc.)
@@ -1986,21 +2277,30 @@ class Daemon:
         is granted.
         """
         exchange = req.get("exchange", "hyperliquid")
-        priority = int(req.get("priority", TokenBucket.NORMAL))
+        priority = self._resolve_priority(req, conn_id, TokenBucket.NORMAL)
         capital = float(req.get("capital", 0.0))
         default_weight = self._get_weight(exchange, "acquire")
         cost = float(req.get("cost", default_weight))
         budget = self._get_budget(exchange)
         self.stats.acquire_total += 1
+        # A PRIME request is never abandoned by the daemon on the 90 s fleet deadline: the
+        # bot that sent it is trading. (The client still gives up after its own timeout.)
+        max_wait = (
+            self._prime_acquire_max_wait_s
+            if priority < TokenBucket.CRITICAL
+            else self._acquire_max_wait_s
+        )
+        # The per-bot PRIME cap needs to know whose request this is; no other band does.
+        extra = {"bot_id": self._bot_key(conn_id)} if priority < TokenBucket.CRITICAL else {}
         try:
             await asyncio.wait_for(
-                budget.acquire(cost, priority=priority, capital=capital),
-                timeout=self._acquire_max_wait_s,
+                budget.acquire(cost, priority=priority, capital=capital, **extra),
+                timeout=max_wait,
             )
         except TimeoutError:
             logger.info(
                 "acquire shed after %.0fs (priority=%d, cost=%.0f, exchange=%s)",
-                self._acquire_max_wait_s,
+                max_wait,
                 priority,
                 cost,
                 exchange,
@@ -2010,7 +2310,7 @@ class Daemon:
                 "ok": False,
                 "throttled": True,
                 "error_type": "CacheRateLimited",
-                "error_message": (f"acquire not granted within {self._acquire_max_wait_s:.0f}s"),
+                "error_message": (f"acquire not granted within {max_wait:.0f}s"),
             }
         resp: dict[str, Any] = {"req_id": req.get("req_id", ""), "ok": True}
         if budget.backoff_active:
@@ -2120,13 +2420,13 @@ class Daemon:
 
     # --------- centralized rate limiter: shared tickers
 
-    async def _handle_tickers(self, req: dict) -> dict:
+    async def _handle_tickers(self, req: dict, conn_id: int = 0) -> dict:
         """Return cached tickers or fetch them (one fetch coalesced for all bots)."""
         exchange = req.get("exchange", "hyperliquid")
         trading_mode = req.get("trading_mode", "futures")
         market_type = req.get("market_type", "")
         # Allow clients to escalate priority (e.g. HIGH when open positions exist)
-        priority = int(req.get("priority", TokenBucket.NORMAL))
+        priority = self._resolve_priority(req, conn_id, TokenBucket.NORMAL)
         self.stats.tickers_requests += 1
 
         cache_key = f"{exchange}:{trading_mode}:{market_type}"
@@ -2168,14 +2468,15 @@ class Daemon:
             # twenty bots, twenty identical fetches, which keeps the exchange throttling us.
             # One coalesced CRITICAL fetch here serves all of them for the cache TTL instead.
             if priority <= TokenBucket.HIGH and budget.backoff_active:
-                priority = TokenBucket.CRITICAL
+                priority = min(priority, TokenBucket.CRITICAL)  # keeps PRIME as PRIME
             logger.debug(
                 "tickers fetch starting for %s (weight=%.0f, priority=%d)",
                 cache_key,
                 tickers_weight,
                 priority,
             )
-            await budget.acquire(tickers_weight, priority=priority)
+            extra = {"bot_id": self._bot_key(conn_id)} if priority < TokenBucket.CRITICAL else {}
+            await budget.acquire(tickers_weight, priority=priority, **extra)
             fetcher = self._get_fetcher(exchange, trading_mode)
             client = await fetcher._ensure_client()
             params: dict[str, Any] = {}
@@ -2763,6 +3064,10 @@ class Daemon:
             entry.exchange,
             initializing_count,
         )
+        if entry.priority_bot and hold_off_s > 0:
+            # No admission hold-off for a bot that trades: it joins at once.
+            hold_off_s, hold_off_reason = 0.0, "priority bot"
+        self._sync_prime_state()
 
         self.event_log.emit(
             "bot_connect",
@@ -2781,12 +3086,13 @@ class Daemon:
                 initializing_count=initializing_count,
             )
         logger.info(
-            "bot registered: %s (exchange=%s strategy=%s pid=%d) "
+            "bot registered: %s (exchange=%s strategy=%s pid=%d%s) "
             "fleet_size=%d hold_off=%.0fs reason=%s",
             bot_id,
             entry.exchange,
             entry.strategy,
             entry.pid,
+            " PRIORITY" if entry.priority_bot else "",
             self.registry.size,
             hold_off_s,
             hold_off_reason,
@@ -2802,6 +3108,7 @@ class Daemon:
 
     def _handle_unregister(self, req: dict, conn_id: int) -> dict:
         entry = self.registry.unregister(conn_id, reason="clean_shutdown")
+        self._sync_prime_state()
         if entry:
             self.event_log.emit(
                 "bot_disconnect",
@@ -3002,10 +3309,11 @@ class Daemon:
                 "total_disconnects": self.stats.total_disconnects,
                 "peak_clients": self.stats.peak_clients,
                 "short_lived_connections": self.stats.short_lived_connections,
+                "prime_ineligible_requests": self.stats.prime_ineligible,
                 **budget_stats,
             }
         if op == "acquire":
-            return await self._handle_acquire(req)
+            return await self._handle_acquire(req, conn_id)
         if op == "report_429":
             return await self._handle_report_429(req)
         if op == "report_order":
@@ -3013,7 +3321,7 @@ class Daemon:
         if op == "report_iso_breach":
             return await self._handle_iso_breach(req)
         if op == "tickers":
-            return await self._handle_tickers(req)
+            return await self._handle_tickers(req, conn_id)
         if op == "positions_put":
             return await self._handle_positions_put(req)
         if op == "positions_get":
@@ -3148,6 +3456,7 @@ class Daemon:
         finally:
             if not clean_disconnect:
                 entry = self.registry.unregister(conn_id, reason="connection_lost")
+                self._sync_prime_state()
                 if entry:
                     self.event_log.emit(
                         "bot_crash",
@@ -3239,6 +3548,11 @@ class Daemon:
                 cache_key = positions_cache_key(exchange, wallet)
                 try:
                     client = await self._positions_fetch_client(exchange, wallet)
+                    # The fetch goes out on its own ccxt client, outside the bucket: book
+                    # its weight so the window the gate reads is not blind to it.
+                    self._get_budget(exchange).record_external_weight(
+                        self._get_weight(exchange, "positions_get")
+                    )
                     positions = await client.fetch_positions()
                     self._positions_cache[cache_key] = _PositionsCacheEntry(
                         data=positions, pushed_at=time.monotonic()
@@ -3287,13 +3601,23 @@ class Daemon:
                 w_budget = bucket.weight_budget_per_min
                 w_pct = (w_used / w_budget * 100) if w_budget > 0 else 0
                 weight_info = f" w={w_used:.0f}/{w_budget}({w_pct:.0f}%)"
+            bands = bucket.band_stats(window_s=self.global_cfg.get("stats_interval_s", 60) * 5)
+            wait_info = " waitp95ms=" + "/".join(
+                f"{n[0]}:{bands[n].get('wait_p95_ms', 0):.0f}"
+                for n in ("prime", "critical", "high", "normal", "low")
+            )
+            prime_info = (
+                f" prime={'on' if bucket.prime_enabled else 'off'}"
+                f"/{int(bucket.grants_by_band.get(TokenBucket.PRIME, 0))}g"
+                f"/{bucket.prime_demotions}dem"
+            )
             budget_lines.append(
                 f"{exchange}: tokens={bucket.tokens:.1f}/{bucket.burst} "
                 f"backoff={'ACTIVE' if bucket.backoff_active else 'off'} "
                 f"queue={q_total} queued_bo={bucket.queued_during_backoff} "
                 f"429s={bucket.backoff_count} "
                 f"escalation={bucket._consecutive_backoffs}"
-                f"{weight_info}"
+                f"{weight_info}{prime_info}{wait_info}"
             )
         budget_str = " | ".join(budget_lines) if budget_lines else "none"
         conn_stats = f" conn={s.total_connects}/{s.total_disconnects} peak={s.peak_clients}"
