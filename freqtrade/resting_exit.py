@@ -23,6 +23,7 @@ feature is inert for every strategy that does not implement it.
 from __future__ import annotations
 
 import logging
+import time as time_module
 from datetime import UTC, datetime
 from math import isclose, isfinite
 from typing import TYPE_CHECKING
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 ROI_TP_TAG = "roi_tp"
 CANCEL_REASON_ROI_TP = "roi_tp withdrawn"
+# A re-place driven only by an amount change (target unchanged) is allowed at most once per
+# trade every AMOUNT_REPLACE_EVERY_LOOPS loops: a persistent mismatch must not churn orders.
+AMOUNT_REPLACE_EVERY_LOOPS = 20
+# Placement failures are logged at WARNING at most once per trade per this many seconds.
+FAILURE_WARN_INTERVAL_S = 3600
 
 
 def is_roi_tp(order: Order | None) -> bool:
@@ -68,6 +74,12 @@ class RestingExitManager:
     def __init__(self, bot: FreqtradeBot) -> None:
         self._bot = bot
         self._refusal_logged = False
+        self._loop = 0
+        # order_id -> trade.amount when the TP was placed (the order itself may carry less:
+        # the exit amount is capped to the wallet position on account-scoped exchanges).
+        self._placed_for_amount: dict[str, float] = {}
+        self._last_amount_replace: dict[int, int] = {}
+        self._failure_warned_at: dict[int, float] = {}
 
     @property
     def strategy_opted_in(self) -> bool:
@@ -76,11 +88,79 @@ class RestingExitManager:
     def process(self, trades: list[Trade] | None = None) -> None:
         if not self.strategy_opted_in:
             return
+        self._loop += 1
         for trade in trades if trades is not None else Trade.get_open_trades():
             try:
                 self._process_trade(trade)
             except (DependencyException, ExchangeError, InvalidOrderException) as e:
-                logger.warning(f"Resting exit for {trade.pair} not managed this loop: {e}")
+                self._warn_failure(trade, f"Resting exit for {trade.pair} not managed: {e}")
+
+    def _warn_failure(self, trade: Trade, msg: str) -> None:
+        now = time_module.monotonic()
+        last = self._failure_warned_at.get(trade.id)
+        if last is None or now - last >= FAILURE_WARN_INTERVAL_S:
+            self._failure_warned_at[trade.id] = now
+            logger.warning(f"{msg} (repeats logged at debug level for the next hour)")
+        else:
+            logger.debug(msg)
+
+    def _target_price(self, trade: Trade) -> float | None:
+        target = strategy_safe_wrapper(self._bot.strategy.resting_exit_price, default_retval=None)(
+            trade=trade, current_time=datetime.now(UTC)
+        )
+        if target is None or not isfinite(target) or target <= 0:
+            return None
+        return self._bot.exchange.price_to_precision(
+            trade.pair,
+            target,
+            # never below the target for a long exit, never above it for a short exit
+            rounding_mode=ROUND_DOWN if trade.is_short else ROUND_UP,
+        )
+
+    def _allowed_target(self, trade: Trade) -> float | None:
+        price = self._target_price(trade)
+        refusal = resting_exit_refusal(self._bot.config, self._bot.exchange)
+        if refusal and price is not None and not self._refusal_logged:
+            logger.warning(f"Resting take-profit disabled: {refusal}.")
+            self._refusal_logged = True
+        return None if refusal else price
+
+    def _refresh_funding(self, trade: Trade) -> None:
+        """Same refresh as execute_trade_exit, done BEFORE the hook so the target computed
+        now is the one the next loop computes again (no re-place caused by the refresh)."""
+        trade.set_funding_fees(
+            self._bot.exchange.get_funding_fees(
+                pair=trade.pair,
+                amount=trade.amount,
+                is_short=trade.is_short,
+                open_date=trade.date_last_filled_utc,
+            )
+        )
+
+    def _amount_replace_allowed(self, trade: Trade) -> bool:
+        """Amount-only change: bounded, a persistent mismatch must not churn orders."""
+        last = self._last_amount_replace.get(trade.id)
+        if last is not None and self._loop - last < AMOUNT_REPLACE_EVERY_LOOPS:
+            return False
+        self._last_amount_replace[trade.id] = self._loop
+        return True
+
+    def _needs_action(self, trade: Trade, tp: Order | None, price: float | None) -> bool:
+        if price is None:
+            return tp is not None
+        if tp is None:
+            return True
+        return not (self._same_price(trade, tp, price) and self._same_amount(trade, tp))
+
+    def _same_price(self, trade: Trade, tp: Order, price: float) -> bool:
+        tick = self._bot.exchange.price_get_one_pip(trade.pair, price)
+        return abs(tp.safe_placement_price - price) < tick / 2
+
+    def _same_amount(self, trade: Trade, tp: Order) -> bool:
+        # Compare with trade.amount as it was when this TP was sent, not with the order's
+        # own amount (capped to the wallet position, it may legitimately be smaller).
+        placed_for = self._placed_for_amount.setdefault(tp.order_id, trade.amount)
+        return isclose(placed_for, trade.amount, rel_tol=1e-9)
 
     # ------------------------------------------------------------------------------------
     def _process_trade(self, trade: Trade) -> None:
@@ -93,30 +173,23 @@ class RestingExitManager:
             return
         tp = tps[0] if tps else None
 
-        target = strategy_safe_wrapper(self._bot.strategy.resting_exit_price, default_retval=None)(
-            trade=trade, current_time=datetime.now(UTC)
-        )
-        refusal = resting_exit_refusal(self._bot.config, self._bot.exchange)
-        if refusal and target is not None and not self._refusal_logged:
-            logger.warning(f"Resting take-profit disabled: {refusal}.")
-            self._refusal_logged = True
+        price = self._allowed_target(trade)
+        if not self._needs_action(trade, tp, price):
+            return
+        if price is not None:
+            # Something will be sent: refresh funding first and recompute the target with it.
+            self._refresh_funding(trade)
+            price = self._allowed_target(trade)
+            if not self._needs_action(trade, tp, price):
+                return
 
-        if target is None or refusal or not isfinite(target) or target <= 0:
+        if price is None:
             if tp is not None:
                 self._cancel(trade, tp)
             return
 
-        price = self._bot.exchange.price_to_precision(
-            trade.pair,
-            target,
-            # never below the target for a long exit, never above it for a short exit
-            rounding_mode=ROUND_DOWN if trade.is_short else ROUND_UP,
-        )
         if tp is not None:
-            tick = self._bot.exchange.price_get_one_pip(trade.pair, price)
-            same_price = abs(tp.safe_placement_price - price) < tick / 2
-            same_amount = isclose(tp.safe_amount, trade.amount, rel_tol=1e-9)
-            if same_price and same_amount:
+            if self._same_price(trade, tp, price) and not self._amount_replace_allowed(trade):
                 return
             logger.info(f"Re-pricing roi_tp of {trade.pair}: {tp.safe_placement_price} -> {price}")
             if not self._cancel(trade, tp):
@@ -129,6 +202,8 @@ class RestingExitManager:
         order = self._bot.exchange.fetch_order(tp.order_id, trade.pair)
         cancelled = self._bot.handle_cancel_exit(trade, order, tp, CANCEL_REASON_ROI_TP)
         Trade.commit()
+        if not tp.ft_is_open:
+            self._placed_for_amount.pop(tp.order_id, None)
         return cancelled
 
     def _place(self, trade: Trade, price: float) -> bool:
@@ -140,4 +215,8 @@ class RestingExitManager:
             skip_custom_exit_price=True,
         )
         Trade.commit()
+        if placed:
+            tp = next((o for o in trade.open_orders if is_roi_tp(o)), None)
+            if tp is not None:
+                self._placed_for_amount[tp.order_id] = trade.amount
         return placed

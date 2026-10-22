@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from freqtrade.enums import ExitCheckTuple, ExitType, TradingMode
+from freqtrade.exceptions import DependencyException, TemporaryError
 from freqtrade.persistence import Order, Trade
 from freqtrade.resting_exit import ROI_TP_TAG, RestingExitManager, resting_exit_refusal
 from freqtrade.strategy.interface import IStrategy
@@ -508,3 +509,185 @@ def test_tp_bookkeeping_not_notified_only_fill(mocker, default_conf_usdt, book):
     assert not trade.is_open
     sent = [c.args[0]["type"] for c in send.call_args_list]
     assert RPCMessageType.EXIT_FILL in sent
+
+
+# --------------------------------------------------------------------------------------
+# Regression tests for the review of c86460f0c (points 1 to 6).
+def test_review1_leftover_still_open_is_kept_then_retried(mocker, default_conf_usdt, book, caplog):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    # cancel refused: the exchange still reports the order open
+    mocker.patch(
+        f"{EXMS}.cancel_order_with_result",
+        side_effect=lambda oid, p, a: dict(book.orders[oid]),
+    )
+    trade.is_open = False
+    trade.close_date = dt_now()
+    bot.cancel_leftover_orders_of_closed_trade(trade)
+    Trade.commit()
+    assert book.orders[tp.order_id]["status"] == "open"
+    assert tp.ft_is_open  # not marked closed while the exchange says open
+
+    mocker.patch(f"{EXMS}.cancel_order_with_result", side_effect=book.cancel)
+    bot.retry_leftover_orders_of_closed_trades()
+    assert book.orders[tp.order_id]["status"] == "canceled"
+    assert not tp.ft_is_open
+    assert tp.status == "canceled"
+
+
+def test_review1_leftover_429_retried_and_warned_once(mocker, default_conf_usdt, book, caplog):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    mocker.patch(f"{EXMS}.cancel_order_with_result", side_effect=TemporaryError("429"))
+    trade.is_open = False
+    trade.close_date = dt_now()
+    bot.cancel_leftover_orders_of_closed_trade(trade)
+    Trade.commit()
+    assert tp.ft_is_open
+    for _ in range(3):
+        bot.retry_leftover_orders_of_closed_trades()
+    assert (
+        sum("leftover order" in r.message for r in caplog.records if r.levelname == "WARNING") == 1
+    )
+
+    # old closed trades are out of the bounded sweep
+    trade.close_date = dt_now() - timedelta(hours=25)
+    Trade.commit()
+    mocker.patch(f"{EXMS}.cancel_order_with_result", side_effect=book.cancel)
+    bot.retry_leftover_orders_of_closed_trades()
+    assert book.orders[tp.order_id]["status"] == "open"
+
+    trade.close_date = dt_now()
+    Trade.commit()
+    bot.retry_leftover_orders_of_closed_trades()
+    assert book.orders[tp.order_id]["status"] == "canceled"
+    assert not tp.ft_is_open
+
+
+def test_review2_amount_capped_by_wallet_no_churn(mocker, default_conf_usdt, book):
+    conf = deepcopy(default_conf_usdt)
+    conf["trading_mode"] = "futures"
+    conf["margin_mode"] = "isolated"
+    target = {"price": 2.1}
+    bot = _bot(mocker, conf, target)
+    assert bot.trading_mode == TradingMode.FUTURES
+    bot.exchange._ft_has["orders_are_account_scoped"] = True
+    mocker.patch.object(bot.wallets, "get_owned", return_value=9.9)
+    trade = _open_trade()
+    trade.trading_mode = TradingMode.FUTURES
+    Trade.commit()
+    for _ in range(5):
+        bot._resting_exit.process()
+    assert len(book.created) == 1
+    assert book.created[0]["amount"] == pytest.approx(9.9)
+    # a real target move still re-prices immediately
+    target["price"] = 2.05
+    bot._resting_exit.process()
+    assert len(book.created) == 2
+    for _ in range(5):
+        bot._resting_exit.process()
+    assert len(book.created) == 2
+
+
+def test_review2_amount_only_replace_is_bounded(mocker, default_conf_usdt, book):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    bot._resting_exit.process()
+    # persistent amount drift without any price move (e.g. repeated resync)
+    for i in range(10):
+        trade.amount = 10.0 - (i + 1) * 0.01
+        bot._resting_exit.process()
+    # first amount change re-places, the next ones wait for the bound
+    assert len(book.created) == 2
+
+
+def test_review3_resting_tp_does_not_disable_onexchange_recovery(mocker, default_conf_usdt, book):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    trade.fee_open_currency = "USDT"
+    bot._resting_exit.process()
+    assert _tp(trade) is not None
+    mocker.patch.object(bot.wallets, "check_exit_amount", return_value=False)
+    onex = mocker.patch.object(bot, "handle_onexchange_order", return_value=False)
+    mocker.patch.object(bot.strategy, "should_exit", return_value=[])
+    bot.exit_positions([trade])
+    assert onex.call_count == 1
+
+
+def test_review3_other_open_order_still_skips_recovery(mocker, default_conf_usdt, book):
+    bot = _bot(mocker, default_conf_usdt, target=None)
+    trade = _open_trade()
+    trade.fee_open_currency = "USDT"
+    assert bot.execute_trade_exit(
+        trade, 2.2, exit_check=ExitCheckTuple(exit_type=ExitType.EXIT_SIGNAL)
+    )
+    mocker.patch.object(bot.wallets, "check_exit_amount", return_value=False)
+    onex = mocker.patch.object(bot, "handle_onexchange_order", return_value=False)
+    bot.exit_positions([trade])
+    assert onex.call_count == 0
+
+
+def test_review4_tp_filled_before_loop_exit_no_second_exit(mocker, default_conf_usdt, book):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    book.fill(tp.order_id)  # filled on the exchange after manage_open_orders ran
+    n0 = len(book.created)
+    res = bot.execute_trade_exit(trade, 2.12, exit_check=ExitCheckTuple(exit_type=ExitType.ROI))
+    assert res is False
+    assert not trade.is_open
+    assert len(book.created) == n0
+
+
+def test_review5_cancel_on_exchange_is_notified(mocker, default_conf_usdt, book):
+    target = {"price": 2.1}
+    bot = _bot(mocker, default_conf_usdt, target)
+    trade = _open_trade()
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    send = mocker.patch.object(bot.rpc, "send_msg")
+    # bookkeeping: withdrawal and re-price stay silent
+    target["price"] = 2.05
+    bot._resting_exit.process()
+    target["price"] = None
+    bot._resting_exit.process()
+    assert not [c for c in send.call_args_list if c.args[0]["type"].name == "EXIT_CANCEL"]
+    # an exchange-side cancel is an event
+    target["price"] = 2.1
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    book.orders[tp.order_id]["status"] = "canceled"
+    bot.manage_open_orders()
+    cancels = [c for c in send.call_args_list if c.args[0]["type"].name == "EXIT_CANCEL"]
+    assert len(cancels) == 1
+    assert cancels[0].args[0]["reason"] == "cancelled on exchange"
+
+
+def test_review5_placement_failure_warns_once_per_hour(mocker, default_conf_usdt, book, caplog):
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    _open_trade()
+    mocker.patch.object(bot, "execute_trade_exit", side_effect=DependencyException("boom"))
+    for _ in range(4):
+        bot._resting_exit.process()
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "boom" in r.message]
+    assert len(warnings) == 1
+
+
+def test_review6_funding_refresh_does_not_trigger_replace(mocker, default_conf_usdt, book):
+    bot = _bot(mocker, default_conf_usdt, target=None)
+    mocker.patch(f"{EXMS}.get_funding_fees", return_value=-0.5)
+    mocker.patch.object(
+        type(bot.strategy),
+        "resting_exit_price",
+        new=lambda self, trade, current_time, **kw: 2.1 - (trade.funding_fees or 0.0) / 10,
+    )
+    trade = _open_trade()
+    for _ in range(4):
+        bot._resting_exit.process()
+    assert len(book.created) == 1
+    assert _tp(trade).price == pytest.approx(2.15)

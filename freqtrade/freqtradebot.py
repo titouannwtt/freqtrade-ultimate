@@ -16,6 +16,7 @@ from time import sleep
 from typing import Any
 
 from schedule import Scheduler
+from sqlalchemy import select
 
 from freqtrade import constants
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
@@ -66,7 +67,7 @@ from freqtrade.plugins.protectionmanager import ProtectionManager
 from freqtrade.position_audit import AuditLedger, safe_ledger_name
 from freqtrade.position_iso_guard import PositionIsoGuard
 from freqtrade.resolvers import ExchangeResolver, StrategyResolver
-from freqtrade.resting_exit import RestingExitManager, is_roi_tp
+from freqtrade.resting_exit import CANCEL_REASON_ROI_TP, RestingExitManager, is_roi_tp
 from freqtrade.rpc import RPCManager
 from freqtrade.rpc.external_message_consumer import ExternalMessageConsumer
 from freqtrade.rpc.rpc_types import (
@@ -259,6 +260,8 @@ class FreqtradeBot(LoggingMixin):
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
             # Foreign (sibling) order ids already warned about — see manage_open_orders.
             self._foreign_orders_warned: set[str] = set()
+            # Leftover order ids of closed trades already warned about (cancel not confirmed).
+            self._leftover_warned: set[str] = set()
             # trade_id -> last time we warned that its exit is under the exchange minimum.
             # Throttles a per-cycle message down to hourly; see _exit_meets_exchange_minimum.
             self._undersized_exit_warned: dict[int, float] = {}
@@ -492,6 +495,8 @@ class FreqtradeBot(LoggingMixin):
         with self._exit_lock:
             # Check for exchange cancellations, timeouts and user requested replace
             self.manage_open_orders()
+            # Retry leftover orders of recently closed trades whose cancel was not confirmed.
+            self.retry_leftover_orders_of_closed_trades()
         _cp("orders")
 
         # Protect from collisions with force_exit.
@@ -2720,7 +2725,9 @@ class FreqtradeBot(LoggingMixin):
         trades_closed = 0
         for trade in trades:
             if (
-                not trade.has_open_orders
+                # A resting take-profit (roi_tp) is permanent: it must not disable the
+                # recovery path (external close, liquidation, amount resync).
+                not any(not is_roi_tp(o) for o in trade.open_orders)
                 and not trade.has_open_sl_orders
                 and trade.fee_open_currency is not None
                 and not self.wallets.check_exit_amount(trade)
@@ -3241,25 +3248,75 @@ class FreqtradeBot(LoggingMixin):
         Does not go through update_trade_state: the trade is already closed.
         """
         for order in trade.open_orders:
-            try:
-                co = self.exchange.cancel_order_with_result(
-                    order.order_id, trade.pair, order.safe_remaining
+            self._cancel_leftover_order(trade, order, reason)
+
+    def _cancel_leftover_order(self, trade: Trade, order: Order, reason: str) -> bool:
+        """Cancel one leftover order. The order is only marked closed in the database when
+        the exchange confirms it is no longer open; otherwise it stays `ft_is_open` and
+        `retry_leftover_orders_of_closed_trades` tries again on the next loops.
+        :return: True when the order is confirmed closed on the exchange.
+        """
+        try:
+            co = self.exchange.cancel_order_with_result(
+                order.order_id, trade.pair, order.safe_remaining
+            )
+        except Exception as e:
+            self._warn_leftover_once(
+                order, f"Could not cancel leftover order {order.order_id} of closed {trade}: {e}"
+            )
+            return False
+        status = co.get("status")
+        if status not in constants.NON_OPEN_EXCHANGE_STATES:
+            self._warn_leftover_once(
+                order,
+                f"Leftover order {order.order_id} of closed {trade} still {status} on the "
+                "exchange after its cancellation: will retry.",
+            )
+            return False
+        if (co.get("filled") or 0.0) > (order.filled or 0.0):
+            logger.warning(
+                f"Leftover order {order.order_id} of closed {trade} filled "
+                f"{co.get('filled')} before its cancellation: check the exchange position."
+            )
+        logger.info(f"Cancelled leftover order {order.order_id} of closed {trade}.")
+        order.ft_cancel_reason = reason
+        order.ft_is_open = False
+        order.status = status
+        self._leftover_warned.discard(order.order_id)
+        return True
+
+    def _warn_leftover_once(self, order: Order, msg: str) -> None:
+        if order.order_id in self._leftover_warned:
+            logger.debug(msg)
+            return
+        if len(self._leftover_warned) > 2000:
+            self._leftover_warned.clear()
+        self._leftover_warned.add(order.order_id)
+        logger.warning(msg)
+
+    def retry_leftover_orders_of_closed_trades(self, hours: int = 24) -> None:
+        """Retry cancelling non-stoploss orders still open in the database on trades closed
+        in the last `hours` (a cancel refused or rate-limited when the trade closed)."""
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        try:
+            orders = Order.session.scalars(
+                select(Order)
+                .join(Trade, Order.ft_trade_id == Trade.id)
+                .filter(
+                    Order.ft_is_open.is_(True),
+                    Order.ft_order_side != "stoploss",
+                    Trade.is_open.is_(False),
+                    Trade.close_date >= since,
                 )
-            except Exception:
-                logger.warning(
-                    f"Could not cancel leftover order {order.order_id} of closed {trade}.",
-                    exc_info=True,
-                )
-                continue
-            if (co.get("filled") or 0.0) > (order.filled or 0.0):
-                logger.warning(
-                    f"Leftover order {order.order_id} of closed {trade} filled "
-                    f"{co.get('filled')} before its cancellation: check the exchange position."
-                )
-            logger.info(f"Cancelled leftover order {order.order_id} of closed {trade}.")
-            order.ft_cancel_reason = reason
-            order.ft_is_open = False
-            order.status = co.get("status") or "canceled"
+                .limit(50)
+            ).all()
+        except Exception:
+            logger.warning("Could not query leftover orders of closed trades.", exc_info=True)
+            return
+        for order in orders:
+            self._cancel_leftover_order(order.trade, order, "trade closed")
+        if orders:
+            Trade.commit()
 
     def cancel_all_open_orders(self) -> None:
         """
@@ -3683,6 +3740,9 @@ class FreqtradeBot(LoggingMixin):
         if trade.has_open_orders:
             if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
                 return False
+            if not trade.is_open:
+                # The order cancelled above had filled in the meantime and closed the trade.
+                return False
 
         if not self._exit_meets_exchange_minimum(trade, amount, limit):
             return False
@@ -3824,7 +3884,10 @@ class FreqtradeBot(LoggingMixin):
         if trade.enter_tag and trade.enter_tag.startswith("[replay]"):
             return
         # Withdrawing or re-pricing a resting take-profit is bookkeeping, not an event.
-        if is_roi_tp(trade.select_order_by_order_id(order_id)):
+        if is_roi_tp(trade.select_order_by_order_id(order_id)) and reason in (
+            CANCEL_REASON_ROI_TP,
+            constants.CANCEL_REASON["REPLACE"],
+        ):
             return
         if trade.exit_order_status == reason:
             return
