@@ -1412,6 +1412,9 @@ class Daemon:
     ) -> None:
         """Execute one exchange fetch and merge the result into `series`."""
         fetcher = self._get_fetcher(series.exchange, series.trading_mode)
+        # Taken BEFORE the request: a candle that had not closed by then may have
+        # come back as a snapshot (see CandleSeries.merge / partial_ts).
+        fetched_at_ms = int(time.time() * 1000)
         limit = chunk.n_candles(series.tf_ms)
         # Ccxt generally returns <= limit candles; never go over the
         # exchange's documented max_candles_per_call.
@@ -1480,7 +1483,13 @@ class Daemon:
             self.stats.fetch_errors += 1
             raise last_exc  # type: ignore[misc]
 
+        # funding rates are never partial.
+        track = series.candle_type != "funding_rate"
+        covered = (chunk.start_ms, chunk.end_ms)
+
         if not data:
+            if track:
+                series.merge([], fetched_at_ms=fetched_at_ms, covered=covered)
             return
 
         # Detect historic boundary: first returned ts is well past what we
@@ -1500,7 +1509,11 @@ class Daemon:
                 series.timeframe,
             )
 
-        series.merge(data)
+        series.merge(
+            data,
+            fetched_at_ms=fetched_at_ms if track else None,
+            covered=covered if track else None,
+        )
 
         # Trim if we've grown past the cap
         series.trim_to(self._max_candles_per_series)
@@ -1559,8 +1572,12 @@ class Daemon:
         # the whole delay a live bot sees is how long the resulting refresh
         # waits in the rate-limit queue — which is what `hot` addresses below.
         now_wall_ms = int(time.time() * 1000)
+        # Cached candles that were stored while forming and have closed since:
+        # they must be refetched, wherever they sit in the series.
+        stale_ts = series.closed_partials(now_wall_ms, start_ms, end_ms)
         if (
             is_live
+            and not stale_ts
             and series.last_live_refresh_wall_ms > 0
             and (now_wall_ms - series.last_live_refresh_wall_ms) < tf_ms
             and series.range_start_ms is not None
@@ -1587,6 +1604,7 @@ class Daemon:
             tf_ms=tf_ms,
             refresh_overlap_candles=refresh_overlap if is_live else 0,
             earliest_available_ts=series.earliest_available_ts,
+            stale_ts=stale_ts,
         )
 
         if not gaps:

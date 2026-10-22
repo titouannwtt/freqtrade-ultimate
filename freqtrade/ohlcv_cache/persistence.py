@@ -17,7 +17,7 @@ On daemon startup, all feather files are loaded. On periodic flush
 (every flush_interval_s), only dirty series are written.
 
 Also writes a small `_meta.json` alongside each feather to persist
-auxiliary fields (earliest_available_ts, last_live_refresh_wall_ms).
+auxiliary fields (earliest_available_ts, last_live_refresh_wall_ms, partial_ts).
 """
 
 from __future__ import annotations
@@ -163,6 +163,7 @@ class FeatherPersistence:
             candles=arr,
             earliest_available_ts=meta.get("earliest_available_ts"),
             last_live_refresh_wall_ms=int(meta.get("last_live_refresh_wall_ms", 0) or 0),
+            partial_ts={int(t) for t in meta.get("partial_ts", [])},
         )
         series.dirty = False
         return series
@@ -219,6 +220,10 @@ class FeatherPersistence:
             "earliest_available_ts": series.earliest_available_ts,
             "last_live_refresh_wall_ms": series.last_live_refresh_wall_ms,
             "n_candles": len(arr),
+            # Candles stored while still forming and not refetched yet; absent
+            # in files written before the flag existed (those are unknown, see
+            # scripts/ftcache_flag_partials.py).
+            "partial_ts": sorted(series.partial_ts),
         }
         meta_path = self._meta_file_for(series)
         meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")

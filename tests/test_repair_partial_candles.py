@@ -84,9 +84,15 @@ def test_dry_run_reports_and_writes_nothing(datadir, capsys):
 
 
 def test_apply_rebuilds_from_finer_and_is_atomic(datadir):
-    path, *_ = datadir
-    assert _run(path, "--apply", "--force") == 0
+    path, h1, _ = datadir
+    backups = path / "backups"
+    assert _run(path, "--apply", "--force", "--backup-dir", str(backups)) == 0
     fdir = path / "futures"
+    # originals copied to a new timestamped folder, untouched copy of the bad data
+    (snap,) = list(backups.iterdir())
+    assert snap.name.startswith("repair_")
+    saved_h1 = pd.read_feather(snap / "futures" / "BTC_USDC_USDC-1h-futures.feather")
+    pd.testing.assert_frame_equal(saved_h1, h1, check_dtype=False)
     fixed_h1 = pd.read_feather(fdir / "BTC_USDC_USDC-1h-futures.feather")
     fixed_d1 = pd.read_feather(fdir / "BTC_USDC_USDC-1d-futures.feather")
     m5 = pd.read_feather(fdir / "BTC_USDC_USDC-5m-futures.feather")
@@ -103,6 +109,46 @@ def test_apply_rebuilds_from_finer_and_is_atomic(datadir):
     }
     _, fixes = repair.analyse_pair(frames, 0, 10**14, 0.01, stats, "BTC_USDC_USDC")
     assert fixes == []
+
+
+def test_apply_requires_backup_dir(datadir):
+    path, *_ = datadir
+    with pytest.raises(SystemExit):
+        _run(path, "--apply", "--force")
+
+
+def test_apply_never_reuses_a_backup_folder(datadir, monkeypatch):
+    path, *_ = datadir
+    backups = path / "backups"
+    fixed = repair.datetime.now(tz=repair.UTC)
+
+    class _Frozen(repair.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(repair, "datetime", _Frozen)
+    assert _run(path, "--apply", "--force", "--backup-dir", str(backups)) == 0
+    with pytest.raises(FileExistsError):
+        _run(path, "--apply", "--force", "--backup-dir", str(backups))
+
+
+def test_confidence_solid_when_two_sources_agree(datadir):
+    path, h1, _ = datadir
+    fdir = path / "futures"
+    m5 = pd.read_feather(fdir / "BTC_USDC_USDC-5m-futures.feather")
+    m15 = _aggregate(m5, "15min")
+    stats = {tf: repair.TfStats() for tf in repair.ORDER}
+    _, fixes = repair.analyse_pair(
+        {"5m": m5, "15m": m15, "1h": h1}, 0, 10**14, 0.01, stats, "BTC_USDC_USDC"
+    )
+    assert [f["confidence"] for f in fixes] == ["solid"]
+    assert fixes[0]["n_agree"] == 2
+    # a single finer timeframe cannot corroborate itself
+    stats = {tf: repair.TfStats() for tf in repair.ORDER}
+    _, fixes = repair.analyse_pair({"5m": m5, "1h": h1}, 0, 10**14, 0.01, stats, "BTC_USDC_USDC")
+    assert [f["confidence"] for f in fixes] == ["doubtful"]
+    assert stats["1h"].doubtful == 1
 
 
 def test_stored_above_aggregate_is_flagged_not_fixed(datadir):

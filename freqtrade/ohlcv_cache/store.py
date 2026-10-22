@@ -23,6 +23,12 @@ import numpy as np
 logger = logging.getLogger("ftcache.daemon")
 
 
+# A candle received less than this long after its close is still treated as
+# possibly forming: exchanges keep adjusting the last trades of a candle for a
+# moment after the boundary.
+PARTIAL_GRACE_MS = 5_000
+
+
 @dataclass
 class CandleSeries:
     exchange: str
@@ -45,6 +51,12 @@ class CandleSeries:
     misses: int = 0
     # Set to True by merge(), cleared by persistence layer after flush.
     dirty: bool = False
+    # Open timestamps of candles that were received BEFORE they closed (volume
+    # and close are a snapshot that only the next fetch of that candle corrects).
+    # compute_gaps() refetches each of them once it is closed, for live AND
+    # historical requests; without this a candle cached while forming stays
+    # frozen mid-series for ever (the cached tail is the only thing refreshed).
+    partial_ts: set[int] = field(default_factory=set)
 
     @property
     def range_start_ms(self) -> int | None:
@@ -85,8 +97,45 @@ class CandleSeries:
         mask = (ts >= start_ms) & (ts < end_ms_exclusive)
         return self.candles[mask]
 
-    def merge(self, new_candles: list[list]) -> int:
+    def closed_partials(self, now_ms: int, start_ms: int, end_ms_exclusive: int) -> list[int]:
+        """Sorted open timestamps of flagged candles in [start, end) that have closed."""
+        if not self.partial_ts:
+            return []
+        limit = now_ms - self.tf_ms - PARTIAL_GRACE_MS
+        return sorted(t for t in self.partial_ts if start_ms <= t < end_ms_exclusive and t <= limit)
+
+    def _track_partials(
+        self,
+        new_ts: np.ndarray,
+        fetched_at_ms: int,
+        covered: tuple[int, int] | None,
+    ) -> None:
+        closed = new_ts + self.tf_ms + PARTIAL_GRACE_MS <= fetched_at_ms
+        self.partial_ts.difference_update(int(t) for t in new_ts[closed])
+        self.partial_ts.update(int(t) for t in new_ts[~closed])
+        if covered is not None:
+            # The window was asked for after the candles closed: whatever the
+            # exchange answered (even nothing) is the final word, so a flag that
+            # cannot be cleared never triggers a refetch loop.
+            lo, hi = covered
+            self.partial_ts = {
+                t
+                for t in self.partial_ts
+                if not (lo <= t < hi and t + self.tf_ms + PARTIAL_GRACE_MS <= fetched_at_ms)
+            }
+
+    def merge(
+        self,
+        new_candles: list[list],
+        fetched_at_ms: int | None = None,
+        covered: tuple[int, int] | None = None,
+    ) -> int:
         """Merge new candles into this series.
+
+        `fetched_at_ms` is the wall-clock time BEFORE the request was sent. When
+        given, candles that had not closed by then are flagged in `partial_ts`
+        and flags of candles that had are cleared. `covered` is the [start, end)
+        window of the request (see _track_partials).
 
         - De-duplicates by timestamp
         - Overwrites existing candles at matching timestamps (this is how
@@ -95,6 +144,10 @@ class CandleSeries:
         - Returns the number of candles after merge
         """
         if not new_candles:
+            if fetched_at_ms is not None and covered is not None:
+                before = len(self.partial_ts)
+                self._track_partials(np.empty(0, dtype=np.int64), fetched_at_ms, covered)
+                self.dirty = self.dirty or len(self.partial_ts) != before
             return len(self.candles)
         new_arr = np.asarray(new_candles, dtype=np.float64)
         if new_arr.ndim != 2 or new_arr.shape[1] < 6:
@@ -120,6 +173,8 @@ class CandleSeries:
             order = np.argsort(combined[:, 0], kind="stable")
             self.candles = combined[order]
 
+        if fetched_at_ms is not None:
+            self._track_partials(new_arr[:, 0].astype(np.int64), fetched_at_ms, covered)
         self.dirty = True
         self.last_fetch_monotonic = time.monotonic()
         return len(self.candles)
@@ -130,6 +185,9 @@ class CandleSeries:
             return 0
         dropped = len(self.candles) - max_candles
         self.candles = self.candles[-max_candles:]
+        if self.partial_ts:
+            first = int(self.candles[0, 0])
+            self.partial_ts = {t for t in self.partial_ts if t >= first}
         self.dirty = True
         return dropped
 

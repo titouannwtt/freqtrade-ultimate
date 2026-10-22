@@ -6,9 +6,15 @@ Background: between 2026-04 and the fix of the historic download path,
 `freqtrade download-data` stored candles served by the ftcache daemon while they
 were still forming (see CachedExchangeMixin.get_historic_ohlcv). Such a candle
 has a volume far below the real one and is never rewritten by the incremental
-download. A forming candle is a snapshot: its volume only grows, so the value
-rebuilt from complete finer candles is an upper bound that equals the truth
-whenever the finer candles are themselves complete.
+download. A forming candle is a snapshot: its volume only grows, so the stored
+value is a LOWER bound of the truth. The aggregate of complete finer candles is
+also a lower bound (a finer candle may itself be a snapshot); keeping the largest
+of the candidates gives the best available estimate, and it equals the truth when
+at least one finer source is complete. The CSV and the report therefore split the
+corrections in two classes: "solid" (source is 1m, or the finer candles it was
+built from are consistent with a still finer timeframe) and "doubtful" (the finer
+source sits in a range where it disagrees with ITS finer source, or has none to
+check against: e.g. a 1h rebuilt from 5m candles that cannot be verified with 1m).
 
 For each pair and timeframe the script compares every stored candle with the
 aggregate of the finer timeframes that fully cover it (1m, 5m, 15m, 30m, 1h,
@@ -22,8 +28,10 @@ When the stored volume is ABOVE the aggregate (by more than tol) the finer
 candles are the incomplete side: reported as "finer_suspect", never "fixed"
 (there is no finer source to rebuild them from; 5m is only repairable from 1m).
 
-Dry-run by default: nothing is written. `--apply` rewrites the touched files
-atomically (temp file + os.replace) in the freqtrade feather layout.
+Dry-run by default: nothing is written. `--apply` requires `--backup-dir`: the
+originals are copied to a NEW timestamped subfolder first (never overwritten),
+then each file is rewritten atomically (temp file, fsync, os.replace, fsync of the
+directory) in the freqtrade feather layout.
 
 Do NOT --apply while a hyperopt, backtest or the strategy generator reads the
 data directory: stop them first (the script refuses if it sees one, see --force).
@@ -33,7 +41,7 @@ Usage:
   python scripts/repair_partial_candles.py -d user_data/data/hyperliquid \
       --since 2026-04-01 --pairs BTC SOL --csv /tmp/repair.csv
   python scripts/repair_partial_candles.py -d user_data/data/hyperliquid --apply \
-      --backup-dir /path/with/space
+      --backup-dir /path/with/space   # a repair_<UTC timestamp>/ folder is created inside
 """
 
 from __future__ import annotations
@@ -77,6 +85,7 @@ class TfStats:
     scanned: int = 0  # stored candles that have at least one complete finer source
     bad: int = 0
     finer_suspect: int = 0
+    doubtful: int = 0
     no_source: int = 0
     by_source: Counter = field(default_factory=Counter)
     pairs_bad: Counter = field(default_factory=Counter)
@@ -153,6 +162,10 @@ def analyse_pair(
         # np.argmax returns the first max, i.e. the finest source on ties.
         best_i = np.argmax(np.where(has, vol, -1.0), axis=0)
         best_vol = vol[best_i, np.arange(len(t))]
+        # Corroboration: how many independent finer timeframes reach the best
+        # volume (within tol). One lone source (e.g. 5m with no 1m to check it) is
+        # "doubtful": it can itself be a snapshot.
+        n_agree = (has & (np.nan_to_num(vol, nan=-1.0) >= best_vol * (1.0 - tol))).sum(axis=0)
         in_window = (t >= since_ms) & (t + tf_ms <= now_ms)
         st.no_source += int((in_window & ~any_src).sum())
         cand = in_window & any_src
@@ -164,6 +177,7 @@ def analyse_pair(
         for i in np.flatnonzero(bad):
             s = sources[int(best_i[i])]
             a = aggs[s].iloc[i]
+            solid = s == "1m" or int(n_agree[i]) >= 2
             fixes.append(
                 {
                     "pair": pair,
@@ -173,6 +187,8 @@ def analyse_pair(
                     "proposed_volume": float(a["volume"]),
                     "ratio": float(stored[i] / a["volume"]) if a["volume"] else float("nan"),
                     "source": s,
+                    "n_agree": int(n_agree[i]),
+                    "confidence": "solid" if solid else "doubtful",
                     "stored_close": float(df["close"].iat[i]),
                     "proposed_close": float(a["close"]),
                 }
@@ -180,6 +196,7 @@ def analyse_pair(
             for col in ("open", "high", "low", "close", "volume"):
                 df.iat[i, df.columns.get_loc(col)] = a[col]
             st.bad += 1
+            st.doubtful += 0 if solid else 1
             st.by_source[s] += 1
             st.pairs_bad[pair] += 1
     return repaired, fixes
@@ -207,16 +224,33 @@ def write_atomic(path: Path, df: pd.DataFrame) -> None:
             tmp, compression_level=9, compression="lz4"
         )
         shutil.copymode(path, tmp)
+        with Path(tmp).open("rb") as fh:
+            os.fsync(fh.fileno())
         Path(tmp).replace(path)
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
 
 
+# Anything that reads (or writes) the candle files while we rewrite them.
+BUSY_PATTERN = (
+    r"freqtrade (hyperopt|backtesting|backtesting-analysis|download-data|walk-forward"
+    r"|lookahead-analysis|recursive-analysis|webserver|plot-dataframe|plot-profit"
+    r"|edge|convert-data)"
+    r"|run_continuous|strategies_generator|walk_forward|walkforward|replay"
+    r"|user_data/research/[^ ]*\.py"
+)
+
+
 def readers_running() -> list[str]:
     try:
         res = subprocess.run(
-            ["pgrep", "-af", r"freqtrade (hyperopt|backtesting|download-data)|run_continuous"],
+            ["pgrep", "-af", BUSY_PATTERN],
             capture_output=True,
             text=True,
             check=False,
@@ -239,6 +273,8 @@ CSV_FIELDS = [
     "proposed_volume",
     "ratio",
     "source",
+    "n_agree",
+    "confidence",
     "stored_close",
     "proposed_close",
 ]
@@ -256,7 +292,7 @@ def print_report(args: argparse.Namespace, stats: dict[str, TfStats], targets: s
     print(f"datadir={args.datadir} since={args.since} tol={args.tol} mode={mode}")
     print(
         f"{'tf':<4} {'files':>6} {'scanned':>9} {'bad':>7} {'bad%':>6} "
-        f"{'finer_suspect':>14} {'no_source':>10}  sources"
+        f"{'doubtful':>9} {'finer_suspect':>14} {'no_source':>10}  sources"
     )
     for tf in ORDER:
         st = stats[tf]
@@ -268,7 +304,7 @@ def print_report(args: argparse.Namespace, stats: dict[str, TfStats], targets: s
         )
         print(
             f"{tf:<4} {st.files:>6} {st.scanned:>9} {st.bad:>7} {pct:>5.1f}% "
-            f"{st.finer_suspect:>14} {st.no_source:>10}  {src}"
+            f"{st.doubtful:>9} {st.finer_suspect:>14} {st.no_source:>10}  {src}"
         )
     print(f"total bad candles: {sum(s.bad for tf, s in stats.items() if tf in targets)}")
     top: Counter = Counter()
@@ -288,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tol", type=float, default=0.01, help="Relative volume tolerance")
     ap.add_argument("--csv", type=Path, help="Write every proposed fix to this CSV")
     ap.add_argument("--apply", action="store_true", help="Rewrite the files (default: dry-run)")
-    ap.add_argument("--backup-dir", type=Path, help="With --apply: copy originals here first")
+    ap.add_argument(
+        "--backup-dir",
+        type=Path,
+        help="Required with --apply: originals go to a new repair_<UTC timestamp>/ subfolder",
+    )
     ap.add_argument("--force", action="store_true", help="--apply even if a reader is running")
     args = ap.parse_args(argv)
 
@@ -296,12 +336,20 @@ def main(argv: list[str] | None = None) -> int:
     now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
     targets = set(args.timeframes) if args.timeframes else set(ORDER)
 
+    if args.apply and not args.backup_dir:
+        ap.error("--apply requires --backup-dir (originals are copied there first)")
     if args.apply and not args.force:
         running = readers_running()
         if running:
             print("Refusing --apply: data readers are running (use --force to override):")
             print("\n".join(running[:10]))
             return 2
+
+    backup_root: Path | None = None
+    if args.apply:
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_root = args.backup_dir / f"repair_{stamp}"
+        backup_root.mkdir(parents=True, exist_ok=False)  # never reuse / overwrite a backup
 
     files = list_files(args.datadir, args.pairs)
     stats = {tf: TfStats() for tf in ORDER}
@@ -318,9 +366,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.apply and fixes:
             for tf in {f["timeframe"] for f in fixes}:
                 path = tfmap[tf]
-                if args.backup_dir:
-                    args.backup_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, args.backup_dir / path.name)
+                dest = backup_root / path.relative_to(args.datadir)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if dest.exists():
+                    raise FileExistsError(f"refusing to overwrite backup {dest}")
+                shutil.copy2(path, dest)
                 write_atomic(path, repaired[tf])
                 written += 1
 

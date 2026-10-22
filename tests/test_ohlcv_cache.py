@@ -3551,6 +3551,14 @@ class _FakeExchangeBase:
             self._async_get_historic_ohlcv(pair, timeframe, since_ms, candle_type)
         )
 
+    def refresh_latest_ohlcv(self, pair_list, *, since_ms=None, cache=True):
+        async def _all():
+            return await asyncio.gather(
+                *[self._async_get_candle_history(p, tf, ct, since_ms) for p, tf, ct in pair_list]
+            )
+
+        return {(r[0], r[1], r[2]): r[3] for r in self.loop.run_until_complete(_all())}
+
 
 class _FakeCachedExchange(CachedExchangeMixin, _FakeExchangeBase):
     pass
@@ -3596,6 +3604,25 @@ class TestHistoricDownloadBypassesDaemonCache:
         client.acquire_rate_token.assert_awaited()
         assert client.acquire_rate_token.await_args.kwargs["priority"] == OhlcvCacheClient.LOW
 
+    def test_parallel_download_path_bypasses_cache_too(self):
+        from freqtrade.data.history.history_utils import _download_all_pairs_history_parallel
+
+        ex, client = self._make()
+        out = _download_all_pairs_history_parallel(
+            exchange=ex, pairs=["BTC/USDC", "ETH/USDC"], timeframe="1d",
+            candle_type=CandleType.FUTURES,
+        )  # fmt: skip
+        assert ex.direct_calls == 2
+        client.fetch.assert_not_called()
+        assert out[("BTC/USDC", "1d", CandleType.FUTURES)][0][5] == 32527.0
+
+    def test_refresh_latest_ohlcv_outside_download_keeps_cache(self):
+        """AgeFilter / dataprovider use refresh_latest_ohlcv and must stay cached."""
+        ex, client = self._make()
+        ex.refresh_latest_ohlcv([("BTC/USDC", "1d", CandleType.FUTURES)], since_ms=None)
+        client.fetch.assert_awaited_once()
+        assert ex.direct_calls == 0
+
     def test_live_refresh_still_uses_cache(self):
         ex, client = self._make()
         ex.loop.run_until_complete(
@@ -3629,3 +3656,177 @@ class TestHistoricDownloadBypassesDaemonCache:
         with pytest.raises(RuntimeError):
             ex.get_historic_ohlcv("BTC/USDC", "1d", 1_000, CandleType.FUTURES)
         assert _FTCACHE_AUTHORITATIVE_FETCH.get() is False
+
+
+# -------------------------------------------------------------------- frozen partial candles in the daemon cache
+
+_HOUR = 3_600_000
+
+
+class TestPartialCandleTracking:
+    """A candle cached while forming must be refetched once it has closed.
+
+    Before: only the cached tail (+3 candles for live requests) was ever
+    refreshed, so a candle cached while forming stayed frozen mid-series and was
+    served as complete to bots (informatives) and to download-data.
+    """
+
+    NOW = 1_000 * _HOUR + 10 * 60_000  # 10 min into the hour 1000
+
+    def _series(self):
+        from freqtrade.ohlcv_cache.store import CandleSeries
+
+        return CandleSeries("hl", "futures", "BTC/USDC:USDC", "1h", "futures", _HOUR)
+
+    def test_merge_flags_candle_received_before_close(self):
+        s = self._series()
+        s.merge([[998 * _HOUR, 1, 1, 1, 1, 9], [999 * _HOUR, 1, 1, 1, 1, 9]], fetched_at_ms=999 * _HOUR + 60_000)
+        # 998 had closed, 999 was forming.
+        assert s.partial_ts == {999 * _HOUR}
+
+    def test_refetch_after_close_clears_flag_and_replaces_values(self):
+        s = self._series()
+        s.merge([[999 * _HOUR, 1, 1, 1, 1, 260.0]], fetched_at_ms=999 * _HOUR + 60_000)
+        assert s.closed_partials(self.NOW, 0, 10**15) == [999 * _HOUR]
+        s.merge([[999 * _HOUR, 1, 2, 1, 2, 32527.0]], fetched_at_ms=self.NOW)
+        assert s.partial_ts == set()
+        assert s.candles[0, 5] == 32527.0
+
+    def test_forming_candle_is_not_reported_until_closed(self):
+        s = self._series()
+        s.merge([[1000 * _HOUR, 1, 1, 1, 1, 5]], fetched_at_ms=self.NOW)
+        assert s.partial_ts == {1000 * _HOUR}
+        assert s.closed_partials(self.NOW, 0, 10**15) == []
+        assert s.closed_partials(1001 * _HOUR + 10_000, 0, 10**15) == [1000 * _HOUR]
+
+    def test_covered_window_clears_flag_even_if_exchange_returns_nothing(self):
+        s = self._series()
+        s.merge([[999 * _HOUR, 1, 1, 1, 1, 5]], fetched_at_ms=999 * _HOUR + 1)
+        s.merge([], fetched_at_ms=self.NOW, covered=(999 * _HOUR, 1000 * _HOUR))
+        assert s.partial_ts == set()
+
+    def test_trim_prunes_flags_of_dropped_candles(self):
+        s = self._series()
+        s.merge(
+            [[(990 + i) * _HOUR, 1, 1, 1, 1, 5] for i in range(10)],
+            fetched_at_ms=990 * _HOUR,
+        )
+        assert len(s.partial_ts) == 10
+        s.trim_to(3)
+        assert s.partial_ts == {997 * _HOUR, 998 * _HOUR, 999 * _HOUR}
+
+    def test_no_fetch_time_means_no_tracking(self):
+        s = self._series()
+        s.merge([[999 * _HOUR, 1, 1, 1, 1, 5]])
+        assert s.partial_ts == set()
+
+    def test_persistence_round_trip(self, tmp_path):
+        from freqtrade.ohlcv_cache.persistence import FeatherPersistence
+        from freqtrade.ohlcv_cache.store import CandleStore
+
+        store = CandleStore()
+        s = store.get_or_create("hl", "futures", "BTC/USDC:USDC", "1h", "futures", _HOUR)
+        s.merge([[998 * _HOUR, 1, 1, 1, 1, 9], [999 * _HOUR, 1, 1, 1, 1, 9]], fetched_at_ms=999 * _HOUR + 60_000)
+        FeatherPersistence(tmp_path, store).flush_dirty()
+        store2 = CandleStore()
+        assert FeatherPersistence(tmp_path, store2).load_all() == 1
+        assert store2.all()[0].partial_ts == {999 * _HOUR}
+
+
+class TestComputeGapsStale:
+    def test_frozen_mid_series_candle_is_refetched(self):
+        from freqtrade.ohlcv_cache.gaps import Gap, compute_gaps
+
+        # cache covers 900..1000, request 950..1003 (live overlap 3 only reaches 998)
+        gaps = compute_gaps(
+            950 * _HOUR, 1003 * _HOUR, 900 * _HOUR, 1000 * _HOUR, _HOUR,
+            refresh_overlap_candles=3, stale_ts=[960 * _HOUR],
+        )  # fmt: skip
+        assert Gap(960 * _HOUR, 961 * _HOUR) in gaps
+        assert any(g.start_ms <= 998 * _HOUR < g.end_ms for g in gaps)
+
+    def test_historical_request_gets_it_too(self):
+        from freqtrade.ohlcv_cache.gaps import Gap, compute_gaps
+
+        gaps = compute_gaps(
+            950 * _HOUR, 1000 * _HOUR, 900 * _HOUR, 1000 * _HOUR, _HOUR,
+            refresh_overlap_candles=0, stale_ts=[960 * _HOUR, 970 * _HOUR],
+        )  # fmt: skip
+        # one contiguous call from the first to the last frozen candle
+        assert gaps == [Gap(960 * _HOUR, 971 * _HOUR)]
+
+    def test_stale_outside_requested_range_is_ignored(self):
+        from freqtrade.ohlcv_cache.gaps import compute_gaps
+
+        assert (
+            compute_gaps(
+                950 * _HOUR, 1000 * _HOUR, 900 * _HOUR, 1000 * _HOUR, _HOUR,
+                stale_ts=[920 * _HOUR],
+            )  # fmt: skip
+            == []
+        )
+
+    def test_adjacent_gaps_are_merged(self):
+        from freqtrade.ohlcv_cache.gaps import Gap, compute_gaps
+
+        gaps = compute_gaps(
+            900 * _HOUR, 1005 * _HOUR, 900 * _HOUR, 1000 * _HOUR, _HOUR,
+            stale_ts=[1000 * _HOUR],
+        )  # fmt: skip
+        assert gaps == [Gap(1000 * _HOUR, 1005 * _HOUR)]
+
+
+class TestDaemonRefetchesFrozenCandles:
+    """End to end through Daemon._handle_fetch with a fake exchange fetcher."""
+
+    TF = 3_600_000
+
+    def _daemon(self, tmp_path, now_h):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        calls = []
+
+        class _Fetcher:
+            async def fetch_ohlcv(self, pair, timeframe, since_ms, limit, candle_type, **kw):
+                calls.append((since_ms, limit))
+                return [
+                    [since_ms + i * TestDaemonRefetchesFrozenCandles.TF, 1, 2, 0.5, 1.5, 32527.0]
+                    for i in range(limit)
+                ]
+
+        d._get_fetcher = lambda ex, mode: _Fetcher()
+        series = d.store.get_or_create(
+            "hyperliquid", "futures", "BTC/USDC:USDC", "1h", "futures", self.TF
+        )
+        # 30 candles, the one at now_h-10 was cached while forming (volume 260).
+        series.merge([[(now_h - 29 + i) * self.TF, 1, 1, 1, 1, 100.0] for i in range(30)])
+        series.merge([[(now_h - 10) * self.TF, 1, 1, 1, 1, 260.0]])
+        series.partial_ts.add((now_h - 10) * self.TF)
+        series.last_live_refresh_wall_ms = int(time.time() * 1000)
+        return d, series, calls
+
+    def _req(self, since_ms, limit):
+        return {
+            "op": "fetch", "req_id": "r", "exchange": "hyperliquid", "trading_mode": "futures",
+            "pair": "BTC/USDC:USDC", "timeframe": "1h", "candle_type": "futures",
+            "since_ms": since_ms, "limit": limit,
+        }  # fmt: skip
+
+    def test_historic_request_refetches_frozen_candle(self, tmp_path):
+        now_h = int(time.time() * 1000) // self.TF
+        d, series, calls = self._daemon(tmp_path, now_h)
+        frozen = (now_h - 10) * self.TF
+        resp = asyncio.run(d._handle_fetch(self._req((now_h - 20) * self.TF, 21)))
+        assert resp["ok"]
+        assert calls and calls[0][0] == frozen
+        assert series.partial_ts - {now_h * self.TF} == set()
+        row = series.candles[series.candles[:, 0] == frozen][0]
+        assert row[5] == 32527.0
+
+    def test_live_request_refetches_frozen_candle_despite_fast_path(self, tmp_path):
+        now_h = int(time.time() * 1000) // self.TF
+        d, series, calls = self._daemon(tmp_path, now_h)
+        d._schedule_swr_refresh = lambda *a, **k: None
+        resp = asyncio.run(d._handle_fetch(self._req(None, 25)))
+        assert resp["served_from"] != "cache"

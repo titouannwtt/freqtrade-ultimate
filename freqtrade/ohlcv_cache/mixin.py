@@ -13,6 +13,7 @@ Intercepts:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import random
@@ -1395,24 +1396,32 @@ class CachedExchangeMixin:
         {CandleType.SPOT, CandleType.FUTURES, CandleType.MARK, CandleType.FUNDING_RATE}
     )
 
-    def get_historic_ohlcv(self, *args: Any, **kwargs: Any):
-        """Historic download that bypasses the daemon's candle cache.
+    @contextlib.contextmanager
+    def ftcache_authoritative_fetch(self):
+        """Bypass the daemon's candle cache for OHLCV fetches made inside the block.
 
-        Root cause of the stored partial candles (2026-04 onwards): the daemon
-        merges every fetch into its series, including the candle that is still
-        forming. For a historic request (since_ms set) compute_gaps() is called
-        with refresh_overlap_candles=0, so the cached tail is never refetched:
-        once a newer candle is appended, the forming one stays frozen in the
-        middle of the series and is served as if complete. download-data then
-        stores it, and its incremental start (after the last stored candle)
-        never rewrites it. Going straight to the exchange (rate-limited, LOW
-        priority, like backtest/hyperopt) restores the pre-daemon behaviour.
+        Root cause of the candles stored while forming (2026-04-24 onwards): the
+        daemon merges every fetch into its series, including the candle that is
+        still forming. For a historic request (since_ms set) compute_gaps() used
+        refresh_overlap_candles=0, so the cached tail was never refetched: once a
+        newer candle was appended, the forming one stayed frozen in the middle of
+        the series and was served as if complete. download-data then stored it,
+        and its incremental start (after the last stored candle) never rewrote it.
+        The daemon now flags and refetches such candles (store.partial_ts), but a
+        download that persists data for good should not depend on a cache that
+        may still hold legacy frozen candles: read the exchange itself (still
+        metered by the daemon's rate limiter, LOW priority, like backtest).
         """
         token = _FTCACHE_AUTHORITATIVE_FETCH.set(True)
         try:
-            return super().get_historic_ohlcv(*args, **kwargs)  # type: ignore[misc]
+            yield
         finally:
             _FTCACHE_AUTHORITATIVE_FETCH.reset(token)
+
+    def get_historic_ohlcv(self, *args: Any, **kwargs: Any):
+        """Historic download (download-data, FreqUI download, history plot)."""
+        with self.ftcache_authoritative_fetch():
+            return super().get_historic_ohlcv(*args, **kwargs)  # type: ignore[misc]
 
     async def _async_get_candle_history(
         self,

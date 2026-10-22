@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import operator
 from datetime import datetime, timedelta
@@ -513,7 +514,11 @@ def _download_all_pairs_history_parallel(
         needed_pairs: ListPairsWithTimeframes = [
             (p, timeframe, candle_type) for p in [p for p in pairs]
         ]
-        candles = exchange.refresh_latest_ohlcv(needed_pairs, since_ms=since, cache=False)
+        # Persisted for good: on the shared-cache exchanges this must read the
+        # exchange, not a cache that may hold a candle stored while forming.
+        authoritative = getattr(type(exchange), "ftcache_authoritative_fetch", None)
+        with authoritative(exchange) if authoritative else contextlib.nullcontext():
+            candles = exchange.refresh_latest_ohlcv(needed_pairs, since_ms=since, cache=False)
 
     return candles
 
