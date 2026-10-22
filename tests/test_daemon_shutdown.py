@@ -10,6 +10,7 @@ The invariant these tests pin: *whatever* the cleanup does, the process exits an
 socket file does not survive it.
 """
 
+import json
 import os
 import signal
 import socket
@@ -46,8 +47,19 @@ def daemon(tmp_path):
     """A real daemon on a private socket, with a short shutdown budget."""
     sock = tmp_path / "ftcache-test.sock"
     env = {**os.environ, "FTCACHE_SHUTDOWN_GRACE_S": "2"}
+    # Never the operator's real persistence/log directories (~/.freqtrade/ftcache):
+    # the daemon loads, and may flush, whatever it is pointed at.
+    cfg = {
+        "global": {
+            "persistence_path": str(tmp_path / "persist"),
+            "log_path": str(tmp_path / "logs" / "daemon.log"),
+        }
+    }
     proc = subprocess.Popen(
-        [*DAEMON, str(sock)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [*DAEMON, str(sock), "--config", json.dumps(cfg)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     if not _wait_for_socket(sock):
         proc.kill()

@@ -44,6 +44,7 @@ from freqtrade.ohlcv_cache.defaults import (
     resolve_exchange_config,
     resolve_global_config,
 )
+from freqtrade.ohlcv_cache.frozen import detect_frozen
 from freqtrade.ohlcv_cache.gaps import Gap, chunk_gap, compute_gaps
 from freqtrade.ohlcv_cache.logger_setup import setup_daemon_logger
 from freqtrade.ohlcv_cache.persistence import FeatherPersistence
@@ -704,12 +705,21 @@ class ExchangeFetcher:
         candle_type: str,
         priority: int = TokenBucket.NORMAL,
         capital: float = 0.0,
+        until_ms: int | None = None,
+        meta: dict | None = None,
     ) -> list[list]:
+        """Fetch candles. `meta["sent_at_ms"]` is filled with the wall clock taken
+        right AFTER the rate-limiter wait, i.e. when the request really leaves: only
+        then is it known which candles had closed (see CandleSeries.merge)."""
         client = await self._ensure_client()
         is_funding = candle_type == "funding_rate"
         params: dict[str, Any] = {}
         if candle_type and not is_funding and candle_type not in ("spot", "futures"):
             params["price"] = candle_type
+        if until_ms is not None and not is_funding and self.exchange == "hyperliquid":
+            # ccxt-hyperliquid defaults endTime to now: a refetch of an old window
+            # would be billed (and answered) as since..now.
+            params["until"] = until_ms
         weight_key = "funding_history" if is_funding else "fetch"
         ohlcv_weight = self._weight_map.get(weight_key, self._weight_map.get("fetch", 1.0))
         # Response-size weight (Hyperliquid): candleSnapshot adds 1 weight per
@@ -728,6 +738,8 @@ class ExchangeFetcher:
             effective_items = min(limit, max_items) if max_items else limit
             ohlcv_weight += math.ceil(effective_items / per_items)
         await self.budget.acquire(ohlcv_weight, priority=priority, capital=capital)
+        if meta is not None:
+            meta["sent_at_ms"] = int(time.time() * 1000)
         try:
             if is_funding:
                 # ccxt has no funding-rate OHLCV; mirror
@@ -1412,9 +1424,6 @@ class Daemon:
     ) -> None:
         """Execute one exchange fetch and merge the result into `series`."""
         fetcher = self._get_fetcher(series.exchange, series.trading_mode)
-        # Taken BEFORE the request: a candle that had not closed by then may have
-        # come back as a snapshot (see CandleSeries.merge / partial_ts).
-        fetched_at_ms = int(time.time() * 1000)
         limit = chunk.n_candles(series.tf_ms)
         # Ccxt generally returns <= limit candles; never go over the
         # exchange's documented max_candles_per_call.
@@ -1423,6 +1432,14 @@ class Daemon:
 
         max_retries = 3
         last_exc: Exception | None = None
+        # Which candles had closed is judged when the request leaves, i.e. after
+        # the rate-limiter wait (fetch_ohlcv fills sent_at_ms); this is the
+        # fallback should a fetcher not report it.
+        meta: dict = {}
+        fetched_at_ms = int(time.time() * 1000)
+        # A refetch of a window that is entirely in the past must not be asked,
+        # nor billed, as since..now.
+        until_ms = chunk.end_ms - 1 if chunk.end_ms <= fetched_at_ms else None
         for attempt in range(max_retries + 1):
             try:
                 data = await fetcher.fetch_ohlcv(
@@ -1433,7 +1450,10 @@ class Daemon:
                     candle_type=series.candle_type,
                     priority=priority,
                     capital=capital,
+                    until_ms=until_ms,
+                    meta=meta,
                 )
+                fetched_at_ms = int(meta.get("sent_at_ms", fetched_at_ms))
                 break  # success
             except Exception as e:
                 last_exc = e
@@ -1574,7 +1594,15 @@ class Daemon:
         now_wall_ms = int(time.time() * 1000)
         # Cached candles that were stored while forming and have closed since:
         # they must be refetched, wherever they sit in the series.
+        if not series.partial_scanned:
+            self._scan_legacy_partials(series, now_wall_ms)
         stale_ts = series.closed_partials(now_wall_ms, start_ms, end_ms)
+        if is_live and stale_ts and refresh_overlap and series.range_end_ms is not None:
+            # The last `refresh_overlap` candles of the cached tail are refetched
+            # for free by the suffix gap of the next candle close: flagging them
+            # here would cost one extra background fetch per series per candle.
+            overlap_start = (series.range_end_ms // tf_ms + 1 - refresh_overlap) * tf_ms
+            stale_ts = [t for t in stale_ts if t < overlap_start]
         if (
             is_live
             and not stale_ts
@@ -1744,6 +1772,36 @@ class Daemon:
             "served_from": served_from,
             "latency_ms": (time.monotonic() - t0) * 1000,
         }
+
+    def _scan_legacy_partials(self, series: CandleSeries, now_ms: int) -> None:
+        """One-off: flag the frozen candles of a series persisted before partial_ts.
+
+        Done by the daemon itself, from the finer series in its own store, so no
+        offline tool has to race the daemon (which relaunches on demand).
+        """
+        series.partial_scanned = True
+        series.dirty = True
+        finer = [
+            s
+            for s in self.store.all()
+            if s.exchange == series.exchange
+            and s.trading_mode == series.trading_mode
+            and s.pair == series.pair
+            and s.candle_type == series.candle_type
+            and s.tf_ms < series.tf_ms
+            and series.tf_ms % s.tf_ms == 0
+        ]
+        if series.candle_type == "funding_rate":
+            return
+        found = detect_frozen(series, finer, now_ms)
+        if found:
+            series.partial_ts |= found
+            logger.info(
+                "legacy partial scan: %s %s flagged %d frozen candle(s) for refetch",
+                series.pair,
+                series.timeframe,
+                len(found),
+            )
 
     def _ok(
         self,

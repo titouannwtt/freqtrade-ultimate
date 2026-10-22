@@ -1,7 +1,6 @@
-"""Tests for scripts/ftcache_flag_partials.py (flag frozen candles of the persisted cache)."""
+"""Tests for scripts/ftcache_flag_partials.py (read-only estimate of frozen persisted candles)."""
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -46,33 +45,16 @@ def _run(root, *extra):
     return flag.main(["--root", str(root), "--since", "2026-10-01", *extra])
 
 
-def test_dry_run_reports_without_writing(cache_root, capsys):
+def test_report_is_read_only(cache_root, capsys):
     metas = {p: p.read_bytes() for p in cache_root.rglob("*.meta.json")}
     assert _run(cache_root) == 0
     out = capsys.readouterr().out
     assert "total frozen candles: 1" in out
-    assert "nothing written" in out
+    assert "read-only" in out
     assert {p: p.read_bytes() for p in cache_root.rglob("*.meta.json")} == metas
 
 
-def test_apply_requires_backup_dir(cache_root):
+def test_script_has_no_write_mode():
+    """The daemon scans and heals itself; an offline writer would race its relaunch."""
     with pytest.raises(SystemExit):
-        _run(cache_root, "--apply", "--force")
-
-
-def test_apply_writes_partial_ts_that_the_daemon_loads(cache_root, tmp_path):
-    assert _run(cache_root, "--apply", "--force", "--backup-dir", str(tmp_path / "bk")) == 0
-    meta = json.loads((cache_root / "hyperliquid/futures/BTC_USDC_USDC-1h.meta.json").read_text())
-    t0 = int(DAY0.timestamp() * 1000)
-    assert meta["partial_ts"] == [t0 + 7 * 3_600_000]
-    # 5m has nothing to compare against: untouched
-    meta5 = json.loads((cache_root / "hyperliquid/futures/BTC_USDC_USDC-5m.meta.json").read_text())
-    assert meta5["partial_ts"] == []
-    # the (fixed) daemon loads the flags and will refetch that candle once closed
-    store = CandleStore()
-    FeatherPersistence(cache_root, store).load_all()
-    series = {s.timeframe: s for s in store.all()}
-    assert series["1h"].partial_ts == {t0 + 7 * 3_600_000}
-    assert series["1h"].closed_partials(t0 + 10**10, 0, 10**15) == [t0 + 7 * 3_600_000]
-    # original meta kept in the backup
-    assert list((tmp_path / "bk").rglob("BTC_USDC_USDC-1h.meta.json"))
+        flag.main(["--root", "/nonexistent", "--apply"])

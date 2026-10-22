@@ -3830,3 +3830,165 @@ class TestDaemonRefetchesFrozenCandles:
         d._schedule_swr_refresh = lambda *a, **k: None
         resp = asyncio.run(d._handle_fetch(self._req(None, 25)))
         assert resp["served_from"] != "cache"
+
+
+# -------------------------------------------------------------------- legacy scan + steady state
+
+_H = 3_600_000
+
+
+class TestDetectFrozen:
+    def _mk(self, tf, tf_ms, rows):
+        from freqtrade.ohlcv_cache.store import CandleSeries
+
+        s = CandleSeries("hl", "futures", "BTC/USDC:USDC", tf, "futures", tf_ms)
+        s.merge(rows)
+        return s
+
+    def test_flags_closed_candle_below_finer_aggregate(self):
+        from freqtrade.ohlcv_cache.frozen import detect_frozen
+
+        m15 = self._mk("15m", 900_000, [[i * 900_000, 1, 1, 1, 1, 25.0] for i in range(8)])
+        h1 = self._mk("1h", _H, [[0, 1, 1, 1, 1, 100.0], [_H, 1, 1, 1, 1, 7.0]])
+        assert detect_frozen(h1, [m15], now_ms=10 * _H) == {_H}
+
+    def test_incomplete_finer_coverage_is_not_a_verdict(self):
+        from freqtrade.ohlcv_cache.frozen import detect_frozen
+
+        m15 = self._mk("15m", 900_000, [[i * 900_000, 1, 1, 1, 1, 25.0] for i in range(7)])
+        h1 = self._mk("1h", _H, [[0, 1, 1, 1, 1, 100.0], [_H, 1, 1, 1, 1, 7.0]])
+        assert detect_frozen(h1, [m15], now_ms=10 * _H) == set()
+
+    def test_forming_candle_is_never_flagged_here(self):
+        from freqtrade.ohlcv_cache.frozen import detect_frozen
+
+        m15 = self._mk("15m", 900_000, [[i * 900_000, 1, 1, 1, 1, 25.0] for i in range(8)])
+        h1 = self._mk("1h", _H, [[0, 1, 1, 1, 1, 100.0], [_H, 1, 1, 1, 1, 7.0]])
+        assert detect_frozen(h1, [m15], now_ms=_H + 600_000) == set()
+
+    def test_stored_above_aggregate_is_left_alone(self):
+        from freqtrade.ohlcv_cache.frozen import detect_frozen
+
+        m15 = self._mk("15m", 900_000, [[i * 900_000, 1, 1, 1, 1, 10.0] for i in range(4)])
+        h1 = self._mk("1h", _H, [[0, 1, 1, 1, 1, 100.0]])
+        assert detect_frozen(h1, [m15], now_ms=10 * _H) == set()
+
+
+class TestLegacyScanInDaemon:
+    """A series persisted before partial_ts is scanned by the daemon itself, once."""
+
+    def test_scan_flags_then_request_refetches(self, tmp_path):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        now_h = int(time.time() * 1000) // _H
+        calls = []
+
+        class _F:
+            async def fetch_ohlcv(self, pair, timeframe, since_ms, limit, candle_type, **kw):
+                calls.append(since_ms)
+                return [[since_ms + i * _H, 1, 2, 0.5, 1.5, 100.0] for i in range(limit)]
+
+        d._get_fetcher = lambda ex, mode: _F()
+        m15 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "15m", "futures", 900_000)
+        t0 = (now_h - 30) * _H
+        m15.merge([[t0 + i * 900_000, 1, 1, 1, 1, 25.0] for i in range(40 * 4)])
+        h1 = d.store.get_or_create("hyperliquid", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
+        h1.merge([[(now_h - 30 + i) * _H, 1, 1, 1, 1, 100.0] for i in range(30)])
+        h1.merge([[(now_h - 20) * _H, 1, 1, 1, 1, 3.0]])  # frozen
+        h1.partial_scanned = False  # as loaded from an old meta file
+        h1.last_live_refresh_wall_ms = int(time.time() * 1000)
+        req = {
+            "op": "fetch", "req_id": "r", "exchange": "hyperliquid", "trading_mode": "futures",
+            "pair": "BTC/USDC:USDC", "timeframe": "1h", "candle_type": "futures",
+            "since_ms": (now_h - 28) * _H, "limit": 29,
+        }  # fmt: skip
+        asyncio.run(d._handle_fetch(req))
+        assert h1.partial_scanned
+        assert calls and calls[0] == (now_h - 20) * _H
+        assert (now_h - 20) * _H not in h1.partial_ts  # healed
+        # the scan runs once only: later requests only chase the forming tail
+        n = len(calls)
+        asyncio.run(d._handle_fetch(req))
+        assert all(c >= now_h * _H for c in calls[n:])
+
+    def test_loaded_series_without_scan_marker_is_unscanned(self, tmp_path):
+        from freqtrade.ohlcv_cache.persistence import FeatherPersistence
+        from freqtrade.ohlcv_cache.store import CandleStore
+
+        store = CandleStore()
+        s = store.get_or_create("hl", "futures", "BTC/USDC:USDC", "1h", "futures", _H)
+        s.merge([[0, 1, 1, 1, 1, 1.0]])
+        pers = FeatherPersistence(tmp_path, store)
+        pers.flush_dirty()
+        meta = pers._meta_file_for(s)
+        import json as _json
+
+        m = _json.loads(meta.read_text())
+        m.pop("partial_scanned"), m.pop("partial_ts")
+        meta.write_text(_json.dumps(m))
+        store2 = CandleStore()
+        FeatherPersistence(tmp_path, store2).load_all()
+        assert store2.all()[0].partial_scanned is False
+
+
+class TestSteadyStateNoExtraFetch:
+    """Live bots refreshing at every close must cost zero extra fetch for the tracking.
+
+    A bot wakes 1-6 s after the close and refreshes; the just-closed candle is then
+    flagged (received inside the grace window). That must not turn into one more
+    background fetch per series per candle on the next live request.
+    """
+
+    def test_zero_extra_fetch_over_several_closes(self, tmp_path, monkeypatch):
+        from freqtrade.ohlcv_cache.daemon import Daemon
+
+        clock = {"now": 5_000 * _H}
+        monkeypatch.setattr(time, "time", lambda: clock["now"] / 1000)
+        d = Daemon(socket_path=str(tmp_path / "t.sock"), global_cfg={})
+        calls = []
+
+        class _F:
+            async def fetch_ohlcv(
+                self, pair, timeframe, since_ms, limit, candle_type, until_ms=None, meta=None, **kw
+            ):
+                if meta is not None:
+                    meta["sent_at_ms"] = clock["now"]
+                calls.append((clock["now"], since_ms))
+                last = clock["now"] // _H * _H
+                return [
+                    [t, 1, 2, 0.5, 1.5, 100.0]
+                    for t in range(since_ms // _H * _H, last + 1, _H)
+                    if until_ms is None or t <= until_ms
+                ][:limit]
+
+        d._get_fetcher = lambda ex, mode: _F()
+        req = {
+            "op": "fetch", "req_id": "r", "exchange": "hyperliquid", "trading_mode": "futures",
+            "pair": "BTC/USDC:USDC", "timeframe": "1h", "candle_type": "futures",
+            "since_ms": None, "limit": 100,
+        }  # fmt: skip
+
+        async def request(at_ms):
+            clock["now"] = at_ms
+            await d._handle_fetch(req, conn_id=0)
+            if d._swr_tasks:
+                await asyncio.gather(*list(d._swr_tasks))
+
+        async def scenario():
+            # warm start mid-hour, then 6 closes; per hour: refresh 2 s after the
+            # close, then requests at +10 s, +20 min, +40 min, +59 min.
+            await request(5_000 * _H + 600_000)
+            extra = 0
+            for k in range(1, 7):
+                base = (5_000 + k) * _H
+                await request(base + 2_000)  # the close refresh (allowed to fetch)
+                n = len(calls)
+                for off in (10_000, 1_200_000, 2_400_000, 3_540_000):
+                    await request(base + off)
+                extra += len(calls) - n
+            return extra
+
+        extra = asyncio.run(scenario())
+        print("extra fetches in steady state:", extra)
+        assert extra == 0

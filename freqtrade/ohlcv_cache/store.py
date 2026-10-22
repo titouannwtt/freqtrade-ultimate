@@ -57,6 +57,11 @@ class CandleSeries:
     # historical requests; without this a candle cached while forming stays
     # frozen mid-series for ever (the cached tail is the only thing refreshed).
     partial_ts: set[int] = field(default_factory=set)
+    # False only for series loaded from a meta file written before partial_ts
+    # existed: their frozen candles are unknown until the daemon scans them against
+    # its finer series (frozen.detect_frozen, once, on first access). New series are
+    # tracked from their first merge.
+    partial_scanned: bool = True
 
     @property
     def range_start_ms(self) -> int | None:

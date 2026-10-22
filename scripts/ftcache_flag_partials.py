@@ -1,43 +1,38 @@
 #!/usr/bin/env python3
 """
-Flag candles stored while forming in the ftcache daemon's PERSISTED cache.
+Estimate how many candles the ftcache daemon's PERSISTED cache holds in a frozen,
+partial state (read-only report).
 
-Context: before the fix of the partial-candle tracking (store.CandleSeries.partial_ts),
-the daemon cached candles it received while they were still forming and never
-refetched them once a newer candle was appended. The persisted series
-(~/.freqtrade/ftcache/<exchange>/<mode>/*.feather, 5000 candles each) still hold
-them, and live bots receive them (informatives, startup candles).
+Context: before the partial-candle tracking (store.CandleSeries.partial_ts), the
+daemon cached candles it received while they were still forming and never refetched
+them once a newer candle was appended. The persisted series
+(~/.freqtrade/ftcache/<exchange>/<mode>/*.feather, 5000 candles each) still hold them.
 
-The fixed daemon refetches every candle listed in `partial_ts` of a series' meta
-file once it is closed (one contiguous call per series). This tool finds the
-frozen candles of the persisted cache, by comparing each series with the
-aggregate of its finer timeframes held in the same cache (same method as
-scripts/repair_partial_candles.py), and writes their timestamps to the meta files.
-After the next daemon start, the daemon heals itself, lazily, as bots ask for the
-series, through its own rate limiter.
+The fixed daemon flags and heals them ITSELF: on the first access of a series
+persisted before the fix, it compares it with the finer series of its own store
+(freqtrade/ohlcv_cache/frozen.py) and refetches the frozen candles once, through its
+rate limiter. No offline step, hence no race with the daemon (which bots relaunch on
+demand). This script only reports what that scan will find, with the same method as
+scripts/repair_partial_candles.py. Run it on a COPY of the persistence directory; it
+never writes and never opens the daemon socket.
 
-Dry-run by default (reads only). Run it on a COPY of the persistence directory to
-estimate, or on the real one with `--apply` ONLY WHILE THE DAEMON IS STOPPED: the
-daemon rewrites the meta files of dirty series at every flush and would overwrite
-the flags. This tool never opens the daemon socket.
+Coverage limits (same as the daemon scan): a candle is only checked against finer
+series held in the cache, and each holds 5000 candles (5m ~17 days, 15m ~52 days,
+30m ~104 days, 1h ~208 days). The finest timeframe (5m) and anything older than the
+finer series cannot be checked: the figure is a lower bound and the rest ages out
+through trim_to().
 
 Usage:
-  python scripts/ftcache_flag_partials.py --root /copy/of/ftcache --exchange hyperliquid
-  python scripts/ftcache_flag_partials.py --root ~/.freqtrade/ftcache --exchange hyperliquid \
-      --apply --backup-dir /path/with/space      # daemon stopped!
+  cp -r ~/.freqtrade/ftcache/hyperliquid /some/copy/
+  python scripts/ftcache_flag_partials.py --root /some/copy --exchange hyperliquid
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
-import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,51 +69,6 @@ def load_frames(tfmap: dict[str, Path]) -> dict[str, pd.DataFrame]:
     return frames
 
 
-def daemon_running() -> list[str]:
-    try:
-        res = subprocess.run(
-            ["pgrep", "-af", r"freqtrade\.ohlcv_cache\.daemon|ohlcv_cache/daemon\.py"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return []
-    me = str(os.getpid())
-    return [ln for ln in res.stdout.splitlines() if ln.split(" ", 1)[0] != me and "pgrep" not in ln]
-
-
-def write_meta(path: Path, meta: dict) -> None:
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(meta))
-            fh.flush()
-            os.fsync(fh.fileno())
-        Path(tmp).replace(path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def apply_flags(args: argparse.Namespace, flagged: dict[Path, set[int]]) -> None:
-    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_root = args.backup_dir / f"ftcache_meta_{stamp}"
-    backup_root.mkdir(parents=True, exist_ok=False)
-    written = 0
-    for feather, ts_set in flagged.items():
-        meta_path = feather.with_suffix(".meta.json")
-        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-        dest = backup_root / meta_path.relative_to(args.root)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if meta_path.exists():
-            shutil.copy2(meta_path, dest)
-        meta["partial_ts"] = sorted(set(meta.get("partial_ts", [])) | ts_set)
-        write_meta(meta_path, meta)
-        written += 1
-    print(f"meta files updated: {written} (backups in {backup_root})")
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--root", type=Path, required=True, help="ftcache persistence root")
@@ -127,19 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", default="2026-04-01", help="Check candles from this date (UTC)")
     ap.add_argument("--tol", type=float, default=0.01)
     ap.add_argument("--csv", type=Path)
-    ap.add_argument("--apply", action="store_true", help="Write partial_ts into the meta files")
-    ap.add_argument("--backup-dir", type=Path, help="Required with --apply (meta files copied)")
-    ap.add_argument("--force", action="store_true", help="--apply even if a daemon process is seen")
     args = ap.parse_args(argv)
-
-    if args.apply and not args.backup_dir:
-        ap.error("--apply requires --backup-dir")
-    if args.apply and not args.force:
-        running = daemon_running()
-        if running:
-            print("Refusing --apply: the ftcache daemon is running. Stop it first:")
-            print("\n".join(running[:5]))
-            return 2
 
     since_ms = int(datetime.fromisoformat(args.since).replace(tzinfo=UTC).timestamp() * 1000)
     now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
@@ -158,8 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             flagged[tfmap[f["timeframe"]]].add(ts)
             rows.append(f)
 
-    mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"root={args.root} exchange={args.exchange}/{args.mode} since={args.since} mode={mode}")
+    print(f"root={args.root} exchange={args.exchange}/{args.mode} since={args.since} (read-only)")
     print(f"series scanned: {n_series}; series holding frozen candles: {len(flagged)}")
     print(
         f"{'tf':<4} {'series':>7} {'scanned':>9} {'frozen':>8} {'frozen%':>8} {'finer_suspect':>14}"
@@ -177,11 +114,6 @@ def main(argv: list[str] | None = None) -> int:
         repair.write_csv(args.csv, rows)
         print(f"details written to {args.csv}")
 
-    if not args.apply:
-        print("dry-run: nothing written (stop the daemon, then --apply --backup-dir ...)")
-        return 0
-
-    apply_flags(args, flagged)
     return 0
 
 
