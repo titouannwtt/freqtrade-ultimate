@@ -771,6 +771,18 @@ class FreqtradeBot(LoggingMixin):
         pairs that have open trades.
         """
         # Refresh whitelist
+        #
+        # TODO(priority-bots L4): this runs on the trading thread, so a slow refresh (dynv1:
+        # up to 430 s, its 1h/1d candle filters) suspends every exit evaluation. Moving it to
+        # a worker thread is NOT safe as things stand: the pairlist handlers read candles
+        # through ``exchange.refresh_latest_ohlcv``, which takes ``exchange._loop_lock`` and
+        # runs on the exchange's one event loop, i.e. the same lock and loop as the trading
+        # thread's candle batch and its PRIME token requests, and the ftcache client
+        # singleton is bound to that loop. A thread would only move the stall to the lock.
+        # A safe version needs a dedicated Exchange (own loop, own daemon connection) for
+        # the pairlist thread, publishing the new whitelist atomically while the loop keeps
+        # the previous one. ``PairListManager`` now logs which handler spends the time
+        # ("slow pairlist refresh") so the next deployment shows what to move first.
         _prev_whitelist = self.pairlists.whitelist
         self.pairlists.refresh_pairlist()
         _whitelist = self.pairlists.whitelist
