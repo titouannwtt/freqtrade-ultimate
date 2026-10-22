@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from freqtrade.enums import CandleType, MarginMode, TradingMode
 from freqtrade.exceptions import DDosProtection, TemporaryError
+from freqtrade.ohlcv_cache import trading_context
 from freqtrade.ohlcv_cache.client import (
     CacheRateLimited,
     CacheTimedOut,
@@ -58,6 +59,79 @@ logger = logging.getLogger("ftcache.client")
 _FTCACHE_AUTHORITATIVE_FETCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "ftcache_authoritative_fetch", default=False
 )
+
+# Set while ``get_rate`` prices an ENTRY. Thread-local because the RPC threads also call
+# ``get_rate`` and must not inherit the trading loop's urgency.
+_ENTRY_PRICING = threading.local()
+
+# What this thread last asked the daemon for, FROM A TRADING CALL OF A PRIORITY BOT:
+# (priority after the dry floor, cost, monotonic time). The ``@retrier`` decorator
+# re-acquires a token before every retry from inside the base ``Exchange`` method, where
+# the original priority is no longer known; it reads it from here so a retried order is
+# not downgraded to the default HIGH. Anything else (another bot kind, a call outside the
+# trading context) records nothing, and the value is only read back inside that context.
+_LAST_ACQUIRE = threading.local()
+_LAST_ACQUIRE_MAX_AGE_S = 120.0
+
+# Weight a priority bot spent without a daemon token (loop lock busy past the bound), to
+# be reported to the daemon with its next acquire.
+_UNREPORTED = threading.local()
+
+# Order books newer than this may stand in for a fresh read when the token is refused or
+# the daemon is in a hard backoff (see ``fetch_l2_order_book``).
+_BOOK_REUSE_MAX_AGE_S = 10.0
+
+_PRIORITY_LABELS = {-1: "PRIME", 0: "CRITICAL", 1: "HIGH", 2: "NORMAL", 3: "LOW"}
+
+
+class _WaitTelemetry:
+    """Waits seen by ``_ftcache_acquire_sync``, per priority band, since the last report.
+
+    Answers "where did the cycle's time go" for the calls that matter: how long a
+    trading call waited for ``_loop_lock`` (held by candle batches and by other threads)
+    and how long it then waited for its daemon token. Bounded, thread-safe.
+    """
+
+    _MAX_SAMPLES = 512
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._lock_waits: dict[int, list[float]] = {}
+        self._token_waits: dict[int, list[float]] = {}
+
+    def record(self, priority: int | None, lock_wait_s: float, token_wait_s: float) -> None:
+        prio = 1 if priority is None else int(priority)
+        with self._lock:
+            for store, value in (
+                (self._lock_waits, lock_wait_s),
+                (self._token_waits, token_wait_s),
+            ):
+                samples = store.setdefault(prio, [])
+                if len(samples) < self._MAX_SAMPLES:
+                    samples.append(value)
+
+    @staticmethod
+    def _pct(values: list[float], q: float) -> float:
+        ordered = sorted(values)
+        return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
+    def summary(self, reset: bool = True) -> dict[str, dict[str, float]]:
+        with self._lock:
+            lock_waits, token_waits = self._lock_waits, self._token_waits
+            if reset:
+                self._lock_waits, self._token_waits = {}, {}
+        out: dict[str, dict[str, float]] = {}
+        for prio in sorted(token_waits):
+            tokens = token_waits[prio]
+            locks = lock_waits.get(prio) or [0.0]
+            out[_PRIORITY_LABELS.get(prio, str(prio))] = {
+                "n": float(len(tokens)),
+                "lock_p50_s": self._pct(locks, 0.5),
+                "lock_max_s": max(locks),
+                "token_p50_s": self._pct(tokens, 0.5),
+                "token_max_s": max(tokens),
+            }
+        return out
 
 
 class _LocalRateLimiter:
@@ -351,6 +425,84 @@ class CachedExchangeMixin:
             return floor
         return max(requested, floor)  # higher number = lower priority
 
+    # --- priority bots (shared_ohlcv_cache.priority_bot) -------------------------------
+
+    @property
+    def _ftcache_is_priority_bot(self) -> bool:
+        """True when this process is a LIVE bot that asked for the PRIME band.
+
+        ``shared_ohlcv_cache.priority_bot: true`` is ignored for dry-run, backtest,
+        hyperopt and utility processes: they keep their LOW floor, whatever the config.
+        """
+        cfg = self._config.get("shared_ohlcv_cache") or {}  # type: ignore[attr-defined]
+        if not cfg.get("priority_bot", False):
+            return False
+        if self._config.get("dry_run"):  # type: ignore[attr-defined]
+            return False
+        return not self._ftcache_is_deprioritized
+
+    def _ftcache_trading_priority(self, base: int, *, intrinsic: bool = False) -> int:
+        """Band for a call that is part of trading.
+
+        ``intrinsic`` calls (orders, stop, leverage and margin) are PRIME for a priority
+        bot wherever they come from: nothing but trading ever sends them. The others
+        (order follow-up, books, positions, balances, tickers) are PRIME only inside a
+        ``trading_call`` marker, because the same endpoint also feeds notifications and
+        the FreqUI. Anything else keeps ``base``.
+        """
+        if self._ftcache_is_priority_bot and (intrinsic or trading_context.is_trading_call()):
+            return OhlcvCacheClient.PRIME
+        return base
+
+    def ftcache_trading_call(self):
+        """Context manager: the REST calls made inside (this thread) are trading-critical."""
+        return trading_context.trading_call()
+
+    def ftcache_notification_call(self):
+        """Context manager: the REST calls made inside only feed a notification."""
+        return trading_context.notification_call()
+
+    def ftcache_wait_summary(self, reset: bool = True) -> dict[str, dict[str, float]]:
+        """Lock and token waits per band since the last call (empty when none)."""
+        waits = self._ftcache_waits
+        return waits.summary(reset=reset) if waits is not None else {}
+
+    def _ftcache_record_wait(self, priority: int | None, lock_s: float, token_s: float) -> None:
+        if self._ftcache_waits is None:
+            self._ftcache_waits = _WaitTelemetry()
+        self._ftcache_waits.record(priority, lock_s, token_s)
+
+    @staticmethod
+    def ftcache_last_acquire() -> tuple[int, float] | None:
+        """(priority, cost) of this thread's last token request, while it is recent."""
+        if not trading_context.is_trading_call():
+            return None
+        last = getattr(_LAST_ACQUIRE, "value", None)
+        if last is None or time.monotonic() - last[2] > _LAST_ACQUIRE_MAX_AGE_S:
+            return None
+        return last[0], last[1]
+
+    def _ftcache_acquire_counted(self, **kwargs) -> bool:
+        """``_ftcache_acquire_sync`` that never lets a priority bot's call leave unaccounted.
+
+        A refused token (daemon shed, ``_loop_lock`` unavailable) used to be ignored by
+        the callers that go ahead anyway, so the REST call hit the exchange with no
+        weight recorded anywhere. For a priority bot the weight goes into the local
+        limiter instead (its calls are PRIME: the limiter books them without ever
+        sleeping). Any other bot keeps what it always did: the refusal is ignored.
+        Takes the arguments of ``_ftcache_acquire_sync``; returns True when the daemon
+        granted the token.
+        """
+        if self._ftcache_acquire_sync(**kwargs):
+            return True
+        if not self._ftcache_is_priority_bot:
+            return False
+        self._ftcache_get_local_limiter().acquire(
+            cost=kwargs.get("cost", 1.0),
+            priority=self._ftcache_apply_priority_floor(kwargs.get("priority")),
+        )
+        return False
+
     _ftcache_last_wait_log_ts: float = 0.0
     _WAIT_LOG_INTERVAL_S: float = 10.0  # don't spam, log every 10s
     _OFFLINE_ACQUIRE_MAX_S: float = 600.0  # 10 min max wait for offline modes
@@ -618,7 +770,9 @@ class CachedExchangeMixin:
         stay on cold paths, never in the per-cycle loop. The result is written back
         into the shared snapshot so the rest of the cycle benefits from it.
         """
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+        self._ftcache_acquire_sync(
+            priority=self._ftcache_trading_priority(OhlcvCacheClient.CRITICAL), cost=2.0
+        )
         positions = super().fetch_positions(pair=pair, params=None)  # type: ignore[misc]
         if pair is None:
             self._ftcache_save_positions(positions)
@@ -1085,6 +1239,8 @@ class CachedExchangeMixin:
         return super().close()
 
     _LOOP_LOCK_TIMEOUT_S: float = 5.0
+    _ftcache_waits: _WaitTelemetry | None = None
+    _ftcache_book_cache: dict[str, tuple[float, int, Any]] | None = None
 
     def _ftcache_run_on_loop(self, coro):
         """Run an async daemon call, serialized with _loop_lock.
@@ -1214,6 +1370,17 @@ class CachedExchangeMixin:
         # Apply priority floor for non-live modes
         priority = self._ftcache_apply_priority_floor(priority)
         is_offline = self._ftcache_is_offline_mode or self._ftcache_is_utility_mode
+        # Remembered for the ``@retrier`` re-acquisition (see ``ftcache_last_acquire``):
+        # only a trading call of a priority bot is worth inheriting from.
+        if trading_context.is_trading_call() and self._ftcache_is_priority_bot:
+            _LAST_ACQUIRE.value = (priority, cost, time.monotonic())
+        else:
+            _LAST_ACQUIRE.value = None
+        # PRIME calls (only a priority bot sends them: orders, stops, the books and order
+        # follow-up of a trading call) must neither be shed nor leave the process without
+        # a booked token. Every other band keeps its historical handling.
+        urgent = not is_offline and priority is not None and priority < OhlcvCacheClient.CRITICAL
+        lock_timeout = self._LOOP_LOCK_TIMEOUT_S
 
         client = self._ftcache_get_client()
         if client is None:
@@ -1244,8 +1411,22 @@ class CachedExchangeMixin:
 
             try:
                 lock = getattr(self, "_loop_lock", None)
-                if lock is None or not lock.acquire(timeout=self._LOOP_LOCK_TIMEOUT_S):
+                _t_lock = time.monotonic()
+                if lock is None or not lock.acquire(timeout=lock_timeout):
                     self._ftcache_bump("acquire_skip_loop")
+                    if urgent:
+                        waited = time.monotonic() - _t_lock
+                        self._ftcache_record_wait(priority, waited, 0.0)
+                        logger.warning(
+                            "loop lock still busy after %.1fs for a PRIME call — booking its "
+                            "weight (%.0f) locally, reporting it to the daemon with the next "
+                            "token, and going ahead",
+                            waited,
+                            cost,
+                        )
+                        self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
+                        _UNREPORTED.value = getattr(_UNREPORTED, "value", 0.0) + cost
+                        return True
                     if is_offline:
                         if time.monotonic() > deadline:
                             logger.warning(
@@ -1261,14 +1442,24 @@ class CachedExchangeMixin:
                         time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                         continue
                     return self._ftcache_local_backoff_check(priority)
+                _t_token = time.monotonic()
                 try:
+                    unreported = getattr(_UNREPORTED, "value", 0.0)
+                    extra_kwargs = {"reported_weight": unreported} if unreported > 0 else {}
                     self.loop.run_until_complete(  # type: ignore[attr-defined]
                         asyncio.wait_for(
-                            client.acquire_rate_token(priority=priority, cost=cost),
+                            client.acquire_rate_token(priority=priority, cost=cost, **extra_kwargs),
                             timeout=min(self._ACQUIRE_TIMEOUT_S, 30.0)
                             if is_offline
                             else self._ACQUIRE_TIMEOUT_S,
                         ),
+                    )
+                    if unreported > 0:
+                        _UNREPORTED.value = max(
+                            0.0, getattr(_UNREPORTED, "value", 0.0) - unreported
+                        )
+                    self._ftcache_record_wait(
+                        priority, _t_token - _t_lock, time.monotonic() - _t_token
                     )
                     return True
                 finally:
@@ -1289,6 +1480,11 @@ class CachedExchangeMixin:
                         return True
                     time.sleep(self._OFFLINE_RETRY_INTERVAL_S)
                     continue
+                if urgent:
+                    # A PRIME call is never refused: book it locally and go ahead. (The
+                    # daemon did not grant it, so this is the only booking.)
+                    self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
+                    return True
                 # Live mode: shed = return False (caller decides)
                 return False
 
@@ -1739,7 +1935,9 @@ class CachedExchangeMixin:
                 age = time.monotonic() - self._ftcache_last_positions_ts
                 if age < 30.0:
                     return [p for p in self._ftcache_last_positions if p.get("symbol") == pair]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
+            self._ftcache_acquire_sync(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.HIGH), cost=2.0
+            )
             return super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
 
         client = self._ftcache_get_client()
@@ -1791,7 +1989,9 @@ class CachedExchangeMixin:
                 "positions rate-limited, stale data rejected"
                 " — forcing CRITICAL-priority fetch (cost=2)",
             )
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=2.0)
+            self._ftcache_acquire_sync(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.CRITICAL), cost=2.0
+            )
             positions = super().fetch_positions(pair=pair, params=params)  # type: ignore[misc]
             self._ftcache_save_positions(positions)
             return positions
@@ -1802,7 +2002,9 @@ class CachedExchangeMixin:
         # Cache miss — do the actual fetch and push result
         # If daemon auto-granted a rate token, skip the separate acquire call
         if not auto_granted:
-            prio_pos = self._ftcache_init_priority(OhlcvCacheClient.HIGH)
+            prio_pos = self._ftcache_init_priority(
+                self._ftcache_trading_priority(OhlcvCacheClient.HIGH)
+            )
             if not self._ftcache_acquire_sync(priority=prio_pos, cost=2.0):
                 stale = self._ftcache_get_stale_positions()
                 if stale is not None:
@@ -1853,7 +2055,10 @@ class CachedExchangeMixin:
 
     def create_order(self, **kwargs) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.CRITICAL, intrinsic=True),
+                cost=1.0,
+            )
         result = super().create_order(**kwargs)  # type: ignore[misc]
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_report_order(
@@ -1873,7 +2078,10 @@ class CachedExchangeMixin:
         params: dict | None = None,
     ) -> dict[str, Any]:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL, cost=1.0)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.CRITICAL, intrinsic=True),
+                cost=1.0,
+            )
         result = super().cancel_order(order_id, pair, params)  # type: ignore[misc]
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
             self._ftcache_report_order(
@@ -1893,7 +2101,9 @@ class CachedExchangeMixin:
         params: dict | None = None,
     ) -> CcxtOrder:
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=1.0)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.HIGH), cost=1.0
+            )
         return super().fetch_order(order_id, pair, params)  # type: ignore[misc]
 
     def get_balances(self, params: dict | None = None) -> CcxtBalances:
@@ -1919,7 +2129,9 @@ class CachedExchangeMixin:
                 pass
 
         if not auto_granted:
-            prio = self._ftcache_init_priority(OhlcvCacheClient.NORMAL)
+            prio = self._ftcache_init_priority(
+                self._ftcache_trading_priority(OhlcvCacheClient.NORMAL)
+            )
             if not self._ftcache_acquire_sync(priority=prio, cost=2.0):
                 if hasattr(self, "_ftcache_last_balances") and self._ftcache_last_balances:
                     logger.info("get_balances shed — using last known balances")
@@ -1946,12 +2158,94 @@ class CachedExchangeMixin:
 
         return balances
 
+    def _ftcache_recent_book(self, pair: str, limit: int) -> OrderBook | None:
+        """A book read less than ``_BOOK_REUSE_MAX_AGE_S`` ago that is deep enough."""
+        cache = self._ftcache_book_cache
+        if not cache:
+            return None
+        hit = cache.get(pair)
+        if hit is None:
+            return None
+        ts, depth, book = hit
+        if depth >= limit and time.monotonic() - ts <= _BOOK_REUSE_MAX_AGE_S:
+            return book
+        return None
+
+    def _ftcache_remember_book(self, pair: str, limit: int, book: OrderBook) -> None:
+        if self._ftcache_book_cache is None:
+            self._ftcache_book_cache = {}
+        if len(self._ftcache_book_cache) > 256:
+            self._ftcache_book_cache.clear()
+        self._ftcache_book_cache[pair] = (time.monotonic(), limit, book)
+
     def fetch_l2_order_book(self, pair: str, limit: int = 100) -> OrderBook:
         # Metered in dry-run too: unlike order endpoints, dry bots hit the
         # REAL l2Book API for pricing and dry-order fill simulation.  The
         # priority floor downgrades dry bots to LOW so they yield to live.
-        self._ftcache_acquire_sync(priority=OhlcvCacheClient.HIGH, cost=2.0)
-        return super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
+        #
+        # The book that prices an ENTRY (including a position adjustment, priced by
+        # ``get_rates``) is CRITICAL: at HIGH it queues behind the candle refreshes (up to
+        # 100 of them at every 5m close, and the weight gate holds HIGH back) while the
+        # signal it prices is already minutes old, whereas at CRITICAL it is granted on
+        # the next token for a weight of 2. For a priority bot every book read inside a
+        # trading call is PRIME. A book read for a notification is neither.
+        entry = getattr(_ENTRY_PRICING, "active", False)
+        if trading_context.is_notification_call():
+            entry = False
+        base = OhlcvCacheClient.CRITICAL if entry else OhlcvCacheClient.HIGH
+        priority = self._ftcache_trading_priority(base)
+        # Hard backoff: a priority bot reuses a book it read seconds ago rather than spend
+        # one of the few tokens left (its orders still go out).
+        if priority == OhlcvCacheClient.PRIME and self._ftcache_should_block_ccxt():
+            recent = self._ftcache_recent_book(pair, limit)
+            if recent is not None:
+                return recent
+        granted = self._ftcache_acquire_sync(priority=priority, cost=2.0)
+        if not granted and self._ftcache_is_priority_bot:
+            # Refused (shed during a backoff): the read used to go out anyway with no weight
+            # booked anywhere. A priority bot reuses a book that is still fresh, or books
+            # the call (PRIME and CRITICAL are booked without ever sleeping). Any other bot
+            # keeps its historical behaviour: the read goes out.
+            recent = self._ftcache_recent_book(pair, limit)
+            if recent is not None:
+                return recent
+            self._ftcache_get_local_limiter().acquire(
+                cost=2.0, priority=self._ftcache_apply_priority_floor(priority)
+            )
+        book = super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
+        if self._ftcache_is_priority_bot:
+            self._ftcache_remember_book(pair, limit, book)
+        return book
+
+    def get_rate(
+        self,
+        pair: str,
+        refresh: bool,
+        side: str,
+        is_short: bool,
+        order_book: OrderBook | None = None,
+        ticker: Ticker | None = None,
+    ) -> float:
+        """Price a rate; an entry rate marks its order book fetch as CRITICAL."""
+        previous = getattr(_ENTRY_PRICING, "active", False)
+        # Only an entry is urgent: an exit priced inside an entry-flagged block (see
+        # ``get_rates``) must not inherit it.
+        _ENTRY_PRICING.active = side == "entry"
+        try:
+            return super().get_rate(  # type: ignore[misc]
+                pair, refresh, side, is_short, order_book, ticker
+            )
+        finally:
+            _ENTRY_PRICING.active = previous
+
+    def get_rates(self, pair: str, refresh: bool, is_short: bool) -> tuple[float, float]:
+        """Entry and exit rates together (position adjustments): the book is an ENTRY book."""
+        previous = getattr(_ENTRY_PRICING, "active", False)
+        _ENTRY_PRICING.active = True
+        try:
+            return super().get_rates(pair, refresh, is_short)  # type: ignore[misc]
+        finally:
+            _ENTRY_PRICING.active = previous
 
     # -------------------------------------------------------------------- remaining REST calls
     # Every ccxt REST call must go through the daemon's rate limiter so that
@@ -2053,7 +2347,9 @@ class CachedExchangeMixin:
             if not tickers or cache_age >= 30.0:
                 try:
                     is_open_pair = pair in self._ftcache_open_pairs
-                    tick_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
+                    tick_prio = self._ftcache_trading_priority(
+                        OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
+                    )
                     ok, all_tickers = self._ftcache_run_on_loop(
                         client.get_tickers(market_type="", priority=tick_prio),
                     )
@@ -2071,7 +2367,9 @@ class CachedExchangeMixin:
                 except CacheUnavailable:
                     pass
         is_open_pair = pair in self._ftcache_open_pairs
-        base_prio = OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
+        base_prio = self._ftcache_trading_priority(
+            OhlcvCacheClient.HIGH if is_open_pair else OhlcvCacheClient.NORMAL
+        )
         if self._ftcache_should_block_ccxt():
             cache_key = "fetch_tickers"
             with self._cache_lock:  # type: ignore[attr-defined]
@@ -2171,8 +2469,13 @@ class CachedExchangeMixin:
         pair: str | None = None,
         accept_fail: bool = False,
     ):
+        # Only ever called right before an order (``_lev_prep``): the order waits for this
+        # token, so a priority bot sends it PRIME (10 to 38 s measured behind the candle
+        # refreshes at NORMAL). Any other bot keeps the NORMAL band it always had.
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.NORMAL)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.NORMAL, intrinsic=True)
+            )
         return super()._set_leverage(leverage, pair, accept_fail)  # type: ignore[misc]
 
     def set_margin_mode(
@@ -2182,8 +2485,14 @@ class CachedExchangeMixin:
         accept_fail: bool = False,
         params: dict | None = None,
     ):
+        # Same as ``_set_leverage``: on Hyperliquid this is the one leverage/margin action
+        # sent before every entry (``Hyperliquid._lev_prep``) and before the coordination
+        # pre-flight (``_coordination_apply_leverage``), both on the order's critical path:
+        # PRIME for a priority bot, the LOW band it always had for any other bot.
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.LOW)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.LOW, intrinsic=True)
+            )
         return super().set_margin_mode(pair, margin_mode, accept_fail, params)  # type: ignore[misc]
 
     def _fetch_orders(
@@ -2205,8 +2514,12 @@ class CachedExchangeMixin:
         side: Any,
         leverage: float,
     ) -> CcxtOrder:
+        # ``Exchange.create_stoploss`` calls ``_lev_prep`` first, i.e. ``set_margin_mode``
+        # (a second token, PRIME for a priority bot).
         if not self._config.get("dry_run"):  # type: ignore[attr-defined]
-            self._ftcache_acquire_sync(priority=OhlcvCacheClient.CRITICAL)
+            self._ftcache_acquire_counted(
+                priority=self._ftcache_trading_priority(OhlcvCacheClient.CRITICAL, intrinsic=True)
+            )
         return super().create_stoploss(  # type: ignore[misc]
             pair,
             amount,

@@ -58,6 +58,7 @@ from freqtrade.leverage.liquidation_price import update_liquidation_prices
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
 from freqtrade.netting_metrics import NettingMetrics
+from freqtrade.ohlcv_cache.trading_context import notification_call, trading
 from freqtrade.order_identity import is_ours
 from freqtrade.persistence import Order, PairLocks, ProfitHistory, Trade, init_db
 from freqtrade.persistence.key_value_store import set_startup_time
@@ -544,7 +545,31 @@ class FreqtradeBot(LoggingMixin):
                 cycle_total,
                 ", ".join(parts),
             )
+        self._log_ftcache_waits(slow=cycle_total > 10.0)
         self.last_process = datetime.now(UTC)
+
+    def _log_ftcache_waits(self, slow: bool) -> None:
+        """One INFO line with the lock and token waits of the cycle, when it was slow.
+
+        The counters are read (and reset) every cycle so a line always describes the
+        cycle it follows, never the accumulation of several.
+        """
+        summary_fn = getattr(self.exchange, "ftcache_wait_summary", None)
+        if not callable(summary_fn):
+            return
+        try:
+            summary = summary_fn(reset=True)
+        except Exception as exc:  # telemetry must never break the trading loop
+            logger.debug("ftcache wait summary failed: %s", exc)
+            return
+        if not slow or not isinstance(summary, dict) or not summary:
+            return
+        parts = [
+            f"{band} n={int(v['n'])} lock p50/max={v['lock_p50_s']:.2f}/{v['lock_max_s']:.2f}s "
+            f"token p50/max={v['token_p50_s']:.2f}/{v['token_max_s']:.2f}s"
+            for band, v in summary.items()
+        ]
+        logger.info("[cycle] ftcache waits: %s", " | ".join(parts))
 
     def _emit_trade_snapshot(self) -> None:
         """
@@ -746,6 +771,18 @@ class FreqtradeBot(LoggingMixin):
         pairs that have open trades.
         """
         # Refresh whitelist
+        #
+        # TODO(priority-bots L4): this runs on the trading thread, so a slow refresh (dynv1:
+        # up to 430 s, its 1h/1d candle filters) suspends every exit evaluation. Moving it to
+        # a worker thread is NOT safe as things stand: the pairlist handlers read candles
+        # through ``exchange.refresh_latest_ohlcv``, which takes ``exchange._loop_lock`` and
+        # runs on the exchange's one event loop, i.e. the same lock and loop as the trading
+        # thread's candle batch and its PRIME token requests, and the ftcache client
+        # singleton is bound to that loop. A thread would only move the stall to the lock.
+        # A safe version needs a dedicated Exchange (own loop, own daemon connection) for
+        # the pairlist thread, publishing the new whitelist atomically while the loop keeps
+        # the previous one. ``PairListManager`` now logs which handler spends the time
+        # ("slow pairlist refresh") so the next deployment shows what to move first.
         _prev_whitelist = self.pairlists.whitelist
         self.pairlists.refresh_pairlist()
         _whitelist = self.pairlists.whitelist
@@ -1371,6 +1408,7 @@ class FreqtradeBot(LoggingMixin):
             Trade.session.refresh(trade)
             raise
 
+    @trading
     def _handle_external_close(self, trade: Trade) -> bool:
         """
         Handle a position that was closed externally on the exchange
@@ -2091,6 +2129,7 @@ class FreqtradeBot(LoggingMixin):
             self.config, self.wallets, trade, added_stake, warned
         )
 
+    @trading
     def check_and_call_adjust_trade_position(self, trade: Trade):
         """
         Check the implemented trading strategy for adjustment command.
@@ -2242,6 +2281,7 @@ class FreqtradeBot(LoggingMixin):
             logger.info(f"Bids to asks delta for {pair} does not satisfy condition.")
             return False
 
+    @trading
     def execute_entry(
         self,
         pair: str,
@@ -2621,9 +2661,12 @@ class FreqtradeBot(LoggingMixin):
         if open_rate is None:
             open_rate = trade.open_rate
 
-        current_rate = self.exchange.get_rate(
-            trade.pair, side="entry", is_short=trade.is_short, refresh=False
-        )
+        # A message is not worth a top-priority token: when the cached rate has expired the
+        # read must not be sent in the trading band of a priority bot, nor as an entry book.
+        with notification_call():
+            current_rate = self.exchange.get_rate(
+                trade.pair, side="entry", is_short=trade.is_short, refresh=False
+            )
         stake_amount = trade.stake_amount
         if not fill and trade.nr_of_successful_entries > 0:
             # If we have open orders, we need to add the stake amount of the open orders
@@ -2670,9 +2713,12 @@ class FreqtradeBot(LoggingMixin):
         # replace cycles would flood the UI with noise (it's bookkeeping, not live signal).
         if trade.enter_tag and trade.enter_tag.startswith("[replay]"):
             return
-        current_rate = self.exchange.get_rate(
-            trade.pair, side="entry", is_short=trade.is_short, refresh=False
-        )
+        # A message is not worth a top-priority token: when the cached rate has expired the
+        # read must not be sent in the trading band of a priority bot, nor as an entry book.
+        with notification_call():
+            current_rate = self.exchange.get_rate(
+                trade.pair, side="entry", is_short=trade.is_short, refresh=False
+            )
 
         msg: RPCCancelMsg = {
             "trade_id": trade.id,
@@ -2752,6 +2798,7 @@ class FreqtradeBot(LoggingMixin):
 
         return trades_closed
 
+    @trading
     def handle_trade(self, trade: Trade) -> bool:
         """
         Exits the current pair if the threshold is reached and updates the trade record.
@@ -2858,6 +2905,7 @@ class FreqtradeBot(LoggingMixin):
             logger.exception("Unable to place a stoploss order on exchange.")
         return False
 
+    @trading
     def handle_stoploss_on_exchange(self, trade: Trade) -> bool:
         """
         Check if trade is fulfilled in which case the stoploss
@@ -2993,6 +3041,7 @@ class FreqtradeBot(LoggingMixin):
                         f"Could not create trailing stoploss order for pair {trade.pair}."
                     )
 
+    @trading
     def manage_open_orders(self) -> None:
         """
         Management of open orders on exchange. Unfilled orders might be cancelled if timeout
@@ -3555,6 +3604,7 @@ class FreqtradeBot(LoggingMixin):
             )
         return False
 
+    @trading
     def execute_trade_exit(
         self,
         trade: Trade,
@@ -3714,11 +3764,14 @@ class FreqtradeBot(LoggingMixin):
         Sends rpc notification when a sell occurred.
         """
         # Use cached rates here - it was updated seconds ago.
-        current_rate = (
-            self.exchange.get_rate(trade.pair, side="exit", is_short=trade.is_short, refresh=False)
-            if not fill
-            else None
-        )
+        with notification_call():
+            current_rate = (
+                self.exchange.get_rate(
+                    trade.pair, side="exit", is_short=trade.is_short, refresh=False
+                )
+                if not fill
+                else None
+            )
 
         # second condition is for mypy only; order will always be passed during sub trade
         if sub_trade and order is not None:
@@ -3789,9 +3842,10 @@ class FreqtradeBot(LoggingMixin):
 
         profit_rate: float = trade.safe_close_rate
         profit = trade.calculate_profit(rate=profit_rate)
-        current_rate = self.exchange.get_rate(
-            trade.pair, side="exit", is_short=trade.is_short, refresh=False
-        )
+        with notification_call():
+            current_rate = self.exchange.get_rate(
+                trade.pair, side="exit", is_short=trade.is_short, refresh=False
+            )
         gain: ProfitLossStr = "profit" if profit.profit_ratio > 0 else "loss"
 
         msg: RPCExitCancelMsg = {
@@ -3838,6 +3892,7 @@ class FreqtradeBot(LoggingMixin):
     # Common update trade state methods
     #
 
+    @trading
     def update_trade_state(
         self,
         trade: Trade,

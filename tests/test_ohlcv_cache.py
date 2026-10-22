@@ -685,7 +685,8 @@ class TestInterceptorPriorities:
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.LOW)
 
-    def test_set_leverage_normal(self):
+    def test_set_leverage_keeps_its_normal_band_for_a_regular_bot(self):
+        """Only a priority bot (PRIME) promotes it; every other bot keeps NORMAL."""
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin._set_leverage(mixin, 3.0, "BTC/USDC")
@@ -693,7 +694,7 @@ class TestInterceptorPriorities:
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.NORMAL)
 
-    def test_set_margin_mode_low(self):
+    def test_set_margin_mode_keeps_its_low_band_for_a_regular_bot(self):
         mixin = self._make_interceptor_mixin()
         try:
             CachedExchangeMixin.set_margin_mode(mixin, "BTC/USDC", MarginMode.CROSS)
@@ -712,6 +713,115 @@ class TestInterceptorPriorities:
         except (AttributeError, TypeError):
             pass
         mixin._ftcache_acquire_sync.assert_called_once_with(priority=OhlcvCacheClient.NORMAL)
+
+
+class _FakeRatePricer:
+    """Stands in for ``Exchange``: ``get_rate`` fetches the book like the real one does."""
+
+    def fetch_l2_order_book(self, pair, limit=100):
+        return {"bids": [[100.0, 1.0]], "asks": [[100.1, 1.0]]}
+
+    def get_rate(self, pair, refresh, side, is_short, order_book=None, ticker=None):
+        if order_book is None:
+            order_book = self.fetch_l2_order_book(pair, 1)
+        return order_book["bids"][0][0]
+
+
+class _PricingMixin(CachedExchangeMixin, _FakeRatePricer):
+    pass
+
+
+class TestEntryOrderBookPriority:
+    """The order book that prices an ENTRY is CRITICAL; every other book stays HIGH."""
+
+    def _make(self, dry_run=False):
+        mixin = _PricingMixin.__new__(_PricingMixin)
+        mixin._config = {"dry_run": dry_run}
+        mixin._ftcache_acquire_sync = MagicMock()
+        return mixin
+
+    def test_entry_rate_fetches_book_at_critical(self):
+        mixin = self._make()
+        assert mixin.get_rate("BTC/USDC", True, "entry", False) == 100.0
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.CRITICAL, cost=2.0
+        )
+
+    def test_exit_rate_keeps_high(self):
+        mixin = self._make()
+        mixin.get_rate("BTC/USDC", True, "exit", False)
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=2.0
+        )
+
+    def test_book_outside_get_rate_keeps_high(self):
+        """Strategies and pairlists asking for a book are not entries."""
+        mixin = self._make()
+        mixin.fetch_l2_order_book("BTC/USDC", 20)
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=2.0
+        )
+
+    def test_urgency_does_not_leak_after_an_entry(self):
+        mixin = self._make()
+        mixin.get_rate("BTC/USDC", True, "entry", False)
+        mixin._ftcache_acquire_sync.reset_mock()
+        mixin.fetch_l2_order_book("BTC/USDC", 20)
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=2.0
+        )
+
+    def test_urgency_cleared_when_pricing_raises(self):
+        mixin = self._make()
+        mixin.fetch_l2_order_book = MagicMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            mixin.get_rate("BTC/USDC", True, "entry", False)
+        mixin2 = self._make()
+        mixin2.fetch_l2_order_book("BTC/USDC", 20)
+        mixin2._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=2.0
+        )
+
+    def test_other_threads_do_not_inherit_the_urgency(self):
+        """RPC threads price rates too; only the thread inside an entry is urgent."""
+        mixin = self._make()
+        seen = []
+        in_entry = threading.Event()
+        release = threading.Event()
+
+        def slow_book(pair, limit=100):
+            in_entry.set()
+            release.wait(5)
+            return {"bids": [[100.0, 1.0]], "asks": [[100.1, 1.0]]}
+
+        _FakeRatePricer_fetch = _FakeRatePricer.fetch_l2_order_book
+        try:
+            _FakeRatePricer.fetch_l2_order_book = lambda self, pair, limit=100: slow_book(
+                pair, limit
+            )
+            worker = threading.Thread(
+                target=lambda: mixin.get_rate("BTC/USDC", True, "entry", False)
+            )
+            worker.start()
+            assert in_entry.wait(5)
+            # Another thread asks for a plain book while the entry is mid-flight.
+            other = self._make()
+            other._ftcache_acquire_sync.side_effect = lambda **kw: seen.append(kw["priority"])
+            other.fetch_l2_order_book("ETH/USDC", 20)
+            release.set()
+            worker.join(5)
+        finally:
+            _FakeRatePricer.fetch_l2_order_book = _FakeRatePricer_fetch
+        assert seen == [OhlcvCacheClient.HIGH]
+
+    def test_dry_run_floor_still_applies(self):
+        """The floor lives in ``_ftcache_acquire_sync``: a dry bot's CRITICAL becomes LOW."""
+        mixin, _, _ = _make_mixin_exchange(dry_run=True)
+        mixin._ftcache_is_dry_run_mode = True
+        assert (
+            CachedExchangeMixin._ftcache_apply_priority_floor(mixin, OhlcvCacheClient.CRITICAL)
+            == OhlcvCacheClient.LOW
+        )
 
 
 class TestDryRunGuards:

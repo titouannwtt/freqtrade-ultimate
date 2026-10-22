@@ -174,8 +174,17 @@ def _reacquire_rate_token(exchange_obj) -> None:
     """
     acquire_fn = getattr(exchange_obj, "_ftcache_acquire_sync", None)
     if acquire_fn is not None:
+        # Retry with the band and weight of the call being retried: the mixin method that
+        # made the first attempt recorded them. Without this every retry went out as a
+        # default HIGH weight-1 request, so a retried order or stop lost its priority
+        # exactly when the exchange was struggling.
+        kwargs: dict = {}
+        last_fn = getattr(exchange_obj, "ftcache_last_acquire", None)
+        last = last_fn() if callable(last_fn) else None
+        if isinstance(last, tuple) and len(last) == 2:
+            kwargs = {"priority": last[0], "cost": last[1]}
         try:
-            acquire_fn()
+            acquire_fn(**kwargs)
         except Exception:  # noqa: S110
             pass
 

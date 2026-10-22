@@ -3,6 +3,7 @@ PairList manager class
 """
 
 import logging
+import time
 from functools import partial
 
 from cachetools import LRUCache, cached
@@ -57,6 +58,7 @@ class PairListManager(LoggingMixin):
             )
 
         self._pipeline_snapshot: list[dict] = []
+        self._last_refresh_timings: list[tuple[str, float]] = []
         self._check_backtest()
         self._not_expiring_cache: LRUCache = LRUCache(maxsize=1)
         # Optional label prepended to this manager's log messages (e.g.
@@ -197,7 +199,11 @@ class PairListManager(LoggingMixin):
             tickers = self._get_cached_tickers() if self._tickers_needed else {}
 
         # Generate the pairlist with first Pairlist Handler in the chain
+        _t_start = time.monotonic()
         pairlist = self._pairlist_handlers[0].gen_pairlist(tickers)
+        timings: list[tuple[str, float]] = [
+            (self._pairlist_handlers[0].name, time.monotonic() - _t_start)
+        ]
 
         snapshot: list[dict] = [
             {
@@ -216,7 +222,9 @@ class PairListManager(LoggingMixin):
             # except for the first one, which is the generator.
             for pairlist_handler in self._pairlist_handlers[1:]:
                 prev_set = set(pairlist)
+                _t_handler = time.monotonic()
                 pairlist = pairlist_handler.filter_pairlist(pairlist, tickers)
+                timings.append((pairlist_handler.name, time.monotonic() - _t_handler))
                 removed = sorted(prev_set - set(pairlist))
                 snapshot.append(
                     {
@@ -241,10 +249,28 @@ class PairListManager(LoggingMixin):
             )
 
         self._pipeline_snapshot = snapshot
+        self._log_slow_refresh(timings, time.monotonic() - _t_start)
         label = f"[{self._log_label}] " if self._log_label else ""
         self.log_once(f"{label}Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)
 
         self._whitelist = pairlist
+
+    # A refresh runs on the trading thread, inside the bot loop: while it lasts no exit is
+    # evaluated. Beyond this many seconds say which handler spent them (a dynv1 refresh was
+    # measured at 430 s with nothing to tell the filter responsible).
+    SLOW_REFRESH_LOG_S = 10.0
+
+    def _log_slow_refresh(self, timings: list[tuple[str, float]], total_s: float) -> None:
+        self._last_refresh_timings = timings
+        if total_s < self.SLOW_REFRESH_LOG_S:
+            return
+        label = f"[{self._log_label}] " if self._log_label else ""
+        logger.info(
+            "%sslow pairlist refresh: %.1fs (%s)",
+            label,
+            total_s,
+            ", ".join(f"{name} {secs:.1f}s" for name, secs in timings if secs >= 0.5),
+        )
 
     def verify_blacklist(self, pairlist: list[str], logmethod) -> list[str]:
         """
