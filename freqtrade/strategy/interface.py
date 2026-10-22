@@ -560,6 +560,21 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         return proposed_rate
 
+    def resting_exit_price(self, trade: Trade, current_time: datetime, **kwargs) -> float | None:
+        """
+        Price of a take-profit limit order kept resting on the exchange book for this trade
+        (exit tag ``roi_tp``), managed by ``RestingExitManager``: placed, re-priced (when the
+        price moves by at least one tick) or cancelled on every bot loop.
+
+        Live only (no effect in backtesting). The order is only placed when it is guaranteed to
+        be reduce-only (futures with ``exchange.shared_wallet: false``).
+
+        :param trade: trade object.
+        :param current_time: datetime object, containing the current datetime
+        :return: Target exit price, or None for no resting order (default: feature disabled).
+        """
+        return None
+
     def custom_sell(
         self,
         pair: str,
