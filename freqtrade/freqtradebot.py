@@ -3287,6 +3287,7 @@ class FreqtradeBot(LoggingMixin):
                 elif order["side"] == trade.exit_side:
                     self.handle_cancel_exit(trade, order, open_order, reason)
 
+    @trading
     def cancel_leftover_orders_of_closed_trade(
         self, trade: Trade, reason: str = "trade closed"
     ) -> None:
@@ -3343,6 +3344,7 @@ class FreqtradeBot(LoggingMixin):
         self._leftover_warned.add(order.order_id)
         logger.warning(msg)
 
+    @trading
     def retry_leftover_orders_of_closed_trades(self, hours: int = 24) -> None:
         """Retry cancelling non-stoploss orders still open in the database on trades closed
         in the last `hours` (a cancel refused or rate-limited when the trade closed)."""

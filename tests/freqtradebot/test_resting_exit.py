@@ -691,3 +691,23 @@ def test_review6_funding_refresh_does_not_trigger_replace(mocker, default_conf_u
         bot._resting_exit.process()
     assert len(book.created) == 1
     assert _tp(trade).price == pytest.approx(2.15)
+
+
+def test_resting_exit_runs_as_trading_call(mocker, default_conf_usdt, book):
+    """The TP calls of a priority bot must use the PRIME band of ftcache, like other exits."""
+    from freqtrade.ohlcv_cache.trading_context import is_trading_call
+
+    seen = []
+    original = book.create_order
+
+    def record(**kwargs):
+        seen.append(is_trading_call())
+        return original(**kwargs)
+
+    book.create_order = record
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    mocker.patch(f"{EXMS}.create_order", side_effect=record)
+    _open_trade()
+    assert not is_trading_call()
+    bot._resting_exit.process()
+    assert seen == [True]

@@ -32,6 +32,7 @@ from ccxt import ROUND_DOWN, ROUND_UP
 
 from freqtrade.enums import ExitCheckTuple, ExitType
 from freqtrade.exceptions import DependencyException, ExchangeError, InvalidOrderException
+from freqtrade.ohlcv_cache.trading_context import trading
 from freqtrade.persistence import Order, Trade
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
@@ -85,6 +86,7 @@ class RestingExitManager:
     def strategy_opted_in(self) -> bool:
         return type(self._bot.strategy).resting_exit_price is not IStrategy.resting_exit_price
 
+    @trading
     def process(self, trades: list[Trade] | None = None) -> None:
         if not self.strategy_opted_in:
             return
