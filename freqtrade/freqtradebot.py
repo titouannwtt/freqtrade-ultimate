@@ -246,6 +246,8 @@ class FreqtradeBot(LoggingMixin):
             # Resting take-profit (`roi_tp`), inert unless the strategy implements
             # `resting_exit_price`. See freqtrade/resting_exit.py.
             self._resting_exit = RestingExitManager(self)
+            # order_id -> (next retry monotonic time, next delay) of leftover-order cancels
+            self._leftover_retry_backoff: dict[str, tuple[float, float]] = {}
             # Per-bot append-only record of position-affecting events. Sharded by bot so
             # writes never contend, and kept out of the trade DB so corrections to the
             # working record cannot rewrite history. See freqtrade/position_audit/.
@@ -3364,9 +3366,22 @@ class FreqtradeBot(LoggingMixin):
         except Exception:
             logger.warning("Could not query leftover orders of closed trades.", exc_info=True)
             return
+        # Space the retries of each order (30 s, doubling up to 15 min): a cancel that keeps
+        # failing must not spend the bot's trading budget on every loop for 24 h.
+        now = time_module.monotonic()
+        backoff = self._leftover_retry_backoff
+        attempted = False
         for order in orders:
+            next_at, delay = backoff.get(order.order_id, (0.0, 30.0))
+            if now < next_at:
+                continue
+            attempted = True
             self._cancel_leftover_order(order.trade, order, "trade closed")
-        if orders:
+            if order.ft_is_open:
+                backoff[order.order_id] = (now + delay, min(delay * 2, 900.0))
+            else:
+                backoff.pop(order.order_id, None)
+        if attempted:
             Trade.commit()
 
     def cancel_all_open_orders(self) -> None:

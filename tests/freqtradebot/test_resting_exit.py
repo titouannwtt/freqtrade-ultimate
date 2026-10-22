@@ -563,9 +563,43 @@ def test_review1_leftover_429_retried_and_warned_once(mocker, default_conf_usdt,
 
     trade.close_date = dt_now()
     Trade.commit()
+    bot._leftover_retry_backoff.clear()  # spacing tested in test_leftover_retries_are_spaced
     bot.retry_leftover_orders_of_closed_trades()
     assert book.orders[tp.order_id]["status"] == "canceled"
     assert not tp.ft_is_open
+
+
+def test_leftover_retries_are_spaced(mocker, default_conf_usdt, book):
+    clock = {"t": 1000.0}
+    mocker.patch("freqtrade.freqtradebot.time_module.monotonic", side_effect=lambda: clock["t"])
+    bot = _bot(mocker, default_conf_usdt, {"price": 2.1})
+    trade = _open_trade()
+    bot._resting_exit.process()
+    tp = _tp(trade)
+    cancel = mocker.patch(f"{EXMS}.cancel_order_with_result", side_effect=TemporaryError("429"))
+    trade.is_open = False
+    trade.close_date = dt_now()
+    bot.cancel_leftover_orders_of_closed_trade(trade)
+    Trade.commit()
+    cancel.reset_mock()
+    bot.retry_leftover_orders_of_closed_trades()  # t=1000: first retry
+    for _ in range(5):  # same instant: no further call
+        bot.retry_leftover_orders_of_closed_trades()
+    assert cancel.call_count == 1
+    clock["t"] += 29
+    bot.retry_leftover_orders_of_closed_trades()
+    assert cancel.call_count == 1
+    clock["t"] += 2  # 31 s later: second retry, next delay 60 s
+    bot.retry_leftover_orders_of_closed_trades()
+    assert cancel.call_count == 2
+    clock["t"] += 59
+    bot.retry_leftover_orders_of_closed_trades()
+    assert cancel.call_count == 2
+    clock["t"] += 2
+    mocker.patch(f"{EXMS}.cancel_order_with_result", side_effect=book.cancel)
+    bot.retry_leftover_orders_of_closed_trades()
+    assert not tp.ft_is_open
+    assert tp.order_id not in bot._leftover_retry_backoff
 
 
 def test_review2_amount_capped_by_wallet_no_churn(mocker, default_conf_usdt, book):
