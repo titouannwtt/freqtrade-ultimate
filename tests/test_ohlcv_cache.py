@@ -734,17 +734,28 @@ class _PricingMixin(CachedExchangeMixin, _FakeRatePricer):
 class TestEntryOrderBookPriority:
     """The order book that prices an ENTRY is CRITICAL; every other book stays HIGH."""
 
-    def _make(self, dry_run=False):
+    def _make(self, dry_run=False, priority_bot=True):
         mixin = _PricingMixin.__new__(_PricingMixin)
-        mixin._config = {"dry_run": dry_run}
+        mixin._config = {
+            "dry_run": dry_run,
+            "shared_ohlcv_cache": {"priority_bot": priority_bot},
+        }
         mixin._ftcache_acquire_sync = MagicMock()
         return mixin
 
-    def test_entry_rate_fetches_book_at_critical(self):
+    def test_entry_rate_fetches_book_at_critical_for_a_priority_bot(self):
         mixin = self._make()
         assert mixin.get_rate("BTC/USDC", True, "entry", False) == 100.0
         mixin._ftcache_acquire_sync.assert_called_once_with(
             priority=OhlcvCacheClient.CRITICAL, cost=2.0
+        )
+
+    def test_entry_rate_keeps_high_for_any_other_bot(self):
+        """CRITICAL for the entry book is a priority-bot privilege (main reads it at HIGH)."""
+        mixin = self._make(priority_bot=False)
+        assert mixin.get_rate("BTC/USDC", True, "entry", False) == 100.0
+        mixin._ftcache_acquire_sync.assert_called_once_with(
+            priority=OhlcvCacheClient.HIGH, cost=2.0
         )
 
     def test_exit_rate_keeps_high(self):

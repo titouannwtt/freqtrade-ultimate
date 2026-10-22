@@ -489,7 +489,9 @@ class CachedExchangeMixin:
         the callers that go ahead anyway, so the REST call hit the exchange with no
         weight recorded anywhere. For a priority bot the weight goes into the local
         limiter instead (its calls are PRIME: the limiter books them without ever
-        sleeping). Any other bot keeps what it always did: the refusal is ignored.
+        sleeping). Any other bot keeps what it always did: the refusal is ignored. So does
+        a priority bot's call below CRITICAL (a follow-up read outside a trading call):
+        booking it would make the local limiter sleep the trading thread.
         Takes the arguments of ``_ftcache_acquire_sync``; returns True when the daemon
         granted the token.
         """
@@ -497,11 +499,28 @@ class CachedExchangeMixin:
             return True
         if not self._ftcache_is_priority_bot:
             return False
-        self._ftcache_get_local_limiter().acquire(
-            cost=kwargs.get("cost", 1.0),
-            priority=self._ftcache_apply_priority_floor(kwargs.get("priority")),
+        self._ftcache_book_without_sleeping(
+            kwargs.get("cost", 1.0), self._ftcache_apply_priority_floor(kwargs.get("priority"))
         )
         return False
+
+    def _ftcache_book_without_sleeping(self, cost: float, priority: int | None) -> bool:
+        """Book ``cost`` in the local limiter, but only where it cannot make the thread sleep.
+
+        The limiter lets PRIME and CRITICAL through without waiting; any other band would
+        sleep up to 30 s for budget. Returns whether the weight was booked.
+        """
+        if priority is None or priority > OhlcvCacheClient.CRITICAL:
+            return False
+        self._ftcache_get_local_limiter().acquire(cost=cost, priority=priority)
+        return True
+
+    @staticmethod
+    def _ftcache_settle_unreported(sent: float) -> None:
+        """The daemon answered a request that carried ``sent`` unreported weight: it booked
+        it when the request arrived, whatever the answer was. Do not send it again."""
+        if sent > 0:
+            _UNREPORTED.value = max(0.0, getattr(_UNREPORTED, "value", 0.0) - sent)
 
     _ftcache_last_wait_log_ts: float = 0.0
     _WAIT_LOG_INTERVAL_S: float = 10.0  # don't spam, log every 10s
@@ -1446,18 +1465,23 @@ class CachedExchangeMixin:
                 try:
                     unreported = getattr(_UNREPORTED, "value", 0.0)
                     extra_kwargs = {"reported_weight": unreported} if unreported > 0 else {}
-                    self.loop.run_until_complete(  # type: ignore[attr-defined]
-                        asyncio.wait_for(
-                            client.acquire_rate_token(priority=priority, cost=cost, **extra_kwargs),
-                            timeout=min(self._ACQUIRE_TIMEOUT_S, 30.0)
-                            if is_offline
-                            else self._ACQUIRE_TIMEOUT_S,
-                        ),
-                    )
-                    if unreported > 0:
-                        _UNREPORTED.value = max(
-                            0.0, getattr(_UNREPORTED, "value", 0.0) - unreported
+                    try:
+                        self.loop.run_until_complete(  # type: ignore[attr-defined]
+                            asyncio.wait_for(
+                                client.acquire_rate_token(
+                                    priority=priority, cost=cost, **extra_kwargs
+                                ),
+                                timeout=min(self._ACQUIRE_TIMEOUT_S, 30.0)
+                                if is_offline
+                                else self._ACQUIRE_TIMEOUT_S,
+                            ),
                         )
+                    except (CacheRateLimited, CacheTimedOut, TimeoutError):
+                        # The daemon got the request (it books the weight on arrival):
+                        # shed or timed out, the report is not repeated.
+                        self._ftcache_settle_unreported(unreported)
+                        raise
+                    self._ftcache_settle_unreported(unreported)
                     self._ftcache_record_wait(
                         priority, _t_token - _t_lock, time.monotonic() - _t_token
                     )
@@ -2192,7 +2216,13 @@ class CachedExchangeMixin:
         entry = getattr(_ENTRY_PRICING, "active", False)
         if trading_context.is_notification_call():
             entry = False
-        base = OhlcvCacheClient.CRITICAL if entry else OhlcvCacheClient.HIGH
+        # CRITICAL for the entry book is a priority-bot privilege; any other bot reads it at
+        # HIGH, as on main.
+        base = (
+            OhlcvCacheClient.CRITICAL
+            if entry and self._ftcache_is_priority_bot
+            else OhlcvCacheClient.HIGH
+        )
         priority = self._ftcache_trading_priority(base)
         # Hard backoff: a priority bot reuses a book it read seconds ago rather than spend
         # one of the few tokens left (its orders still go out).
@@ -2204,14 +2234,13 @@ class CachedExchangeMixin:
         if not granted and self._ftcache_is_priority_bot:
             # Refused (shed during a backoff): the read used to go out anyway with no weight
             # booked anywhere. A priority bot reuses a book that is still fresh, or books
-            # the call (PRIME and CRITICAL are booked without ever sleeping). Any other bot
-            # keeps its historical behaviour: the read goes out.
+            # the call when that cannot make the thread sleep (PRIME and CRITICAL only; a
+            # HIGH read outside a trading call just goes out). Any other bot keeps its
+            # historical behaviour: the read goes out.
             recent = self._ftcache_recent_book(pair, limit)
             if recent is not None:
                 return recent
-            self._ftcache_get_local_limiter().acquire(
-                cost=2.0, priority=self._ftcache_apply_priority_floor(priority)
-            )
+            self._ftcache_book_without_sleeping(2.0, self._ftcache_apply_priority_floor(priority))
         book = super().fetch_l2_order_book(pair, limit)  # type: ignore[misc]
         if self._ftcache_is_priority_bot:
             self._ftcache_remember_book(pair, limit, book)
