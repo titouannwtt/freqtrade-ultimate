@@ -48,6 +48,7 @@ def _bucket(armed: bool = True, **kw) -> TokenBucket:
         exchange="hyperliquid",
     )
     b.prime_enabled = armed
+    b.prime_reserve_pct = 0.25  # the tests below reason on a 75 % gate / 285 weight reserve
     for k, v in kw.items():
         setattr(b, k, v)
     return b
@@ -529,7 +530,7 @@ def _register(d: Daemon, conn: int, bot: str, **info):
 def test_defaults_ship_the_documented_prime_settings():
     from freqtrade.ohlcv_cache.defaults import GLOBAL_DEFAULTS
 
-    assert GLOBAL_DEFAULTS["prime_reserve_pct"] == 0.25
+    assert GLOBAL_DEFAULTS["prime_reserve_pct"] == 0.20
     assert GLOBAL_DEFAULTS["prime_cap_weight_per_min"] == 150
     assert GLOBAL_DEFAULTS["prime_swr_max_stale_candles"] == 1
     assert GLOBAL_DEFAULTS["prime_acquire_max_wait_s"] == 100
@@ -538,7 +539,7 @@ def test_defaults_ship_the_documented_prime_settings():
     assert GLOBAL_DEFAULTS["prime_global_cap_weight_per_min"] == 0
     d = _daemon()
     b = d._get_budget("hyperliquid")
-    assert b.prime_reserve_pct == 0.25 and b.prime_cap_weight_per_min == 150
+    assert b.prime_reserve_pct == 0.20 and b.prime_cap_weight_per_min == 150
     assert b.prime_enabled is False
 
 
@@ -548,7 +549,7 @@ def test_registering_a_priority_bot_arms_the_bucket_and_the_last_exit_disarms_it
     _register(d, 1, "fleet-bot")
     assert bucket.prime_enabled is False
     _register(d, 2, "multi", priority_bot=True)
-    assert bucket.prime_enabled is True and bucket.gate_ratio == pytest.approx(0.75)
+    assert bucket.prime_enabled is True and bucket.gate_ratio == pytest.approx(0.80)
     d.registry.unregister(2)
     d._sync_prime_state()
     assert bucket.prime_enabled is False and bucket.gate_ratio == pytest.approx(0.80)
@@ -622,7 +623,7 @@ def test_the_stats_op_exposes_bands_and_the_prime_block():
         stats = await d._dispatch({"op": "stats", "req_id": "s"}, 0)
         assert stats["ok"] is True
         assert stats["bands"]["prime"]["grants_total"] == 1
-        assert stats["prime"]["armed"] is True and stats["prime"]["gate_pct"] == 75.0
+        assert stats["prime"]["armed"] is True and stats["prime"]["gate_pct"] == 80.0
         assert stats["prime"]["weight_by_bot"] == {"multi": 2.0}
         assert "prime" in stats["queue_depths"]
         assert stats["prime_ineligible_requests"] == 0

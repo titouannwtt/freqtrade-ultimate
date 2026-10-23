@@ -132,7 +132,10 @@ GLOBAL_DEFAULTS: dict = {
     # books, order follow-up) in the PRIME band, above CRITICAL. Daemon side, only while
     # at least one such bot is registered:
     #   * the non-urgent bands (HIGH/NORMAL/LOW) stop at `1 - prime_reserve_pct` of the
-    #     weight budget (75 %, instead of the historical 80 %), so the reserve is free
+    #     weight budget (80 % with the shipped 0.20 reserve, the historical gate: measured
+    #     22-23/10, a 25 % reserve (75 % gate) saturated the queue for the whole fleet
+    #     with the 6h download running, 350-450 queued against 60-90 at an 80 % gate;
+    #     the priority bots only use a small part of the reserve), so the reserve is free
     #     for the orders of the bots that trade;
     #   * one bot's PRIME grants are capped at `prime_cap_weight_per_min`; over it the
     #     request is DEMOTED to CRITICAL, never refused;
@@ -147,7 +150,7 @@ GLOBAL_DEFAULTS: dict = {
     #   * the hot series of a priority bot are served at most `prime_swr_max_stale_candles`
     #     closed candles late; at most one synchronous refill per `prime_sync_fill_window_s`
     #     and per bot, held at most `prime_sync_fill_max_s`, the rest is served stale.
-    "prime_reserve_pct": 0.25,
+    "prime_reserve_pct": 0.20,
     "prime_cap_weight_per_min": 150,
     "prime_swr_max_stale_candles": 1,
     "prime_global_cap_weight_per_min": 0,

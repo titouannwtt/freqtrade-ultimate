@@ -131,7 +131,9 @@ class TokenBucket:
 
     # Share of the weight budget the non-urgent bands (HIGH, NORMAL, LOW) must leave free
     # once a priority bot is connected. Before that the historical gate (80 %) stays.
-    DEFAULT_PRIME_RESERVE_PCT = 0.25
+    # 0.20 = the historical 80 % gate (a 25 % reserve saturated the whole fleet's queue,
+    # measured 22-23/10), still 228 weight/min kept for the priority bots' orders.
+    DEFAULT_PRIME_RESERVE_PCT = 0.20
     # Minimum gap between two PRIME grants while a 429 backoff is active.
     PRIME_BACKOFF_SPACING_S = 0.5
     LEGACY_GATE_RATIO = 0.80
