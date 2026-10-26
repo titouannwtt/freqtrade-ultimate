@@ -829,6 +829,38 @@ def _daemon_responsive(socket_path: str) -> bool:
     return _sync_ping_daemon(socket_path, timeout_s=2.0) is not None
 
 
+def _pid_file_locked(pid_path: str) -> bool:
+    """True if a live daemon holds the exclusive flock on its PID file.
+
+    The daemon takes that lock in ``_acquire_pid_lock`` and keeps it for its whole
+    life, so the kernel drops it the moment the process dies. Unlike
+    ``os.kill(pid, 0)``, this cannot be fooled by PID reuse: in a container the PID
+    numbering restarts at 1, and ``docker compose restart`` keeps ``/tmp`` — so a
+    stale PID file can name a number that now belongs to an unrelated process or
+    thread (e.g. the bot's own websocket thread).
+
+    If the file cannot be inspected for any other reason, answer True: that keeps
+    the previous behaviour (wait, never spawn a duplicate daemon).
+    """
+    try:
+        fd = os.open(pid_path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def _ensure_daemon_running(
     socket_path: str,
     lock_path: str,
@@ -873,6 +905,11 @@ def _ensure_daemon_running(
                 with open(pid_path) as f:
                     old_pid = int(f.read().strip())
                 os.kill(old_pid, 0)
+                if not _pid_file_locked(pid_path):
+                    # The number is alive, but nobody holds the daemon's PID lock:
+                    # the PID was reused by an unrelated process (typical after a
+                    # container restart that kept /tmp). No daemon is running.
+                    raise ProcessLookupError(old_pid)
                 logger.warning(
                     "daemon PID %d alive but unresponsive — waiting "
                     "instead of spawning a duplicate",
@@ -885,7 +922,7 @@ def _ensure_daemon_running(
                     time.sleep(0.5)
                 raise CacheUnavailable(f"daemon PID {old_pid} alive but never became responsive")
             except (ProcessLookupError, PermissionError, ValueError):
-                logger.info("stale PID file (PID gone) — will respawn")
+                logger.info("stale PID file (no daemon holds it) — will respawn")
                 try:
                     os.unlink(pid_path)
                 except FileNotFoundError:

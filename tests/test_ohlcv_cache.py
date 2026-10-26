@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -3519,3 +3520,88 @@ class TestReloadMarketsRefreshInterval:
         mixin._ftcache_acquire_sync.assert_called_once_with(
             priority=OhlcvCacheClient.HIGH, cost=20.0
         )
+
+
+# ------------------------------------------------------- stale PID file / PID reuse
+
+
+class TestStalePidFile:
+    """A leftover PID file must not be mistaken for a live daemon (Docker restarts).
+
+    ``docker compose restart`` keeps /tmp but restarts PID numbering, so the number in
+    the file can belong to an unrelated process. Only the daemon's flock on the file
+    proves a daemon is there.
+    """
+
+    def _spawn_env(self, tmp_path, monkeypatch):
+        import fcntl
+
+        from freqtrade.ohlcv_cache import client as client_mod
+
+        sock = str(tmp_path / "ftcache.sock")
+        pid_path = sock + ".pid"
+        monkeypatch.setattr(client_mod, "default_log_dir", lambda: tmp_path / "logs")
+        # Not responsive until "spawned"; the fake Popen flips it.
+        state = {"up": False}
+        monkeypatch.setattr(client_mod, "_socket_file_exists", lambda _p: state["up"])
+        monkeypatch.setattr(client_mod, "_daemon_responsive", lambda _p: state["up"])
+        popen = MagicMock(side_effect=lambda *a, **k: state.update(up=True))
+        monkeypatch.setattr(client_mod.subprocess, "Popen", popen)
+        return client_mod, fcntl, sock, pid_path, popen
+
+    def _run(self, client_mod, tmp_path, sock, timeout=0.6):
+        client_mod._ensure_daemon_running(
+            socket_path=sock,
+            lock_path=str(tmp_path / "ftcache.lock"),
+            log_path=str(tmp_path / "logs" / "daemon.log"),
+            spawn_timeout_s=timeout,
+            daemon_config={},
+        )
+
+    def test_pid_file_locked_false_when_nobody_holds_it(self, tmp_path):
+        from freqtrade.ohlcv_cache.client import _pid_file_locked
+
+        p = tmp_path / "x.pid"
+        p.write_text("22\n")
+        assert _pid_file_locked(str(p)) is False
+
+    def test_pid_file_locked_false_when_missing(self, tmp_path):
+        from freqtrade.ohlcv_cache.client import _pid_file_locked
+
+        assert _pid_file_locked(str(tmp_path / "nope.pid")) is False
+
+    def test_pid_file_locked_true_when_held(self, tmp_path):
+        import fcntl
+
+        from freqtrade.ohlcv_cache.client import _pid_file_locked
+
+        p = tmp_path / "x.pid"
+        p.write_text("22\n")
+        fd = os.open(str(p), os.O_WRONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert _pid_file_locked(str(p)) is True
+        finally:
+            os.close(fd)
+
+    def test_reused_pid_is_treated_as_stale_and_daemon_respawned(self, tmp_path, monkeypatch):
+        client_mod, _fcntl, sock, pid_path, popen = self._spawn_env(tmp_path, monkeypatch)
+        # Our own PID: definitely alive, but it is not a daemon (no lock held).
+        Path(pid_path).write_text(f"{os.getpid()}\n")
+
+        self._run(client_mod, tmp_path, sock)
+
+        popen.assert_called_once()
+
+    def test_live_daemon_holding_lock_is_not_duplicated(self, tmp_path, monkeypatch):
+        client_mod, fcntl, sock, pid_path, popen = self._spawn_env(tmp_path, monkeypatch)
+        Path(pid_path).write_text(f"{os.getpid()}\n")
+        fd = os.open(pid_path, os.O_WRONLY)  # stands in for the daemon's PID lock
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(CacheUnavailable, match="never became responsive"):
+                self._run(client_mod, tmp_path, sock, timeout=0.6)
+        finally:
+            os.close(fd)
+
+        popen.assert_not_called()
