@@ -267,43 +267,58 @@ These strategies are intentionally simple and **honest about their limits**. The
 
 ## The dashboard: FreqUI Ultimate
 
-Freqtrade Ultimate pairs with **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a ground-up redesign of the Freqtrade dashboard built for **running a fleet of bots from one screen**, on a desktop or a phone. Version 2 is organised around four pages (Fleet, Bot, Charts, Journal) and an optional Rust gateway that reads your bots once for every open tab.
+Freqtrade Ultimate pairs with **[FreqUI Ultimate](https://github.com/titouannwtt/frequi-ultimate)**, a fork of the Freqtrade dashboard built for **monitoring a fleet of bots from one screen**. Where stock FreqUI shows one bot on a plain table, FreqUI Ultimate gives you a multi-bot command center: side-by-side bot comparison, profit curves against benchmarks, market context, portfolio-wide risk and 14 cross-bot alert types.
 
-> **Why it belongs here:** part of FreqUI Ultimate (fleet status, exchange rate-limit health, volume and signal context, the in-browser strategy editor) is driven by **REST endpoints that only exist in Freqtrade Ultimate**: `/fleet/status`, `/rate_metrics`, `/volume_history`, `/signal_summary`, `/stratdev/*`. Point the same UI at a stock freqtrade bot and those panels stay empty. **The full experience requires this fork as the backend.**
+> **Why it belongs here:** FreqUI Ultimate's advanced panels (Risk Overview, Market Pulse, fleet status, volume and signal context, the in-browser strategy editor, Dry Replay, the per-bot configuration editor) are driven by **REST endpoints that only exist in Freqtrade Ultimate**: `/fleet/*`, `/fleetview/*`, `/stratdev/*`, `/replay/*`, `/volume_history`, `/signal_summary`. Point the same UI at a stock freqtrade bot and those panels stay empty. **The full experience requires this fork as the backend.**
 
-The screenshots below come from a live fleet; amounts are blurred.
+The screenshots below come from a synthetic demo fleet: no real account, trade or address appears in them.
 
-### Fleet
+### The multi-bot dashboard
 
-What needs you now (positions in loss, liquidation before the stop loss), capital, 30-day profit, drawdown against its limit, margin used, every bot sorted by attention and the wallet risk.
+A single screen for your whole fleet: live log console, cumulative profit against benchmarks, per-bot comparison table (open and closed P&L, win/loss, monthly profit, DCA escalations) and every open position.
 
-<img alt="FreqUI Ultimate Fleet page: alerts, KPI tiles, global profit curve, bot table and wallet risk" src=".readme_illustrations/frequi-v2-fleet-dark.png" width="100%" />
+<img alt="FreqUI Ultimate multi-bot dashboard" src=".readme_illustrations/frequi-dashboard-overview.png" width="100%" />
 
-### Global profit, realised and with open positions
+### Fleet comparison and alerts
 
-One curve for the bots you tick, over 24 h, 7 d, 30 d, 90 d, 1 year, all time or custom dates: realised profit, and the same curve including the latent P&L of open positions.
+Compare every bot head-to-head (custom columns, tags, filters, groups, drag-drop ordering, CSV export) with **14 cross-bot alert types** that flag anomalies across the whole fleet at a glance.
 
-<img alt="FreqUI Ultimate profit panel with realised and latent curves" src=".readme_illustrations/frequi-v2-profit.png" width="100%" />
+<img alt="FreqUI Ultimate fleet comparison with alerts" src=".readme_illustrations/frequi-bot-comparison-alerts.png" width="100%" />
 
-### Bot and trade chart
+<img alt="FreqUI Ultimate fleet comparison with groups" src=".readme_illustrations/frequi-bot-comparison-groups.png" width="100%" />
 
-Click any trade to open its pair chart with entry, average entry, DCA orders and the liquidation price; change the timeframe or load older candles when the trade predates the first one shown.
+### Market Pulse and portfolio Risk Overview
 
-<img alt="FreqUI Ultimate Bot page with a trade chart, positions table and trade panel" src=".readme_illustrations/frequi-v2-bot-trade.png" width="100%" />
+Context stock FreqUI never surfaces: market regime and your fleet against BTC and ETH on one side; on the other, portfolio-wide exposure, long/short split, average leverage, largest position, worst drawdown and correlation warnings.
 
-### Charts and Journal
+<p>
+<img alt="FreqUI Ultimate Market Pulse" src=".readme_illustrations/frequi-market-pulse.png" width="49%" />
+<img alt="FreqUI Ultimate Risk Overview" src=".readme_illustrations/frequi-risk-overview.png" width="49%" />
+</p>
 
-Every open position with the strategy indicators the bot computes; every closed trade grouped by day, bot or pair, with net result and win rate.
+### Analytics widgets
 
-<img alt="FreqUI Ultimate Charts page" src=".readme_illustrations/frequi-v2-charts.png" width="100%" />
+Profit and benchmarks (realized profit, latent profit and drawdown), profit distribution, activity timeline and a Monte-Carlo stress test.
 
-<img alt="FreqUI Ultimate Journal page" src=".readme_illustrations/frequi-v2-journal.png" width="100%" />
+<p>
+<img alt="FreqUI Ultimate profit and benchmarks" src=".readme_illustrations/frequi-profit-benchmarks.png" width="49%" />
+<img alt="FreqUI Ultimate profit distribution" src=".readme_illustrations/frequi-profit-distribution.png" width="49%" />
+</p>
+<p>
+<img alt="FreqUI Ultimate activity timeline" src=".readme_illustrations/frequi-activity-timeline.png" width="49%" />
+<img alt="FreqUI Ultimate stress test" src=".readme_illustrations/frequi-stress-test.png" width="49%" />
+</p>
 
-### On a phone
+### Rich context popovers
 
-<p align="center"><img alt="FreqUI Ultimate Fleet page on a phone" src=".readme_illustrations/frequi-v2-phone.png" width="300" /></p>
+Hover any metric for a context card: open positions, DCA escalations, exit reasons, price levels and more.
 
-More screenshots, the light theme and the gateway are covered in the [FreqUI Ultimate repo](https://github.com/titouannwtt/frequi-ultimate).
+<p>
+<img alt="FreqUI Ultimate open positions popover" src=".readme_illustrations/frequi-popover-open-positions.png" width="49%" />
+<img alt="FreqUI Ultimate DCA escalations popover" src=".readme_illustrations/frequi-popover-dca-escalations.png" width="49%" />
+</p>
+
+More widgets, popovers and the embedded strategy editor are shown in the [FreqUI Ultimate repo](https://github.com/titouannwtt/frequi-ultimate).
 
 ### Install it
 
