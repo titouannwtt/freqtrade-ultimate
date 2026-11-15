@@ -1,10 +1,46 @@
-# Changelog — Freqtrade Ultimate
+# Changelog: Freqtrade Ultimate
 
 All notable fork-specific changes are documented here. Upstream Freqtrade changes are tracked in [freqtrade/freqtrade releases](https://github.com/freqtrade/freqtrade/releases).
 
-Versioning convention: `v<upstream_version>-fork.<n>` — e.g. `v2026.3-fork.5` means "fork iteration 5 based on upstream 2026.3".
+Versioning convention: `v<upstream_version>-fork.<n>`, e.g. `v2026.3-fork.5` means "fork iteration 5 based on upstream 2026.3".
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [v2026.6-fork.8] (2026-11-15)
+
+Release covering 2026-08-04 to 2026-11-15. The detailed sections previously listed under [Unreleased] (dashboard performance at fleet scale, upstream 2026.7 features ported, position integrity on a shared exchange account, upstream sync tracking) belong to this release. The "Branding & documentation" section already shipped with v2026.3-fork.6.
+
+### Shared cache and rate limits
+- PRIME priority band for live trading calls (opt-in `shared_ohlcv_cache.priority_bot`), entry order book and leverage/margin calls sent ahead for priority bots, `shared_ohlcv_cache.hot_timeframes`, NORMAL anti-starvation reserve, single shared tickers download during a backoff.
+- Markets refresh and local fallback limiter no longer feed 429 storms; partial candles detected and repaired (`scripts/repair_partial_candles.py`, `--apply` requires `--backup-dir`); millisecond cache files no longer read as 1970.
+- Daemon: bounded SIGTERM shutdown (`FTCACHE_SHUTDOWN_GRACE_S`), no more deleted-but-open log growth, client reconnect on bare `OSError`, orjson serialization, `served_from_cache_pct`, per-address positions and balances, grouped and throttled warnings. Bots can no longer hang on shutdown (bounded local limiter, exchange loop workers released).
+
+### Order handling and shared wallets
+- No fabricated orphans or adopted orders on a netted wallet; order ownership fingerprints (exchanges supporting client order ids) and read-only `freqtrade position-audit`.
+- Shared-wallet exit guard, exit minimums on the raw exchange floor, fleet coordination fails closed, netting measurement (`freqtrade/netting_metrics.py`), `position_coordination.never_block_entries`, `shared_ohlcv_cache.positions_wait_on_entry_s`, external closes stamped at detection, UTC independence.
+
+### Exits, DCA and sizing
+- Opt-in `resting_exit_price` hook (resting `roi_tp` take-profit); new test failing when a deployed strategy's `confirm_trade_exit` can veto a safety exit (the core still honours the veto).
+- `max_position_stake_ratio`, capital envelope shared with the backtester (`max_position_stake_basis`), backtest stop no longer ratcheted after a DCA fill.
+
+### Pairlists
+- New `MultiMarketPairList` (hardened), optional stale-while-revalidate for `TrendRegularityFilter` and `ExtremeMoveFilter`, per-handler timing, candle capture rate metric.
+
+### API and dashboard
+- Non-blocking `/balance` (`wallet_age_s`), SQL trade counts, realised half of `/profit` cached, `GET /fleet/snapshot`, `/fleetview/profit_history`, compressed UI static files, `/stats` 500 fix, `install-ui` picks the right archive. Companion FreqUI Ultimate is now v2.2.0 (classic multi-bot dashboard).
+
+### Replay
+- Causal pairlist replay by default (`--static-pairlist`), liquidation simulation (per-pair caps from optional `user_data/replay_leverage_caps.json`, 10x fallback), naive datetime fixes, realistic minimum notional (`replay_min_notional`), working `reset_db`, coordination forced off; `reconcile_positions` tolerance in USDC (`--dust-usd`).
+
+### Upstream
+- Partial port of freqtrade 2026.7 to 2026.8 (Bitmart removed, OHLCV cache leak fixed, `refresh_ohlcv_with_cache` takes `lookback_period`); version string still 2026.6.
+
+### Docs and repository
+- Corrected documented commands, fork-owned docs site, clone size guidance, data snapshot refresh, example configs with `process_throttle_secs` under `internals`, architecture diagrams, README FreqUI section for 2.2.0, dependency refresh aligned on upstream pins, CI lint workflow and Dependabot removed.
+
+### Detailed notes
 
 ### Dashboard performance at fleet scale (2026-08-08)
 
@@ -13,8 +49,8 @@ one. A previous pass had cut polling frequencies fourfold and changed nothing, b
 bottleneck was never the polling. Everything below is justified by a measurement, taken
 with the harness added here.
 
-**Measured on a fleet of 56 real bots.** A full page load — 10 endpoints across every bot,
-issued concurrently the way a browser does — took **11.6 s of wall time**.
+**Measured on a fleet of 56 real bots.** A full page load, 10 endpoints across every bot,
+issued concurrently the way a browser does, took **11.6 s of wall time**.
 
 | Endpoint | Before | After |
 |---|---|---|
@@ -36,14 +72,14 @@ Browser side, measured on the real static import graph:
 
 **Added**
 
-- `user_data/bench_dashboard.py` — measures wall time, tail latency and payload per
+- `user_data/bench_dashboard.py`: measures wall time, tail latency and payload per
   endpoint across the fleet concurrently, and diffs two runs. The tail matters more than
   the median: a freeze is caused by the slowest bot, not the average one.
-- `GET /fleet/snapshot` and `useFleetSnapshot` — the whole fleet in one request, from
+- `GET /fleet/snapshot` and `useFleetSnapshot`: the whole fleet in one request, from
   digests each bot pushes to the shared daemon on its own cycle. Degrades to per-bot
   polling on any of three failure modes. See `docs/fleet-snapshot.md`.
-- `useVisibleInterval` — pollers skip ticks while the tab is hidden and refresh on return.
-- `scripts/deploy_ui.sh` — replaces `assets/` wholesale instead of copying over it. The
+- `useVisibleInterval`: pollers skip ticks while the tab is hidden and refresh on return.
+- `scripts/deploy_ui.sh`: replaces `assets/` wholesale instead of copying over it. The
   served directory had accumulated 66 stale chunks and 443 MB; a browser holding a stale
   chunk reference gets served it, which looks like a code bug.
 
@@ -51,16 +87,16 @@ Browser side, measured on the real static import graph:
 
 - `/balance` no longer calls the exchange from inside a request handler, where it
   inherited the rate limiter's queue: p95 was 54 s. It serves the snapshot the trading
-  loop maintains and reports `wallet_age_s` — serving stale figures is acceptable,
+  loop maintains and reports `wallet_age_s`, serving stale figures is acceptable,
   presenting them as current is not. Median went from 20-60 ms to 6-8 ms (A/B on live bots).
 - `/balance` counted trades with `len(Trade.get_trades_proxy())`, hydrating every trade
   *and* every order for a length: 0.106 ms per order, 1.6 s on a bot with 15 000 orders.
-- `/stats` 500'd on two separate nulls — `close_profit` and `exit_reason`. It was failing
+- `/stats` 500'd on two separate nulls: `close_profit` and `exit_reason`. It was failing
   on 21 of 55 bots. The second was only found by re-measuring the fleet *after* deploying
   the first: tests confirm what you thought to check, measurement shows what you did not.
 - The local rate limiter's `acquire()` was `while True:` with no exit condition, on a
   thread `concurrent.futures` joins at interpreter exit. A cleanly shut-down bot could
-  hang forever, so its supervisor never relaunched it — a live bot was silently down for
+  hang forever, so its supervisor never relaunched it, a live bot was silently down for
   15 minutes. Now bounded, and its sleeps are capped by the remaining deadline.
 - `TRADE_SNAPSHOT` echoed its full payload at INFO: ~72 000 lines/day across 50 bots,
   which then inflated the `/logs` responses a dashboard polls.
@@ -73,7 +109,7 @@ Browser side, measured on the real static import graph:
 - Caching `/profit` (~2.8 s of fleet CPU per refresh). A TTL serves figures a client can
   prove are outdated; a content-addressed key was exact for realised profit and still
   wrong, because unrealised profit comes from live rates. The existing suite caught it.
-  Doing it right means splitting realised from unrealised — a change to money arithmetic
+  Doing it right means splitting realised from unrealised, a change to money arithmetic
   that deserves its own pass. See `docs/fleet-snapshot.md`.
 
 
@@ -85,14 +121,14 @@ Three headline items from upstream 2026.7, plus one fix the release notes do not
 
 - **OKX / MyOKX: stop-market *and* stop-limit orders** (`freqtrade/exchange/okx.py`), with the
   upstream test coverage that goes with them.
-- **FreqAI: backtest pairs with partial data availability** — pairs listed later than the
+- **FreqAI: backtest pairs with partial data availability**: pairs listed later than the
   backtest start no longer break the run (`freqai/data_kitchen.py`, `freqai/freqai_interface.py`).
-- **`_sync_pair_index`** (`optimize/backtesting.py`) — not in the release headline, but the more
+- **`_sync_pair_index`** (`optimize/backtesting.py`): not in the release headline, but the more
   consequential of the four: a dynamic pairlist that drops a pair and re-adds it later left
   `indexes[pair]` pointing at old rows, so the pair silently *replayed candles it had already
   seen*. Applied surgically rather than by file checkout, since this file carries fork changes
-  (`missing_data_pairs`, `_extract_strategy_params`, `wfa_silent` — all verified intact).
-- **`TimeRange.copy()`** — not a feature, a dependency: the new FreqAI code calls it, and a
+  (`missing_data_pairs`, `_extract_strategy_params`, `wfa_silent`, all verified intact).
+- **`TimeRange.copy()`**: not a feature, a dependency: the new FreqAI code calls it, and a
   file-by-file cherry-pick does not reveal that, so porting `data_kitchen.py` alone took the
   FreqAI suite from 7 failures to 13.
 
@@ -113,20 +149,20 @@ Three headline items from upstream 2026.7, plus one fix the release notes do not
 
 Upstream assumes one bot owns one exchange account. On Hyperliquid several bots normally
 share one netted wallet, which invalidates that assumption for every account-scoped
-endpoint — and produced two silent failure modes in production: positions running on the
+endpoint, and produced two silent failure modes in production: positions running on the
 exchange that no bot piloted (**orphans**), and books claiming positions with no
 counterpart (**phantoms**).
 
 **Added**
 
-- `freqtrade/order_identity.py` — per-bot client order ids (`0x<8-hex bot fingerprint><24 hex>`),
+- `freqtrade/order_identity.py`: per-bot client order ids (`0x<8-hex bot fingerprint><24 hex>`),
   making order ownership provable instead of inferred. Enabled on exchanges declaring
   `supports_client_order_id`; inert elsewhere.
-- `freqtrade/position_audit/` — append-only, hash-chained ledger; fleet attestation
+- `freqtrade/position_audit/`: append-only, hash-chained ledger; fleet attestation
   comparing the exchange against every bot's book; break register that opens, ages and
   closes each discrepancy. The ledger detects any alteration, reordering or deletion, and
   can rebuild the book as of a past instant.
-- `freqtrade position-audit` — read-only CLI producing a dated attestation. Reads the
+- `freqtrade position-audit`: read-only CLI producing a dated attestation. Reads the
   exchange directly rather than through the bots' shared cache, counts stopped bots as
   owners of their positions, and exits non-zero on drift so a scheduler can alert.
   Documented in `docs/position-audit.md`.
@@ -144,7 +180,7 @@ counterpart (**phantoms**).
   books claimed the full position.
 - Futures exits are capped at what the wallet actually holds. `reduceOnly` is evaluated
   against the *wallet's* net, so while siblings hold the same side there is headroom for a
-  buy-back larger than this bot's own leg — one closed a 4003 short with 6911 and left a
+  buy-back larger than this bot's own leg, one closed a 4003 short with 6911 and left a
   2908 long.
 - Positions snapshots are timestamped at capture rather than arrival, so a cached hit
   delivered instantly no longer reads as fresh.
@@ -156,9 +192,9 @@ counterpart (**phantoms**).
   default `warn`. Exits are never blocked, by design.
 
 
-### Upstream sync tracking — freqtrade 2026.7 (2026-07-31)
+### Upstream sync tracking: freqtrade 2026.7 (2026-07-31)
 
-Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/2026.7) was published 2026-07-31. This section documents the delta `2026.6..2026.7` and its impact on this fork. **No application code is changed in this tracking PR** — the sync itself must be applied as its own follow-up PR (same pattern as the previous `Merge upstream freqtrade 2026.6 (#30)`).
+Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/2026.7) was published 2026-07-31. This section documents the delta `2026.6..2026.7` and its impact on this fork. **No application code is changed in this tracking PR**, the sync itself must be applied as its own follow-up PR (same pattern as the previous `Merge upstream freqtrade 2026.6 (#30)`).
 
 **Delta size:** 277 commits, 89 files, +11 355 / −4 448.
 
@@ -180,15 +216,15 @@ Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/
 
 | File | Upstream delta | Impact on fork | Effort |
 |------|----------------|----------------|--------|
-| `freqtrade/freqtradebot.py` | 113 lines | 🔴 **Conflict** — `enter_positions()` signature changes to `enter_positions(free_trade_slots: int)`; call site in `process()` becomes `if …((free_trade_slots := self.get_free_open_trades()) > 0): self.enter_positions(free_trade_slots)`. The fork has a `_cp("entries")` probe on the line right after `self.enter_positions()`, so the merge won't auto-resolve. Also, upstream guards `order_close_notify` with `if order_obj:` in `update_trade_state()`. Custom handlers `_handle_external_close`, `_handle_liquidation`, `_coordinator.opposite_side_sibling` guard block are **unaffected** — they live in a separate branch of `handle_onexchange_order()` untouched by upstream. Manual 3-way needed on the two `enter_positions` sites and on the `order_obj` guard block. | ~20 min |
-| `freqtrade/exchange/hyperliquid.py` | +2 lines | 🟢 **Trivial** — one added line: `order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)` inside `_add_missing_trades_from_trades`. Fork's `fetch_liquidation_fills()` is a separate method, unaffected. Cherry-pick clean. | ~2 min |
-| `freqtrade/persistence/trade_model.py` | 101 lines | 🟡 **Portable but bulky** — refactors `LocalTrade.to_json()` to compute `filled_entry_orders`, `filled_exit_orders`, `open_orders_wo_sl`, `open_sl_orders`, `date_entry_fill_utc`, `stoploss_last_update_utc`, `trade_duration_s` once instead of via repeated property calls. Fork does not add fields inside `to_json` — merge should be clean but the diff is large enough to warrant a visual review. | ~10 min |
-| `freqtrade/wallets.py` | 3 lines | 🟢 **Trivial** — `if wallet.total == 0: continue` inside the `get_all_balances()` loop (paired with the "don't persist 0 balances" fix). Cherry-pick clean. | ~1 min |
-| `freqtrade/rpc/rpc.py` | +6 lines | 🟢 **Trivial** — adds `if prev_len > 0 and len(df_analyzed) == 0: raise RPCException(...)` after `trim_dataframe` in `pair_analysis` (guards against startup_candle_count trimming to empty). No fork override on this path. | ~1 min |
-| `freqtrade/rpc/telegram.py` | 1 line | 🟢 **Trivial** — help text change `/balance total` → `/balance full`. Fork's telegram customizations, if any, are elsewhere. | ~1 min |
-| `freqtrade/plugins/pairlist/AgeFilter.py`, `IPairList.py`, `StaticPairList.py` | 3 lines each | 🟢 **Trivial** — signature harmonization for the new pairlist API. Fork's `TrendRegularityFilter.py` follows the same `IPairList` shape; check it inherits the updated signature without warning after the sync. | ~5 min |
+| `freqtrade/freqtradebot.py` | 113 lines | 🔴 **Conflict**: `enter_positions()` signature changes to `enter_positions(free_trade_slots: int)`; call site in `process()` becomes `if …((free_trade_slots := self.get_free_open_trades()) > 0): self.enter_positions(free_trade_slots)`. The fork has a `_cp("entries")` probe on the line right after `self.enter_positions()`, so the merge won't auto-resolve. Also, upstream guards `order_close_notify` with `if order_obj:` in `update_trade_state()`. Custom handlers `_handle_external_close`, `_handle_liquidation`, `_coordinator.opposite_side_sibling` guard block are **unaffected**: they live in a separate branch of `handle_onexchange_order()` untouched by upstream. Manual 3-way needed on the two `enter_positions` sites and on the `order_obj` guard block. | ~20 min |
+| `freqtrade/exchange/hyperliquid.py` | +2 lines | 🟢 **Trivial**: one added line: `order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)` inside `_add_missing_trades_from_trades`. Fork's `fetch_liquidation_fills()` is a separate method, unaffected. Cherry-pick clean. | ~2 min |
+| `freqtrade/persistence/trade_model.py` | 101 lines | 🟡 **Portable but bulky**: refactors `LocalTrade.to_json()` to compute `filled_entry_orders`, `filled_exit_orders`, `open_orders_wo_sl`, `open_sl_orders`, `date_entry_fill_utc`, `stoploss_last_update_utc`, `trade_duration_s` once instead of via repeated property calls. Fork does not add fields inside `to_json`: merge should be clean but the diff is large enough to warrant a visual review. | ~10 min |
+| `freqtrade/wallets.py` | 3 lines | 🟢 **Trivial**: `if wallet.total == 0: continue` inside the `get_all_balances()` loop (paired with the "don't persist 0 balances" fix). Cherry-pick clean. | ~1 min |
+| `freqtrade/rpc/rpc.py` | +6 lines | 🟢 **Trivial**: adds `if prev_len > 0 and len(df_analyzed) == 0: raise RPCException(...)` after `trim_dataframe` in `pair_analysis` (guards against startup_candle_count trimming to empty). No fork override on this path. | ~1 min |
+| `freqtrade/rpc/telegram.py` | 1 line | 🟢 **Trivial**: help text change `/balance total` → `/balance full`. Fork's telegram customizations, if any, are elsewhere. | ~1 min |
+| `freqtrade/plugins/pairlist/AgeFilter.py`, `IPairList.py`, `StaticPairList.py` | 3 lines each | 🟢 **Trivial**: signature harmonization for the new pairlist API. Fork's `TrendRegularityFilter.py` follows the same `IPairList` shape; check it inherits the updated signature without warning after the sync. | ~5 min |
 
-**Past-conflict files (from PR #30) — NOT touched by 2026.7 → free ride:**
+**Past-conflict files (from PR #30), NOT touched by 2026.7 → free ride:**
 - `freqtrade/data/metrics.py` (both `calculate_pvalue` and `calculate_p_value` remain)
 - `freqtrade/commands/deploy_ui.py` (fork's `.tar.gz` FreqUI installer preserved)
 - `freqtrade/rpc/api_server/api_v1.py` (`API_VERSION` renumbering)
@@ -197,15 +233,15 @@ Upstream [freqtrade 2026.7](https://github.com/freqtrade/freqtrade/releases/tag/
 
 **Estimated total conflict-resolution effort:** ~40 minutes (dominated by the `enter_positions` signature change and the `trade_model.to_json` refactor visual review), vs. the ~4 hours the 2026.6 sync took.
 
-**Structural note:** the fork history is squash-style vs. upstream (`git merge-base HEAD 2026.7` returns commit `4139b0b0c` — the ancient 2017 `add signal handler for SIGINT, SIGTERM and SIGABRT` commit). `git merge 2026.7 --allow-unrelated-histories` produces ~50 add/add conflicts because every file added since 2017 registers as add/add, so **the previous sync approach must be reused**: apply the upstream diff (`git diff 2026.6..2026.7 | git apply --3way`) rather than a git-merge, then hand-resolve the ~5 real conflict sites listed above.
+**Structural note:** the fork history is squash-style vs. upstream (`git merge-base HEAD 2026.7` returns commit `4139b0b0c`, the ancient 2017 `add signal handler for SIGINT, SIGTERM and SIGABRT` commit). `git merge 2026.7 --allow-unrelated-histories` produces ~50 add/add conflicts because every file added since 2017 registers as add/add, so **the previous sync approach must be reused**: apply the upstream diff (`git diff 2026.6..2026.7 | git apply --3way`) rather than a git-merge, then hand-resolve the ~5 real conflict sites listed above.
 
-**Status update (2026-08-05) — part of this delta has already landed.** The impact table
+**Status update (2026-08-05), part of this delta has already landed.** The impact table
 above was written on 2026-08-01, before a backport pass that cherry-picked the safe fixes
 from 2026.7 / 2026.8-dev directly. Already on `main`, so the follow-up sync must skip them:
 
-- Hyperliquid `lastTradeTimestamp` (the "trivial cherry-pick" row) — done.
-- `handle_onexchange_order` no longer breaking when no order is found (`if order_obj:`) — done.
-- `wallets.py` skipping zero balances — done.
+- Hyperliquid `lastTradeTimestamp` (the "trivial cherry-pick" row), done.
+- `handle_onexchange_order` no longer breaking when no order is found (`if order_obj:`): done.
+- `wallets.py` skipping zero balances: done.
 - Plus, from the same window and not listed above: the cancel-then-replace safety fix,
   `MarginModeAlreadySet` treated as a no-op, `strip_trailing_zeros` no longer corrupting
   integers, and the `balance_includes_unrealized_pnl` chain (which fixed a real bug here:
@@ -215,7 +251,7 @@ from 2026.7 / 2026.8-dev directly. Already on `main`, so the follow-up sync must
 Still outstanding from the table: the `enter_positions(free_trade_slots)` signature change,
 the `LocalTrade.to_json` refactor, the pairlist signature harmonisation, the `rpc.py`
 empty-dataframe guard, the telegram help string, and `include funding_fees in wallet
-migration` (deliberately deferred — it only affects offline balance-curve plots).
+migration` (deliberately deferred, it only affects offline balance-curve plots).
 
 Step 4 of the plan below is obsolete: Dependabot has been removed from this repo. The
 dependency bumps it listed were applied by hand instead, aligned on the versions upstream
@@ -224,65 +260,65 @@ freqtrade pins and validates in its own CI.
 **Follow-up plan:**
 1. Merge this tracking PR (zero-risk documentation).
 2. Open a follow-up PR that applies the `2026.6..2026.7` diff via `git apply --3way`, hand-resolves the freqtradebot.py sites, runs `pytest --random-order -n auto` and the replay determinism harness, bumps the version marker to `2026.7`.
-3. Follow up on the `qtpylib` deprecation warning across the fork's strategies (`grep -r "freqtrade.vendor.qtpylib" user_data/` — expect several strategy files to need `from technical import qtpylib`).
-4. Let Dependabot flush the dep bumps (ccxt 4.5.61→4.5.68, sqlalchemy, tqdm 4.68.3→4.69.0, fastapi 0.139.0→0.139.2, ruff 0.15.18→0.15.22, mypy 2.2→2.3, filelock 3.29.7→3.31.1, ta-lib 0.6.8→0.7.1, lightgbm 4.6→4.7, numexpr 2.14.1→2.14.2, websockets 16.1→16.1.1) — six of these already have open Dependabot PRs.
+3. Follow up on the `qtpylib` deprecation warning across the fork's strategies (`grep -r "freqtrade.vendor.qtpylib" user_data/`, expect several strategy files to need `from technical import qtpylib`).
+4. Dependency bumps: Dependabot was later removed; dependencies were refreshed on upstream pins in v2026.6-fork.8.
 
-### Branding & documentation
+### Branding & documentation (shipped in v2026.3-fork.6)
 - Renamed repository from `freqtrade-fork` to `freqtrade-ultimate`.
 - Full English-only README rewrite, emphasizing Freqtrade France brand and pointing to [`docs/FEATURES.md`](docs/FEATURES.md) for full technical reference.
-- Added [`docs/FEATURES.md`](docs/FEATURES.md) — 6 543-word exhaustive technical reference of every feature added (32 features across 13 categories).
-- Added [`docs/AI_USAGE.md`](docs/AI_USAGE.md) — guidance for LLMs and AI copilots interacting with the repo.
-- Added [`LLMS.txt`](LLMS.txt) at root — `llms.txt` convention for AI indexing.
+- Added [`docs/FEATURES.md`](docs/FEATURES.md), 6 543-word exhaustive technical reference of every feature added (32 features across 13 categories).
+- Added [`docs/AI_USAGE.md`](docs/AI_USAGE.md), guidance for LLMs and AI copilots interacting with the repo.
+- Added [`LLMS.txt`](LLMS.txt) at root, `llms.txt` convention for AI indexing.
 - Added [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) rewritten for the fork.
 - Added GitHub meta: `.github/FUNDING.yml`, `.github/dependabot.yml`, `.github/workflows/lint.yml`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/{config,bug_report,feature_request}.yml`.
 
-## [v2026.3-fork.5] — Production-grade Freqtrade fork for Hyperliquid
+## [v2026.3-fork.5]: Production-grade Freqtrade fork for Hyperliquid
 
 This is the consolidated snapshot of all fork-specific features as of the v2026.3-fork.5 tag.
 
 ### Multi-bot infrastructure
-- **OHLCV Cache Daemon (`ftcache`)** — Shared candle cache across N bots, 75 % API call reduction measured with four bots. Token-bucket rate limiter with priority queue (CRITICAL > HIGH > NORMAL > LOW), feather persistence, async client with in-flight request coalescing, auto-generated `Cached{Exchange}` subclasses for 18+ exchanges.
-- **Pairlist Cache Daemon (`ftpairlists`)** — Deduplicates pairlist filter computation between bots. Pairlist refresh time on multi-bot setups: 15 min → 3 min.
-- **Position Guard + Leverage Sync** — Prevents conflicting entries when an opposite position exists for the same pair (multi-wallet), detects cross-bot leverage changes and syncs the DB.
-- **Fleet State Notifications + Auto-Restart** — Worker reports state changes (running/paused/stopped) to the daemon; startup jitter (0-4.9 s live, 5-14.9 s dry-run) prevents thundering herd; admission hold-off; `launch_bot.sh` auto-restart loop.
+- **OHLCV Cache Daemon (`ftcache`)**: Shared candle cache across N bots, 75 % API call reduction measured with four bots. Token-bucket rate limiter with priority queue (CRITICAL > HIGH > NORMAL > LOW), feather persistence, async client with in-flight request coalescing, auto-generated `Cached{Exchange}` subclasses for 18+ exchanges.
+- **Pairlist Cache Daemon (`ftpairlists`)**: Deduplicates pairlist filter computation between bots. Pairlist refresh time on multi-bot setups: 15 min → 3 min.
+- **Position Guard + Leverage Sync**: Prevents conflicting entries when an opposite position exists for the same pair (multi-wallet), detects cross-bot leverage changes and syncs the DB.
+- **Fleet State Notifications + Auto-Restart**: Worker reports state changes (running/paused/stopped) to the daemon; startup jitter (0-4.9 s live, 5-14.9 s dry-run) prevents thundering herd; admission hold-off; `launch_bot.sh` auto-restart loop.
 
 ### Hyperopt & validation
-- **PlateauSampler** — Coordinate-wise Optuna sampler; four-phase pipeline (baseline → scan → assembly → refinement); auto-budgeting `min_epochs = 1 + n_params × MIN_POINTS_PER_PARAM`; exports robust parameters directly to strategy JSON; hard validation block when epochs < budget.
-- **`--sampler` CLI flag** — Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing strategy code.
-- **Walk-Forward Analysis** (`freqtrade walk-forward`) — 2 652 lines of new code; rolling / anchored / CPCV (Combinatorial Purged Cross-Validation) modes; Monte Carlo drawdown simulation; multi-seed convergence testing; WFE (Walk-Forward Efficiency) and PBO (Probability of Backtest Overfitting); A–F verdict + interactive HTML report.
-- **Custom hyperopt loss functions** — `MoutonMeanRevHyperOptLoss` (8 weighted metrics for mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (8 weighted metrics for trend / momentum), `MyProfitDrawDownHyperOptLoss` (baseline).
-- **Hyperopt HTML report** — 6 212 lines of new code, auto-generated post-run with parameter agreement analysis and convergence chart.
-- **CLI help text** — All hyperopt options rewritten with practical guidance, per-strategy recommendations, and explicit tradeoff explanations.
+- **PlateauSampler**: Coordinate-wise Optuna sampler; four-phase pipeline (baseline → scan → assembly → refinement); auto-budgeting `min_epochs = 1 + n_params × MIN_POINTS_PER_PARAM`; exports robust parameters directly to strategy JSON; hard validation block when epochs < budget.
+- **`--sampler` CLI flag**: Switch between TPE, NSGA-II/III, CMA-ES, GP, QMC samplers without editing strategy code.
+- **Walk-Forward Analysis** (`freqtrade walk-forward`): 2 652 lines of new code; rolling / anchored / CPCV (Combinatorial Purged Cross-Validation) modes; Monte Carlo drawdown simulation; multi-seed convergence testing; WFE (Walk-Forward Efficiency) and PBO (Probability of Backtest Overfitting); A–F verdict + interactive HTML report.
+- **Custom hyperopt loss functions**: `MoutonMeanRevHyperOptLoss` (8 weighted metrics for mean-reversion / DCA), `MoutonMomentumHyperOptLoss` (8 weighted metrics for trend / momentum), `MyProfitDrawDownHyperOptLoss` (baseline).
+- **Hyperopt HTML report**: 6 212 lines of new code, auto-generated post-run with parameter agreement analysis and convergence chart.
+- **CLI help text**: All hyperopt options rewritten with practical guidance, per-strategy recommendations, and explicit tradeoff explanations.
 
 ### Hyperliquid-specific
-- **Liquidation detection** — `fetch_liquidation_fills()` interrogates user fills, detects `liquidationMarkPx` field, closes trade at liquidation price with `exit_reason=LIQUIDATION`.
-- **External close detection** — `_handle_external_close` recognizes positions closed externally (ADL or manual UI close) via wallet mismatch, closes at market with `exit_reason="external_close"`.
-- **Resilient margin / leverage handling** — DCA continues on "insufficient margin" / "decrease leverage" instead of crashing; funding fees return `float | None` for non-calculable cases; rate-limit fix `ccxt.DDoSProtection` → `(ccxt.DDoSProtection, ccxt.RateLimitExceeded)` everywhere.
-- **Local Hyperliquid historical data bundle** — 3 250+ feather files (300+ pairs × 8 timeframes including crypto indices and TradFi perpetuals).
+- **Liquidation detection**: `fetch_liquidation_fills()` interrogates user fills, detects `liquidationMarkPx` field, closes trade at liquidation price with `exit_reason=LIQUIDATION`.
+- **External close detection**: `_handle_external_close` recognizes positions closed externally (ADL or manual UI close) via wallet mismatch, closes at market with `exit_reason="external_close"`.
+- **Resilient margin / leverage handling**: DCA continues on "insufficient margin" / "decrease leverage" instead of crashing; funding fees return `float | None` for non-calculable cases; rate-limit fix `ccxt.DDoSProtection` → `(ccxt.DDoSProtection, ccxt.RateLimitExceeded)` everywhere.
+- **Local Hyperliquid historical data bundle**: 3 250+ feather files (300+ pairs × 8 timeframes including crypto indices and TradFi perpetuals).
 
 ### Pairlists & risk
-- **`TrendRegularityFilter`** — Excludes pairs with strong regular linear uptrend (high R²). Useful for short strategies. Shared cache across multi-bot.
-- **`backtest_lock_wallet`** — Disables compounding in backtests for honest equity curves.
-- **Capital withdrawal accounting** — Tracks `available = starting - withdrawal + closed_profit` semantics in REST API, Telegram `/profit`.
+- **`TrendRegularityFilter`**: Excludes pairs with strong regular linear uptrend (high R²). Useful for short strategies. Shared cache across multi-bot.
+- **`backtest_lock_wallet`**: Disables compounding in backtests for honest equity curves.
+- **Capital withdrawal accounting**: Tracks `available = starting - withdrawal + closed_profit` semantics in REST API, Telegram `/profit`.
 
 ### Observability
-- **`ExchangeMetrics`** — 230-line module with ring buffer (100K calls), 10 s buckets, top methods, recent 429s.
-- **Enriched REST API** — `/cache_status`, `/rate_metrics`, `/fleet/status`, `/fleet/events`, `/volume_history`, `/signal_summary`, `/stratdev/*`; enriched `/ping` (status: starting), `/whitelist`, `/profit`, `/balance`.
-- **Enhanced Telegram** — `LIQUIDATION` and `external_close` exit reasons surfaced; withdrawal-aware `/profit`.
+- **`ExchangeMetrics`**: 230-line module with ring buffer (100K calls), 10 s buckets, top methods, recent 429s.
+- **Enriched REST API**: `/cache_status`, `/rate_metrics`, `/fleet/status`, `/fleet/events`, `/volume_history`, `/signal_summary`, `/stratdev/*`; enriched `/ping` (status: starting), `/whitelist`, `/profit`, `/balance`.
+- **Enhanced Telegram**: `LIQUIDATION` and `external_close` exit reasons surfaced; withdrawal-aware `/profit`.
 
 ### Developer experience
-- **Strategy Dev Backend** — 4 new API files (`api_stratdev.py`, `api_stratdev_jobs.py`, `api_stratdev_editor.py`, `api_stratdev_schemas.py`); backtest reader, jobs runner, strategy editor.
-- **AI Copilot** — `CLAUDE.md` (161 lines), `.claude-tips/` (14 files, 199 trading rules from Carver, Clenow, Chan, López de Prado, Freqtrade France community), routing table.
-- **Enhanced CLI** — Practical guidance and recommendations in every option.
-- **Deploy UI URL** — `freqtrade install-ui` now targets `titouannwtt/frequi-ultimate` by default; supports `.tar.gz` artifacts in addition to `.zip`.
+- **Strategy Dev Backend**: 4 new API files (`api_stratdev.py`, `api_stratdev_jobs.py`, `api_stratdev_editor.py`, `api_stratdev_schemas.py`); backtest reader, jobs runner, strategy editor.
+- **AI Copilot**: `CLAUDE.md` (161 lines), `.claude-tips/` (14 files, 199 trading rules from Carver, Clenow, Chan, López de Prado, Freqtrade France community), routing table.
+- **Enhanced CLI**: Practical guidance and recommendations in every option.
+- **Deploy UI URL**: `freqtrade install-ui` now targets `titouannwtt/frequi-ultimate` by default; supports `.tar.gz` artifacts in addition to `.zip`.
 
 ### Resilience
-- **Startup tracer** — Phase-by-phase boot timing; logs slow phases (> 2 s); summary breakdown.
-- **Klines cache persistence** — Saves `_klines` and `_pairs_last_refresh_time` to pickle at shutdown; restores on startup if not stale.
-- **DataProvider thread safety** — Lock around `__cached_pairs` read/write; stale-candle detection throttled to once per hour.
-- **WebSocket resilience** — Staggered subscription (100 ms delay), retry with exponential backoff (max 5), separate `ExchangeClosedByUser` from `BaseError`.
-- **Connection pool** — 50 parallel HTTP connections; `create_order` retry with 5 s sleep on rate limit.
-- **SQLAlchemy pool** — `pool_size=20, max_overflow=40, pool_timeout=120`.
+- **Startup tracer**: Phase-by-phase boot timing; logs slow phases (> 2 s); summary breakdown.
+- **Klines cache persistence**: Saves `_klines` and `_pairs_last_refresh_time` to pickle at shutdown; restores on startup if not stale.
+- **DataProvider thread safety**: Lock around `__cached_pairs` read/write; stale-candle detection throttled to once per hour.
+- **WebSocket resilience**: Staggered subscription (100 ms delay), retry with exponential backoff (max 5), separate `ExchangeClosedByUser` from `BaseError`.
+- **Connection pool**: 50 parallel HTTP connections; `create_order` retry with 5 s sleep on rate limit.
+- **SQLAlchemy pool**: `pool_size=20, max_overflow=40, pool_timeout=120`.
 
 ### Critical bug fixes
 - Order date comparison: `-timedelta(days=5)` → `+timedelta(days=5)` (logic was inverted).
@@ -292,13 +328,14 @@ This is the consolidated snapshot of all fork-specific features as of the v2026.
 - `_exit_lock`: `Lock` → `RLock` (deadlock prevention).
 
 ### Infrastructure scripts
-- `launch_bot.sh` — Auto-restart loop with 60 s countdown, thundering-herd staggering.
-- `launch_dashboard.sh` — UI-only mode for the dashboard.
-- `download.sh` — Pulls last 10 days of candles for all configs.
+- `launch_bot.sh`: Auto-restart loop with 60 s countdown, thundering-herd staggering.
+- `launch_dashboard.sh`: UI-only mode for the dashboard.
+- `download.sh`: Pulls last 10 days of candles for all configs.
 
 ---
 
 For the complete, deep technical reference of every feature, see [`docs/FEATURES.md`](docs/FEATURES.md).
 
-[Unreleased]: https://github.com/titouannwtt/freqtrade-ultimate/compare/v2026.3-fork.5...HEAD
+[Unreleased]: https://github.com/titouannwtt/freqtrade-ultimate/compare/v2026.6-fork.8...HEAD
+[v2026.6-fork.8]: https://github.com/titouannwtt/freqtrade-ultimate/releases/tag/v2026.6-fork.8
 [v2026.3-fork.5]: https://github.com/titouannwtt/freqtrade-ultimate/releases/tag/v2026.3-fork.5
