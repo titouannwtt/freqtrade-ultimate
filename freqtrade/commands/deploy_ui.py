@@ -59,6 +59,7 @@ def download_and_install_ui(dest_folder: Path, dl_url: str, version: str):
                 if not destfile.is_relative_to(dest_folder):
                     raise OperationalException(f"Dangerous path in zipfile: {fn.filename}")
                 with zf.open(fn) as x:
+                    destfile.parent.mkdir(parents=True, exist_ok=True)
                     if fn.is_dir():
                         destfile.mkdir(exist_ok=True)
                     else:
