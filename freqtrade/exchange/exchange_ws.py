@@ -131,6 +131,35 @@ class ExchangeWS:
             last_refresh = self._klines_last_refresh.get((pair, timeframe, candle_type), 0)
         return ohlcvs, last_refresh
 
+    def seed_ohlcv(
+        self, pair: str, timeframe: str, candle_type: CandleType, ticks: list[list]
+    ) -> None:
+        """
+        Pre-seed CCXT Pro ArrayCacheByTimestamp with the tail candles from REST/ftcache
+        so that the first candle boundary after startup or reload_config already has the
+        previous candle in the WS buffer.
+        """
+        if not ticks:
+            return
+        try:
+            from ccxt.async_support.base.ws.cache import ArrayCacheByTimestamp
+            with self._state_lock:
+                if pair not in self._ccxt_object.ohlcvs:
+                    self._ccxt_object.ohlcvs[pair] = {}
+                if timeframe not in self._ccxt_object.ohlcvs[pair]:
+                    limit = self._ccxt_object.safe_integer(
+                        self._ccxt_object.options, "OHLCVLimit", 1000
+                    )
+                    self._ccxt_object.ohlcvs[pair][timeframe] = ArrayCacheByTimestamp(limit)
+                stored = self._ccxt_object.ohlcvs[pair][timeframe]
+                for row in ticks[-3:]:
+                    if isinstance(row, (list, tuple)) and len(row) >= 6:
+                        stored.append(list(row[:6]))
+                if (pair, timeframe, candle_type) not in self._klines_last_refresh:
+                    self._klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
+        except Exception as e:
+            logger.debug(f"Could not seed WS ohlcv for {pair}, {timeframe}: {e}")
+
     def cleanup_expired(self) -> None:
         """
         Remove pairs from watchlist if they've not been requested within
