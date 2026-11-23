@@ -1228,6 +1228,13 @@ class BotRegistry:
             if b.priority_bot and (exchange is None or b.exchange == exchange)
         )
 
+    def live_count(self, exchange: str | None = None) -> int:
+        return sum(
+            1
+            for b in self._bots.values()
+            if not b.dry_run and (exchange is None or b.exchange == exchange)
+        )
+
     def heartbeat(self, conn_id: int) -> None:
         bot_id = self._conn_to_bot.get(conn_id)
         if bot_id is not None:
@@ -2076,7 +2083,7 @@ class Daemon:
             # stop consuming the scarce IP fetch budget entirely. Refreshes for
             # pairs the fleet holds an OPEN POSITION on get HIGH priority so the
             # limited budget keeps position-bearing series the freshest.
-            if not is_dry:
+            if not is_dry or self.registry.live_count(exchange) == 0:
                 # Builder-dex (HIP-3) pairs are niche: each is the sole concern of
                 # one dedicated live bot, they are few, and only live bots drive
                 # these refreshes — so the extra budget is negligible. Served stale
