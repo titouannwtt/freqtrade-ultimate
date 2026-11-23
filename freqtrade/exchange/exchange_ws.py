@@ -142,7 +142,8 @@ class ExchangeWS:
                 _, timeframe, _ = p
                 timeframe_s = timeframe_to_seconds(timeframe)
                 last_refresh = self._klines_last_request.get(p, 0)
-                if last_refresh > 0 and (dt_ts() - last_refresh) > ((timeframe_s + 20) * 1000):
+                expiry_s = max(timeframe_s * 3, 1800)
+                if last_refresh > 0 and (dt_ts() - last_refresh) > (expiry_s * 1000):
                     logger.info(f"Removing {p} from websocket watchlist.")
                     self._klines_watching.discard(p)
                     # Pop history to avoid getting stale data
@@ -208,6 +209,8 @@ class ExchangeWS:
             # Network errors are common on shutdown so we can ignore them.
             # It's a network error - which most likely means that the connection is already closed.
             logger.debug("Network error during unwatch for %s, %s: %s", pair, timeframe, e)
+        except (asyncio.CancelledError, RuntimeError) as e:
+            logger.debug("Cancelled/closed loop during unwatch for %s, %s: %s", pair, timeframe, e)
         except Exception:
             logger.exception(f"Exception in _unwatch_ohlcv for {pair}, {timeframe},")
 
