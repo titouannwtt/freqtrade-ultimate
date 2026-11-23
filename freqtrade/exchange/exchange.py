@@ -3016,21 +3016,43 @@ class Exchange:
             last_refresh_time = int(last_refresh_time)
             half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
 
+            cached_last_ts = self._pairs_last_refresh_time.get(
+                (pair, timeframe, candle_type), 0
+            )
+            if (pair, timeframe, candle_type) in self._klines:
+                cached_df = self._klines[(pair, timeframe, candle_type)]
+                if not cached_df.empty and "date" in cached_df:
+                    df_ts = int(cached_df["date"].values[-1].astype("datetime64[ms]").astype("int64"))
+                    if df_ts > cached_last_ts:
+                        cached_last_ts = df_ts
+                        self._pairs_last_refresh_time[(pair, timeframe, candle_type)] = df_ts
+
+            has_closed_cache = cached_last_ts >= prev_candle_ts
+
             if (
                 candles
                 and (
                     (len(candles) > 1 and candles[-1][0] >= prev_candle_ts)
                     # Edgecase on reconnect, where 1 candle is available but it's the current one
                     or (len(candles) == 1 and candles[-1][0] < candle_ts)
+                    # Single-candle streams (e.g. Hyperliquid WS) where cache already has the previous closed candle
+                    or (
+                        len(candles) == 1
+                        and candles[-1][0] >= candle_ts
+                        and has_closed_cache
+                    )
                 )
-                and last_refresh_time >= half_candle
+                and (last_refresh_time >= half_candle or has_closed_cache)
+            ) or (
+                has_closed_cache
+                and (pair, timeframe, candle_type) in self._exchange_ws._klines_watching
             ):
                 # Usable result, candle contains the previous candle.
                 # Also, we check if the last refresh time is no more than half the candle ago.
                 logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
 
                 return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
-            log = logger.debug if last_refresh_time == 0 else logger.info
+            log = logger.debug
             log(
                 f"Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
                 f"{candle_ts < last_refresh_time}, {candle_ts}, {last_refresh_time}, "
@@ -3178,8 +3200,17 @@ class Exchange:
                 ticks = []
         # keeping last candle time as last refreshed time of the pair
         if ticks and cache:
-            idx = -2 if drop_incomplete and len(ticks) > 1 else -1
-            self._pairs_last_refresh_time[(pair, timeframe, c_type)] = ticks[idx][0]
+            candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
+            if not (drop_incomplete and len(ticks) == 1 and ticks[0][0] >= candle_ts):
+                idx = -2 if drop_incomplete and len(ticks) > 1 else -1
+                last_tick_ts = ticks[idx][0]
+                prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
+                if len(ticks) > 1:
+                    if self._can_use_websocket(self._exchange_ws, pair, timeframe, c_type):
+                        self._exchange_ws.seed_ohlcv(pair, timeframe, c_type, ticks)
+                    if last_tick_ts < prev_candle_ts:
+                        last_tick_ts = prev_candle_ts
+                self._pairs_last_refresh_time[(pair, timeframe, c_type)] = last_tick_ts
         has_cache = cache and (pair, timeframe, c_type) in self._klines
         # in case of existing cache, fill_missing happens after concatenation
         ohlcv_df = ohlcv_to_dataframe(
