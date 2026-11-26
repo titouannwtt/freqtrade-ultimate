@@ -1419,7 +1419,7 @@ class Daemon:
         self._swr_enabled = bool(global_cfg.get("swr_enabled", True))
         self._swr_max_stale_candles = int(global_cfg.get("swr_max_stale_candles", 8))
         self._swr_dry_max_stale_candles = int(global_cfg.get("swr_dry_max_stale_candles", 20))
-        self._swr_max_missing_tail_candles = int(global_cfg.get("swr_max_missing_tail_candles", 4))
+        self._swr_max_missing_tail_candles = int(global_cfg.get("swr_max_missing_tail_candles", 16))
         self._swr_min_stale_ms = int(global_cfg.get("swr_min_stale_ms", 60000))
         # Priority bots (``shared_ohlcv_cache.priority_bot``): see TokenBucket.PRIME.
         self._prime_reserve_pct = float(
